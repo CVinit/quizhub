@@ -1,0 +1,68 @@
+# ===== Python / uv =====
+# 虚拟环境（本地依赖，由 uv sync 重建）
+.venv/
+venv/
+env/
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+# 测试 / 类型检查缓存
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+# 打包元数据
+*.egg-info/
+.eggs/
+# uv 本地产物
+.python-version
+
+# ===== 前端 (Vue + Vite) =====
+node_modules/
+dist/
+dist-ssr/
+*.local
+# Vite / 构建缓存
+.vite/
+.vite-cache/
+# 编辑器
+.vscode/*
+!.vscode/extensions.json
+.idea/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# ===== 运行时数据 / 日志 =====
+*.log
+logs/
+# SQLite 运行时临时文件（仅保留主 .db，避免破坏一致性；WAL/SHM 随进程生成）
+backend/data/*.db-wal
+backend/data/*.db-shm
+backend/data/*.db-journal
+# 用户上传文件目录（运行时生成，保留空目录结构）
+!backend/data/files/
+
+# ===== 敏感配置 =====
+.env
+.env.*
+!.env.example
+# 密钥 / 证书
+*.pem
+*.key
+*.p12
+*.crt
+
+# ===== 系统 / 编辑器杂项 =====
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ===== Claude Code 本地配置 =====
+.claude/settings.local.json
+
+# ===== 顶层非项目资料（与代码无关的复习文档）=====
+/基础班知识总结与复习资料.docx
+/基础班知识总结与复习资料.xlsx

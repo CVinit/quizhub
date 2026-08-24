@@ -1,0 +1,53 @@
+"""统计预聚合表。
+
+每日刷新；排行查询命中预聚合表。dimension 标记分组在排行中的维度角色。
+"""
+from __future__ import annotations
+
+from sqlalchemy import Float, Integer, String, UniqueConstraint
+from sqlalchemy.orm import Mapped, mapped_column
+
+from app.models.base import PKMixin
+
+STATS_DIMENSION = ("部门", "专业", "班级", "自定义", "个人汇聚")
+
+
+class StatsUserDaily(PKMixin):
+    __tablename__ = "stats_user_daily"
+    __table_args__ = (
+        UniqueConstraint("user_id", "date", "group_id", name="uq_user_daily"),
+    )
+
+    user_id: Mapped[int] = mapped_column(Integer, index=True, nullable=False)
+    date: Mapped[str] = mapped_column(String, nullable=False, index=True)  # YYYY-MM-DD
+    group_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+    answer_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    correct_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    wrong_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    exam_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    exam_score_sum: Mapped[float] = mapped_column(Float, default=0, nullable=False)
+    exam_pass_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+
+
+class StatsGroupDaily(PKMixin):
+    __tablename__ = "stats_group_daily"
+    __table_args__ = (
+        UniqueConstraint("group_id", "date", "dimension", name="uq_group_daily"),
+    )
+
+    group_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+    date: Mapped[str] = mapped_column(String, nullable=False, index=True)
+    dimension: Mapped[str] = mapped_column(String, nullable=False)  # STATS_DIMENSION
+    user_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    answer_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    correct_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    completion_rate: Mapped[float] = mapped_column(Float, default=0, nullable=False)  # 百分比*100
+    exam_avg_score: Mapped[float] = mapped_column(Float, default=0, nullable=False)
+
+
+class RefreshJob(PKMixin):
+    __tablename__ = "refresh_jobs"
+
+    type: Mapped[str] = mapped_column(String, nullable=False)
+    last_run_at: Mapped[str | None] = mapped_column(String, nullable=True)
+    status: Mapped[str] = mapped_column(String, default="ok", nullable=False)

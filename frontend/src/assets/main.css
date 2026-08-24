@@ -1,0 +1,128 @@
+:root {
+  /* 联通红默认主题（管理员可在系统设置中覆盖） */
+  --brand-primary: #e60012;
+  --brand-primary-light: #eb3341;
+  --brand-primary-dark: #b8000e;
+  --brand-primary-light-9: #fce6e7;
+
+  --el-color-primary: var(--brand-primary);
+  --el-color-primary-light-1: #e81a2a;
+  --el-color-primary-light-2: #eb3341;
+  --el-color-primary-light-3: #ee4c59;
+  --el-color-primary-light-4: #f06671;
+  --el-color-primary-light-5: #f28088;
+  --el-color-primary-light-6: #f599a0;
+  --el-color-primary-light-7: #f8b2b8;
+  --el-color-primary-light-8: #faccd0;
+  --el-color-primary-light-9: #fce6e7;
+  --el-color-primary-dark-2: #cf0010;
+}
+
+body {
+  margin: 0;
+  font-family: 'PingFang SC', 'Microsoft YaHei', Helvetica, Arial, sans-serif;
+  background: #f5f7fa;
+  color: #303133;
+}
+
+a { text-decoration: none; }
+
+.el-button--primary {
+  --el-button-bg-color: var(--brand-primary);
+  --el-button-border-color: var(--brand-primary);
+  --el-button-hover-bg-color: var(--brand-primary-light);
+  --el-button-hover-border-color: var(--brand-primary-light);
+  --el-button-active-bg-color: var(--brand-primary-dark);
+  --el-button-active-border-color: var(--brand-primary-dark);
+}
+
+/* 主题色覆盖：Element Plus 主色由 CSS 变量驱动 */
+:root {
+  --el-color-primary: var(--brand-primary);
+}
+
+/* ========== 响应式断点：mobile <768 / tablet 768-1199 / desktop >=1200 ========== */
+
+/* 平板及以下：收紧布局内边距 */
+@media (max-width: 1199px) {
+  /* 由各布局组件自行处理侧栏折叠，这里仅提供全局字号/间距微调 */
+}
+
+/* 手机端全局适配 */
+@media (max-width: 767px) {
+  body {
+    font-size: 14px;
+    -webkit-text-size-adjust: 100%;
+  }
+  /* 主内容区在布局组件中已减边距，这里兜底防止溢出 */
+  .el-main { padding: 12px !important; }
+
+  /* 弹窗：宽屏 680px/640px 在手机端撑满并贴近顶部，便于长表单滚动 */
+  .el-overlay-dialog {
+    display: flex;
+    align-items: flex-start;
+    overflow-y: auto;
+  }
+  .el-dialog {
+    width: 92% !important;
+    max-width: none !important;
+    margin: 8px auto !important;
+  }
+  .el-dialog .el-dialog__body {
+    max-height: 70vh;
+    overflow-y: auto;
+  }
+  /* 全屏确认框（交卷等）：靠下显示并自适应 */
+  .el-message-box {
+    width: 86% !important;
+  }
+
+  /* 分页器：手机端只保留 prev/next，避免数字按钮挤占 */
+  .el-pagination {
+    justify-content: center !important;
+    flex-wrap: wrap;
+  }
+  .el-pagination .el-pager { display: none; }
+
+  /* 表格固定列在小屏产生横向滚动条体验差，统一允许横向滚动 */
+  .el-table { width: 100% !important; }
+
+  /* 触控目标：按钮、菜单项最小可点区域 */
+  .el-button { min-height: 36px; }
+  .el-menu-item { min-height: 44px; line-height: 44px; }
+
+  /* 日期范围选择器双 input 在手机端会折行，允许换行 */
+  .el-date-editor.el-input__wrapper,
+  .el-date-editor--datetime { width: 100% !important; }
+
+  /* 卡片内边距收紧 */
+  .el-card__body { padding: 12px; }
+  .el-card { border-radius: 8px; }
+}
+
+/* 手机端：管理端表格 → 卡片化。用法：给 el-table 外层加 class="table-to-cards"
+   并在 td/列上通过 data-label 暴露表头（见各管理端页面）。这里仅做基础收窄，
+   真正的卡片化由各页面 v-if(isMobile) 渲染卡片列表实现，保持表格语义。 */
+@media (max-width: 767px) {
+  .mobile-table-hidden { display: none !important; }
+  .mobile-card-list { display: flex; flex-direction: column; gap: 12px; }
+  .mobile-card-list .mc {
+    background: #fff; border: 1px solid #ebeef5; border-radius: 8px;
+    padding: 12px 14px; word-break: break-all;
+  }
+  .mobile-card-list .mc-row {
+    display: flex; justify-content: space-between; align-items: center;
+    gap: 8px; font-size: 13px;
+  }
+  .mobile-card-list .mc-row + .mc-row { margin-top: 6px; }
+  .mobile-card-list .mc-label { color: #909399; flex-shrink: 0; }
+  .mobile-card-list .mc-actions { margin-top: 10px; display: flex; gap: 8px; flex-wrap: wrap; }
+  .mobile-card-list .mc-title { font-weight: 600; font-size: 14px; margin-bottom: 8px; word-break: break-all; }
+}
+
+/* 工具栏：手机端换行堆叠 */
+@media (max-width: 767px) {
+  .toolbar { flex-wrap: wrap; gap: 8px; }
+  .toolbar .filters { flex-wrap: wrap; gap: 8px; }
+  .toolbar .title { width: 100%; }
+}
