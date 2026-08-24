@@ -27,7 +27,9 @@ quizhub/
 ├── frontend/            # Vue3 + TS 前端
 │   └── src/              # views / layouts / components / api / stores / composables
 ├── docs/                # 需求 / 架构 / UI-UX / 任务清单 / 部署 / 审计等文档
-└── start.sh             # 一键启动（构建前端 → 初始化 DB → 起后端）
+├── start.sh              # 一键启动（Linux/macOS，bash）
+├── start.bat             # 一键启动（Windows CMD）
+└── start.ps1             # 一键启动（Windows PowerShell）
 ```
 
 ## 快速开始
@@ -41,14 +43,20 @@ quizhub/
 
 ### 一键启动
 
+**Linux / macOS**（bash）：
 ```bash
 ./start.sh
 ```
+
+**Windows**：
+- PowerShell：`./start.ps1`（若提示执行策略受限，先 `Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass`）
+- CMD：双击 `start.bat` 或命令行运行 `start.bat`
 
 启动后访问 http://localhost:8000
 
 ### 手动分步启动
 
+**Linux / macOS**：
 ```bash
 # 前端：安装依赖并构建（后端托管 dist）
 cd frontend && pnpm install && pnpm build
@@ -59,6 +67,34 @@ cd backend && uv sync && uv run python scripts/init_db.py
 # 启动后端
 cd backend && uv run uvicorn app.main:app --host 0.0.0.0 --port 8000
 ```
+
+**Windows（PowerShell）**：
+```powershell
+# 前端：安装依赖并构建（后端托管 dist）
+cd frontend; pnpm install; pnpm build
+
+# 后端：安装依赖并初始化数据库
+cd backend; uv sync; uv run python scripts/init_db.py
+
+# 启动后端
+cd backend; uv run uvicorn app.main:app --host 0.0.0.0 --port 8000
+```
+
+### Windows 环境准备
+
+| 工具 | 安装方式 |
+| --- | --- |
+| Python 3.10+ | [python.org](https://python.org)（安装时勾选 Add to PATH） |
+| uv | `powershell -c "irm https://astral.sh/uv/install.ps1 \| iex"` |
+| Node.js 18+ | [nodejs.org](https://nodejs.org) |
+| pnpm | `npm install -g pnpm` |
+| Git | [git-scm.com](https://git-scm.com)（顺带获得 Git Bash，可直接跑 `start.sh`） |
+
+Windows 注意点：
+- `uvicorn[standard]` 在 Windows 使用 ProactorEventLoop，本项目无依赖 `fork` 的库，功能正常。
+- SQLite WAL 模式在 Windows 正常工作，`training.db-wal`/`-shm` 自动生成，无需配置。
+- 若 8000 端口被占用，改 `--port 8001`。
+- 生产密钥环境变量设置：PowerShell `$env:TRAINING_SECRET_KEY="..."`；CMD `set TRAINING_SECRET_KEY=...`。
 
 ## 默认账号
 
