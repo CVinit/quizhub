@@ -1,16 +1,17 @@
 """练习与题目状态 schema。"""
+
 from __future__ import annotations
 
-from typing import Any, Optional
+from typing import Any
 
 from pydantic import BaseModel, Field
 
 
 class PracticeStartIn(BaseModel):
     mode: str  # sequence/random/type/wrong/mark/bank
-    type: Optional[str] = None  # 按题型时传题型名
-    limit: Optional[int] = Field(None, ge=1, le=500)
-    bank_id: Optional[int] = None  # 限定某题库范围内练习
+    type: str | None = None  # 按题型时传题型名
+    limit: int | None = Field(None, ge=1, le=500)
+    bank_id: int | None = None  # 限定某题库范围内练习
 
 
 class PracticeAnswerIn(BaseModel):

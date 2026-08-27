@@ -10,6 +10,7 @@
 源文档中缺失的 解析/难度/标签/分值/分组ID 列分别填空/2/空/2/空。
 表头复用 app.utils.excel.HEADERS，确保与下载的导入模板完全一致。
 """
+
 from __future__ import annotations
 
 import re
@@ -47,9 +48,8 @@ def parse_docx(path: Path) -> dict[str, list[dict]]:
 
     def flush() -> None:
         nonlocal cur_q
-        if cur_q and cur_sheet:
-            if cur_q.get("question") and cur_q.get("answer_raw") is not None:
-                sections[cur_sheet].append(cur_q)
+        if cur_q and cur_sheet and cur_q.get("question") and cur_q.get("answer_raw") is not None:
+            sections[cur_sheet].append(cur_q)
         cur_q = None
 
     for line in lines:
@@ -73,8 +73,7 @@ def parse_docx(path: Path) -> dict[str, list[dict]]:
 
         if Q_RE.match(line):
             flush()
-            cur_q = {"question": Q_RE.match(line).group(1).strip(), "options": [],
-                     "answer_raw": None}
+            cur_q = {"question": Q_RE.match(line).group(1).strip(), "options": [], "answer_raw": None}
             continue
 
         if cur_q is not None:

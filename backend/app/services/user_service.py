@@ -1,18 +1,18 @@
 """用户管理业务。"""
+
 from __future__ import annotations
 
 import secrets
 import string
 
 from fastapi import HTTPException, status
-from sqlalchemy import or_, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 from app.core.security import hash_password
 from app.models.group import Group, UserGroup
 from app.models.user import User
 from app.services.audit_service import log as audit_log
-
 
 # 角色与状态白名单：管理员新增/导入用户时校验，防伪造非法角色
 ROLES = ("user", "dept_admin", "super_admin")
@@ -26,10 +26,20 @@ def _gen_password(length: int = 12) -> str:
 
 
 def list_users(
-    db: Session, page: int = 1, page_size: int = 20,
-    keyword: str | None = None, role: str | None = None, status_: str | None = None,
+    db: Session,
+    page: int = 1,
+    page_size: int = 20,
+    keyword: str | None = None,
+    role: str | None = None,
+    status_: str | None = None,
     group_id: int | None = None,
+    scope: set[int] | None = None,
 ) -> tuple[list, int]:
+    """用户列表。
+
+    scope 为部门管理员数据范围（分组 id 集合）：非空时仅返回 dept_group_id
+    或任一 user_groups 落在该范围内的用户；为 None（super_admin）时不过滤。
+    """
     stmt = select(User)
     if keyword:
         kw = f"%{keyword}%"
@@ -40,25 +50,45 @@ def list_users(
         stmt = stmt.where(User.status == status_)
     if group_id:
         stmt = stmt.join(UserGroup, UserGroup.user_id == User.id).where(UserGroup.group_id == group_id)
-    total = db.execute(select(User.id).select_from(stmt.subquery())).all()
-    total = len(total)
-    rows = db.execute(
-        stmt.order_by(User.id.desc()).offset((page - 1) * page_size).limit(page_size)
-    ).scalars().all()
+    if scope is not None:
+        # 部门管理员范围：dept_group_id 在子树内，或经 user_groups 关联到子树内
+        in_scope_ids = {r[0] for r in db.execute(select(UserGroup.user_id).where(UserGroup.group_id.in_(scope))).all()}
+        stmt = stmt.where(
+            or_(
+                User.dept_group_id.in_(scope),
+                User.id.in_(in_scope_ids) if in_scope_ids else User.id < 0,
+            )
+        )
+    total = db.execute(select(func.count()).select_from(stmt.subquery())).scalar() or 0
+    rows = db.execute(stmt.order_by(User.id.desc()).offset((page - 1) * page_size).limit(page_size)).scalars().all()
     items = []
     for u in rows:
-        gids = [ug.group_id for ug in db.execute(
-            select(UserGroup.group_id).where(UserGroup.user_id == u.id)
-        ).all()]
-        items.append({
-            "id": u.id, "email": u.email, "name": u.name, "role": u.role,
-            "status": u.status, "email_verified": u.email_verified,
-            "dept_group_id": u.dept_group_id, "groups": gids,
-        })
+        gids = [ug.group_id for ug in db.execute(select(UserGroup.group_id).where(UserGroup.user_id == u.id)).all()]
+        items.append(
+            {
+                "id": u.id,
+                "email": u.email,
+                "name": u.name,
+                "role": u.role,
+                "status": u.status,
+                "email_verified": u.email_verified,
+                "dept_group_id": u.dept_group_id,
+                "groups": gids,
+            }
+        )
     return items, total
 
 
-def approve(db: Session, actor: int, user_id: int) -> User:
+def _check_scope(db: Session, user_id: int, scope: set[int] | None) -> None:
+    """部门管理员操作前校验目标用户落在其数据范围内，否则 403。"""
+    from app.core.deps import user_in_scope
+
+    if not user_in_scope(db, user_id, scope):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "无权操作该用户")
+
+
+def approve(db: Session, actor: int, user_id: int, scope: set[int] | None = None) -> User:
+    _check_scope(db, user_id, scope)
     u = _get(db, user_id)
     if u.status != "pending":
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "该用户非待审批状态")
@@ -69,7 +99,8 @@ def approve(db: Session, actor: int, user_id: int) -> User:
     return u
 
 
-def set_status(db: Session, actor: int, user_id: int, enabled: bool) -> User:
+def set_status(db: Session, actor: int, user_id: int, enabled: bool, scope: set[int] | None = None) -> User:
+    _check_scope(db, user_id, scope)
     u = _get(db, user_id)
     u.status = "active" if enabled else "disabled"
     db.commit()
@@ -78,11 +109,19 @@ def set_status(db: Session, actor: int, user_id: int, enabled: bool) -> User:
     return u
 
 
-def reset_password(db: Session, actor: int, user_id: int, new_password: str | None = None) -> str:
+def reset_password(
+    db: Session,
+    actor: int,
+    user_id: int,
+    new_password: str | None = None,
+    scope: set[int] | None = None,
+) -> str:
     """重置密码。未提供 new_password 时生成随机强密码（12 位字母数字）。
 
     不再恒用弱口令 "123456"；返回生成的新密码供管理员告知用户，并强制用户首次登录修改。
+    超级管理员不受 scope 限制；部门管理员仅可重置本部门子树内用户。
     """
+    _check_scope(db, user_id, scope)
     u = _get(db, user_id)
     if not new_password:
         alphabet = string.ascii_letters + string.digits
@@ -95,8 +134,17 @@ def reset_password(db: Session, actor: int, user_id: int, new_password: str | No
     return new_password
 
 
-def update_user(db: Session, actor: int, user_id: int, name: str | None, role: str | None, dept_group_id: int | None) -> User:
+def update_user(
+    db: Session,
+    actor: int,
+    user_id: int,
+    name: str | None,
+    role: str | None,
+    dept_group_id: int | None,
+    scope: set[int] | None = None,
+) -> User:
     """更新用户。角色变更仅超级管理员可执行；部门管理员不得修改角色。"""
+    _check_scope(db, user_id, scope)
     u = _get(db, user_id)
     changes: dict = {}
     if name is not None:
@@ -110,6 +158,9 @@ def update_user(db: Session, actor: int, user_id: int, name: str | None, role: s
             u.role = role
             changes["role"] = role
     if dept_group_id is not None:
+        # 部门管理员只能把目标用户迁到自己范围内的分组
+        if scope is not None and dept_group_id not in scope:
+            raise HTTPException(status.HTTP_403_FORBIDDEN, "无权将用户迁移到该部门")
         u.dept_group_id = dept_group_id
         changes["dept_group_id"] = dept_group_id
     db.commit()
@@ -119,8 +170,20 @@ def update_user(db: Session, actor: int, user_id: int, name: str | None, role: s
     return u
 
 
-def assign_groups(db: Session, actor: int, user_id: int, group_ids: list[int]) -> None:
+def assign_groups(
+    db: Session,
+    actor: int,
+    user_id: int,
+    group_ids: list[int],
+    scope: set[int] | None = None,
+) -> None:
+    _check_scope(db, user_id, scope)
     u = _get(db, user_id)
+    # 部门管理员只能分配其范围内的分组
+    if scope is not None:
+        for gid in group_ids:
+            if gid not in scope:
+                raise HTTPException(status.HTTP_403_FORBIDDEN, "无权分配该分组")
     db.execute(UserGroup.__table__.delete().where(UserGroup.user_id == user_id))
     for gid in group_ids:
         db.add(UserGroup(user_id=user_id, group_id=gid))
@@ -145,8 +208,14 @@ def _normalize_group_ids(db: Session, group_ids: list[int] | None) -> list[int]:
 
 
 def create_user(
-    db: Session, actor: int, email: str, name: str = "", role: str = "user",
-    password: str | None = None, status_: str = "active", group_ids: list[int] | None = None,
+    db: Session,
+    actor: int,
+    email: str,
+    name: str = "",
+    role: str = "user",
+    password: str | None = None,
+    status_: str = "active",
+    group_ids: list[int] | None = None,
 ) -> tuple[User, str]:
     """管理员手动新增用户。
 
@@ -189,14 +258,26 @@ def create_user(
         db.add(UserGroup(user_id=user.id, group_id=gid))
     db.commit()
     db.refresh(user)
-    audit_log(db, actor, "user.create", "user", user.id, {
-        "email": user.email, "role": role, "status": status_, "group_ids": gids,
-    })
+    audit_log(
+        db,
+        actor,
+        "user.create",
+        "user",
+        user.id,
+        {
+            "email": user.email,
+            "role": role,
+            "status": status_,
+            "group_ids": gids,
+        },
+    )
     return user, password
 
 
 def import_users(
-    db: Session, actor: int, rows: list[dict],
+    db: Session,
+    actor: int,
+    rows: list[dict],
 ) -> dict:
     """批量导入用户（管理员已预览确认）。rows 每项含 email/name/role/password/status/group_ids。
 
@@ -206,7 +287,6 @@ def import_users(
     failed = 0
     errors: list[dict] = []
     pending_users: list[User] = []
-    pending_groups: list[UserGroup] = []
     seen_emails: set[str] = set()
     for idx, r in enumerate(rows, start=1):
         email = str(r.get("email") or "").strip().lower()
@@ -233,8 +313,12 @@ def import_users(
             name = str(r.get("name") or "").strip() or email.split("@")[0]
             gids = _normalize_group_ids(db, r.get("group_ids"))
             u = User(
-                email=email, password_hash=hash_password(pwd), name=name,
-                role=role, status=st, email_verified=True,
+                email=email,
+                password_hash=hash_password(pwd),
+                name=name,
+                role=role,
+                status=st,
+                email_verified=True,
             )
             pending_users.append(u)
             # 临时挂在行上以便回填 id 与密码
@@ -256,12 +340,20 @@ def import_users(
             for gid in r.get("_gids", []):
                 db.add(UserGroup(user_id=u.id, group_id=gid))
     db.commit()
-    audit_log(db, actor, "user.import", "user", 0, {
-        "success": success, "failed": failed, "total": len(rows),
-    })
+    audit_log(
+        db,
+        actor,
+        "user.import",
+        "user",
+        0,
+        {
+            "success": success,
+            "failed": failed,
+            "total": len(rows),
+        },
+    )
     # 返回成功用户明文密码，便于管理员导出告知
     created = [
-        {"email": r["_user"].email, "name": r["_user"].name, "password": r["_password"]}
-        for r in rows if r.get("_user")
+        {"email": r["_user"].email, "name": r["_user"].name, "password": r["_password"]} for r in rows if r.get("_user")
     ]
     return {"success": success, "failed": failed, "errors": errors, "created": created}

@@ -1,21 +1,22 @@
 """系统管理路由：设置、SMTP 测试、注册审批、站点 Logo。"""
+
 from __future__ import annotations
 
 import os
-import uuid
 
 from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, UploadFile, status
 from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 
 from app.config import FILES_DIR
-from app.core.deps import get_current_user, require_super
+from app.core.deps import require_super
 from app.database import get_db
 from app.models.user import User
 from app.schemas.system import SettingsUpdateIn, SmtpTestIn
 from app.services import mail_service, system_service
 from app.services.audit_service import log as audit_log
-from app.services.system_service import DEFAULT_SETTINGS, get_settings, update_settings as update_settings_svc
+from app.services.system_service import DEFAULT_SETTINGS, get_settings
+from app.services.system_service import update_settings as update_settings_svc
 
 router = APIRouter(prefix="/system", tags=["system"])
 
@@ -47,12 +48,10 @@ async def upload_logo(
     """上传站点 Logo：存到 data/files/，返回可公开访问的 URL 路径。"""
     ext = os.path.splitext(file.filename or "")[1].lower()
     if ext not in _LOGO_ALLOWED:
-        raise HTTPException(status.HTTP_400_BAD_REQUEST,
-                            f"仅支持 {', '.join(sorted(_LOGO_ALLOWED))} 格式")
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, f"仅支持 {', '.join(sorted(_LOGO_ALLOWED))} 格式")
     content = await file.read()
     if len(content) > _LOGO_MAX_BYTES:
-        raise HTTPException(status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
-                            f"Logo 不能超过 {_LOGO_MAX_BYTES // 1024}KB")
+        raise HTTPException(status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, f"Logo 不能超过 {_LOGO_MAX_BYTES // 1024}KB")
     # 固定文件名 logo<ext>，覆盖旧 Logo，避免残留堆积
     filename = f"logo{ext}"
     save_path = FILES_DIR / filename
@@ -76,7 +75,7 @@ def get_logo(name: str):
     try:
         target.relative_to(FILES_DIR.resolve())
     except ValueError:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "Not Found")
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Not Found") from None
     if not target.is_file():
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Not Found")
     return FileResponse(target)
@@ -100,24 +99,35 @@ def categories(_user: User = Depends(require_super)):
     for cat in CATEGORIES:
         fields = [
             {"key": k, "label": _label(k), "encrypted": enc, "value_type": _value_type(k)}
-            for k, (_, c, enc) in DEFAULT_SETTINGS.items() if c == cat["key"]
+            for k, (_, c, enc) in DEFAULT_SETTINGS.items()
+            if c == cat["key"]
         ]
         out.append({**cat, "fields": fields})
     return out
 
 
 _LABELS = {
-    "site_name": "站点名称", "site_logo": "站点Logo URL", "brand_color": "主题色",
+    "site_name": "站点名称",
+    "site_logo": "站点Logo URL",
+    "brand_color": "主题色",
     "rank_visible": "排行榜对用户可见",
-    "default_pass_score": "默认及格线", "default_exam_duration_min": "默认考试时长(分钟)",
+    "default_pass_score": "默认及格线",
+    "default_exam_duration_min": "默认考试时长(分钟)",
     "max_questions_per_exam": "单场最大题数",
-    "upload_max_size_mb": "上传大小上限(MB)", "upload_allowed_ext": "允许上传扩展名",
-    "smtp_host": "SMTP 服务器", "smtp_port": "SMTP 端口", "smtp_username": "SMTP 用户名",
-    "smtp_password": "SMTP 密码", "smtp_sender": "发件人地址", "smtp_use_tls": "启用SSL/TLS",
-    "register_open": "开放注册", "new_user_need_approve": "新用户需审批",
+    "upload_max_size_mb": "上传大小上限(MB)",
+    "upload_allowed_ext": "允许上传扩展名",
+    "smtp_host": "SMTP 服务器",
+    "smtp_port": "SMTP 端口",
+    "smtp_username": "SMTP 用户名",
+    "smtp_password": "SMTP 密码",
+    "smtp_sender": "发件人地址",
+    "smtp_use_tls": "启用SSL/TLS",
+    "register_open": "开放注册",
+    "new_user_need_approve": "新用户需审批",
     "register_group_required": "注册时必选分组",
     "register_allowed_email_suffixes": "允许注册邮箱后缀(逗号分隔,留空不限制)",
-    "mail_tpl_register": "注册验证码模板", "mail_tpl_exam_publish": "考试发布通知模板",
+    "mail_tpl_register": "注册验证码模板",
+    "mail_tpl_exam_publish": "考试发布通知模板",
     "mail_tpl_review_done": "成绩公布通知模板",
 }
 
@@ -127,11 +137,15 @@ def _label(key: str) -> str:
 
 
 def _value_type(key: str) -> str:
-    if key in ("smtp_use_tls", "register_open", "new_user_need_approve",
-               "register_group_required", "rank_visible"):
+    if key in ("smtp_use_tls", "register_open", "new_user_need_approve", "register_group_required", "rank_visible"):
         return "bool"
-    if key in ("default_pass_score", "default_exam_duration_min",
-               "max_questions_per_exam", "upload_max_size_mb", "smtp_port"):
+    if key in (
+        "default_pass_score",
+        "default_exam_duration_min",
+        "max_questions_per_exam",
+        "upload_max_size_mb",
+        "smtp_port",
+    ):
         return "number"
     return "text"
 
@@ -162,12 +176,17 @@ def update_settings(payload: SettingsUpdateIn, db: Session = Depends(get_db), us
 
 
 @router.post("/smtp/test")
-def smtp_test(payload: SmtpTestIn, bg: BackgroundTasks, db: Session = Depends(get_db), user: User = Depends(require_super)):
+def smtp_test(
+    payload: SmtpTestIn, bg: BackgroundTasks, db: Session = Depends(get_db), user: User = Depends(require_super)
+):
     # 防滥用测试邮件发件：单管理员 5 次/小时
     from app.core.rate_limit import check
+
     check(f"smtp-test:user:{user.id}", 5, 3600, "SMTP 测试")
     settings = get_settings(db, "smtp")
     if not settings.get("smtp_host"):
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "请先配置 SMTP 服务器")
-    bg.add_task(mail_service._send, payload.to_email, "培训考试平台 SMTP 测试", "这是一封测试邮件，SMTP 配置正常。", settings)
+    bg.add_task(
+        mail_service._send, payload.to_email, "培训考试平台 SMTP 测试", "这是一封测试邮件，SMTP 配置正常。", settings
+    )
     return {"success": True, "message": "测试邮件已加入发送队列"}

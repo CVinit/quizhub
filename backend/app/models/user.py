@@ -1,7 +1,8 @@
 """用户与邮箱验证码模型。"""
+
 from __future__ import annotations
 
-from sqlalchemy import Boolean, Enum, ForeignKey, Integer, String
+from sqlalchemy import Boolean, ForeignKey, Integer, String
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.models.base import PKMixin, TimestampMixin

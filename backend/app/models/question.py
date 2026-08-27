@@ -5,6 +5,7 @@ answer 为多态字段：单选"A"；多选"ABC"；判断"正确/错误"；
 options：单选/多选/判断为 string[]；填空/简答为 []；拖拽用 left_items/right_items。
 统一用 TEXT 存 JSON 串。
 """
+
 from __future__ import annotations
 
 from sqlalchemy import Float, ForeignKey, Integer, String, Text
@@ -20,9 +21,7 @@ class QuestionBank(PKMixin, TimestampMixin):
     __tablename__ = "question_banks"
 
     name: Mapped[str] = mapped_column(String, nullable=False)
-    group_id: Mapped[int | None] = mapped_column(
-        Integer, ForeignKey("groups.id"), nullable=True, index=True
-    )
+    group_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("groups.id"), nullable=True, index=True)
 
 
 class QuestionTag(PKMixin):
@@ -34,9 +33,7 @@ class QuestionTag(PKMixin):
 class Question(PKMixin, TimestampMixin):
     __tablename__ = "questions"
 
-    bank_id: Mapped[int | None] = mapped_column(
-        Integer, ForeignKey("question_banks.id"), nullable=True, index=True
-    )
+    bank_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("question_banks.id"), nullable=True, index=True)
     type: Mapped[str] = mapped_column(String, nullable=False, index=True)  # QUESTION_TYPE
     question: Mapped[str] = mapped_column(Text, nullable=False)
     options: Mapped[list | None] = mapped_column(JSON, nullable=True)  # 选项 / 空位
@@ -50,4 +47,3 @@ class Question(PKMixin, TimestampMixin):
     group_id: Mapped[int | None] = mapped_column(
         Integer, ForeignKey("groups.id"), nullable=True, index=True
     )  # 所属分组，用于授权筛选
-    updated_at: Mapped[str | None] = mapped_column(String, nullable=True)

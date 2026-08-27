@@ -2,12 +2,15 @@
 
 由运维经环境变量注入的少量密钥类配置；业务配置见 settings 表。
 """
+
 from __future__ import annotations
 
+import logging
 import os
 import secrets
 from pathlib import Path
 
+logger = logging.getLogger("quizhub")
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 DATA_DIR = BASE_DIR / "data"
@@ -24,8 +27,9 @@ def _secret_key() -> str:
     key = os.getenv("TRAINING_SECRET_KEY", "")
     if key:
         return key
-    print("[security][WARN] TRAINING_SECRET_KEY 未设置，已生成进程级临时密钥；"
-          "重启后所有登录将失效。生产环境务必经环境变量注入固定密钥。")
+    logger.warning(
+        "TRAINING_SECRET_KEY 未设置，已生成进程级临时密钥；重启后所有登录将失效。生产环境务必经环境变量注入固定密钥。"
+    )
     return secrets.token_urlsafe(48)
 
 
@@ -37,8 +41,9 @@ ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24 * 7  # 7 天
 # Fernet 密钥（用于加密 SMTP 密码等敏感设置）；32 url-safe base64 字节
 SETTINGS_ENC_KEY = os.getenv("TRAINING_ENC_KEY", "")
 if not SETTINGS_ENC_KEY:
-    print("[security][WARN] TRAINING_ENC_KEY 未设置，敏感设置仅以 base64 可逆编码存储。"
-          "生产环境务必经环境变量注入 Fernet 密钥。")
+    logger.warning(
+        "TRAINING_ENC_KEY 未设置，敏感设置仅以 base64 可逆编码存储。生产环境务必经环境变量注入 Fernet 密钥。"
+    )
 
 # 超管初始化账号（init_db.py 使用）
 SUPER_ADMIN_EMAIL = os.getenv("TRAINING_SUPER_ADMIN_EMAIL", "admin@example.com")

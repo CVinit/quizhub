@@ -1,7 +1,6 @@
 """分组 schema。"""
-from __future__ import annotations
 
-from typing import Optional
+from __future__ import annotations
 
 from pydantic import BaseModel, Field
 
@@ -9,7 +8,7 @@ from pydantic import BaseModel, Field
 class GroupBase(BaseModel):
     name: str = Field(max_length=100)
     type: str = Field(default="自定义")  # 部门/专业/班级/自定义
-    parent_id: Optional[int] = None
+    parent_id: int | None = None
     sort: int = 0
 
 
@@ -18,15 +17,15 @@ class GroupCreate(GroupBase):
 
 
 class GroupUpdate(BaseModel):
-    name: Optional[str] = Field(default=None, max_length=100)
-    type: Optional[str] = None
-    parent_id: Optional[int] = None
-    sort: Optional[int] = None
+    name: str | None = Field(default=None, max_length=100)
+    type: str | None = None
+    parent_id: int | None = None
+    sort: int | None = None
 
 
 class GroupOut(GroupBase):
     id: int
-    children: list["GroupOut"] = []
+    children: list[GroupOut] = []
 
     class Config:
         from_attributes = True

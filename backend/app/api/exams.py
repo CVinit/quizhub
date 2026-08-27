@@ -1,14 +1,20 @@
 """考试路由（用户端 + 管理端）。"""
+
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, status
 from sqlalchemy.orm import Session
 
-from app.core.deps import get_current_user, require_admin, require_super
+from app.core.deps import get_current_user, require_admin
 from app.database import get_db
 from app.models.user import User
 from app.schemas.exam import (
-    ExamAnswerIn, ExamCreateIn, ExamUpdateIn, MockConfigIn, PaperTemplateIn, ReviewIn,
+    ExamAnswerIn,
+    ExamCreateIn,
+    ExamUpdateIn,
+    MockConfigIn,
+    PaperTemplateIn,
+    ReviewIn,
 )
 from app.services import exam_service, review_service
 from app.services.audit_service import log as audit_log
@@ -33,7 +39,9 @@ def start_exam(exam_id: int, db: Session = Depends(get_db), user: User = Depends
 
 
 @router.post("/exams/session/{sid}/answer")
-def submit_answer(sid: int, payload: ExamAnswerIn, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+def submit_answer(
+    sid: int, payload: ExamAnswerIn, db: Session = Depends(get_db), user: User = Depends(get_current_user)
+):
     return exam_service.submit_answer(db, user, sid, payload.question_id, payload.answer, payload.version)
 
 
@@ -84,7 +92,9 @@ def create_exam(payload: ExamCreateIn, db: Session = Depends(get_db), user: User
 
 
 @router.put("/admin/exams/{exam_id}")
-def update_exam(exam_id: int, payload: ExamUpdateIn, db: Session = Depends(get_db), user: User = Depends(require_admin)):
+def update_exam(
+    exam_id: int, payload: ExamUpdateIn, db: Session = Depends(get_db), user: User = Depends(require_admin)
+):
     res = exam_service.update_exam(db, exam_id, payload.model_dump(exclude_unset=True))
     audit_log(db, user.id, "exam.update", "exam", exam_id, payload.model_dump(exclude_unset=True))
     return res

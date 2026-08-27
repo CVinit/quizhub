@@ -1,5 +1,5 @@
 """限流逻辑单元测试。"""
-import os
+
 import time
 
 # 单进程内存限流依赖 monotonic 时钟，测试用同进程实例即可

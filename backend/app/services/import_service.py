@@ -4,20 +4,18 @@
 确认阶段读取并落库。简单实现用进程内字典（单进程足够）。
 confirm_token 绑定上传用户 id，确认时校验调用者一致，防止 IDOR。
 """
+
 from __future__ import annotations
 
 import time
 import uuid
 from io import BytesIO
-from typing import Any
 
 from sqlalchemy.orm import Session
 
 from app.models.question import Question, QuestionBank
 from app.schemas.question import UploadImportResult, UploadPreview, UploadPreviewRow
-from app.services.question_service import _ensure_tags
 from app.utils.excel import parse_workbook
-
 
 # 进程内暂存：confirm_token -> (rows, group_id, bank_id, bank_name, user_id, ts)
 # bank_id 优先；为空则导入时按 bank_name 自动建一个题库（即 question_bank）。
@@ -29,8 +27,12 @@ _IMPORT_ROW_MAX = 10000
 
 
 def preview(
-    db: Session, content: bytes, group_id: int | None, bank_id: int | None,
-    bank_name: str = "", user_id: int = 0,
+    db: Session,
+    content: bytes,
+    group_id: int | None,
+    bank_id: int | None,
+    bank_name: str = "",
+    user_id: int = 0,
 ) -> dict:
     """解析并暂存预览。返回 preview + confirm_token。
 
@@ -73,8 +75,10 @@ def _full_rows(preview: UploadPreview, buf: BytesIO) -> list[UploadPreviewRow]:
 
     使用 read_only 模式 + 行数上限，避免恶意大文件/zip 炸弹耗尽内存。
     """
-    from app.utils.excel import SHEET_ORDER, _parse_row
     from openpyxl import load_workbook
+
+    from app.utils.excel import SHEET_ORDER, _parse_row
+
     buf.seek(0)
     wb = load_workbook(buf, data_only=True, read_only=True)
     out: list[UploadPreviewRow] = []
@@ -104,11 +108,13 @@ def do_import(db: Session, confirm_token: str, user_id: int = 0) -> UploadImport
     """
     if confirm_token not in _preview_cache:
         from fastapi import HTTPException, status
+
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "预览已过期，请重新上传")
     rows, group_id, bank_id, bank_name, owner_id, ts = _preview_cache.pop(confirm_token)
     # token 绑定用户校验（防 IDOR）：仅上传者本人可导入
     if user_id and owner_id and user_id != owner_id:
         from fastapi import HTTPException, status
+
         raise HTTPException(status.HTTP_403_FORBIDDEN, "无权导入他人预览数据")
 
     # 没有指定既有题库时，按名称自动新建一个题库（同次上传即一个题库）
@@ -122,24 +128,31 @@ def do_import(db: Session, confirm_token: str, user_id: int = 0) -> UploadImport
     # 先收集所有唯一标签，统一入库，避免同事务内重复插入
     all_tags: set[str] = set()
     for r in rows:
-        for t in (r.tags or []):
+        for t in r.tags or []:
             all_tags.add(t)
     _ensure_unique_tags(db, list(all_tags))
 
     success = failed = 0
     pending: list[Question] = []
     for r in rows:
-        try:
-            q = Question(
-                bank_id=bank_id, type=r.type, question=r.question,
-                options=r.options, left_items=r.left_items, right_items=r.right_items,
-                answer=r.answer, analysis=r.analysis, difficulty=r.difficulty,
-                tags=r.tags, score=r.score, group_id=group_id,
-            )
-            pending.append(q)
-            success += 1
-        except Exception:
-            failed += 1
+        # 题目对象构造只做属性赋值，不会抛业务异常；预览阶段已校验合法性，
+        # 故不再用 try/except 吞错——若构造失败应显式报错而非计入 failed=0 掩盖问题。
+        q = Question(
+            bank_id=bank_id,
+            type=r.type,
+            question=r.question,
+            options=r.options,
+            left_items=r.left_items,
+            right_items=r.right_items,
+            answer=r.answer,
+            analysis=r.analysis,
+            difficulty=r.difficulty,
+            tags=r.tags,
+            score=r.score,
+            group_id=group_id,
+        )
+        pending.append(q)
+        success += 1
     # 批量插入，单次 commit（替代原逐题 flush）
     if pending:
         db.add_all(pending)
@@ -149,13 +162,13 @@ def do_import(db: Session, confirm_token: str, user_id: int = 0) -> UploadImport
 
 def _ensure_unique_tags(db: Session, tags: list[str]) -> None:
     """批量确保标签存在（同事务安全）。"""
-    from app.models.question import QuestionTag
     from sqlalchemy import select as sa_select
+
+    from app.models.question import QuestionTag
+
     if not tags:
         return
-    existing = {row[0] for row in db.execute(
-        sa_select(QuestionTag.name).where(QuestionTag.name.in_(tags))
-    ).all()}
+    existing = {row[0] for row in db.execute(sa_select(QuestionTag.name).where(QuestionTag.name.in_(tags))).all()}
     for name in tags:
         if name and name not in existing:
             db.add(QuestionTag(name=name))

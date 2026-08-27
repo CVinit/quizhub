@@ -1,4 +1,5 @@
 """分组业务：树形查询、增删改、子孙查询。"""
+
 from __future__ import annotations
 
 from fastapi import HTTPException, status
@@ -7,7 +8,6 @@ from sqlalchemy.orm import Session
 
 from app.models.group import Group, UserGroup
 from app.schemas.group import GroupCreate, GroupUpdate
-
 
 GROUP_TYPES = ("部门", "专业", "班级", "自定义")
 
@@ -18,8 +18,12 @@ def build_tree(db: Session) -> list[dict]:
     nodes: dict[int, dict] = {}
     for r in rows:
         nodes[r.id] = {
-            "id": r.id, "name": r.name, "type": r.type,
-            "parent_id": r.parent_id, "sort": r.sort, "children": [],
+            "id": r.id,
+            "name": r.name,
+            "type": r.type,
+            "parent_id": r.parent_id,
+            "sort": r.sort,
+            "children": [],
         }
     roots: list[dict] = []
     for n in nodes.values():
@@ -90,9 +94,7 @@ def subtree_ids(db: Session, group_id: int) -> set[int]:
     stack = [group_id]
     while stack:
         parent = stack.pop()
-        children = db.execute(
-            select(Group.id).where(Group.parent_id == parent)
-        ).scalars().all()
+        children = db.execute(select(Group.id).where(Group.parent_id == parent)).scalars().all()
         for cid in children:
             if cid not in ids:
                 ids.add(cid)
@@ -113,14 +115,12 @@ def _has_children(db: Session, group_id: int) -> bool:
 def _has_question_banks(db: Session, group_id: int) -> bool:
     """该分组下是否存在题库（QuestionBank.group_id 引用）。"""
     from app.models.question import QuestionBank
-    return db.execute(
-        select(QuestionBank.id).where(QuestionBank.group_id == group_id).limit(1)
-    ).first() is not None
+
+    return db.execute(select(QuestionBank.id).where(QuestionBank.group_id == group_id).limit(1)).first() is not None
 
 
 def _has_questions(db: Session, group_id: int) -> bool:
     """该分组下是否存在题目（Question.group_id 引用）。"""
     from app.models.question import Question
-    return db.execute(
-        select(Question.id).where(Question.group_id == group_id).limit(1)
-    ).first() is not None
+
+    return db.execute(select(Question.id).where(Question.group_id == group_id).limit(1)).first() is not None

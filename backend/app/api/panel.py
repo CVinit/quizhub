@@ -1,4 +1,5 @@
 """面板与排行路由。"""
+
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -25,7 +26,9 @@ def admin_overview(db: Session = Depends(get_db), _user: User = Depends(require_
 
 
 @router.post("/admin/panel/refresh")
-def refresh_stats(days: int = Query(default=1, ge=1, le=60), db: Session = Depends(get_db), _user: User = Depends(require_admin)):
+def refresh_stats(
+    days: int = Query(default=1, ge=1, le=60), db: Session = Depends(get_db), _user: User = Depends(require_admin)
+):
     n = stats_service.refresh_recent(db, days)
     return {"refreshed": n}
 
@@ -40,7 +43,6 @@ def rank(
     user: User = Depends(get_current_user),
 ):
     # 排行可见性开关：关闭时对普通用户隐藏（管理员仍可在后台查看）
-    if system_service.get_settings(db, "general").get("rank_visible", "true") != "true":
-        if user.role == "user":
-            raise HTTPException(status.HTTP_403_FORBIDDEN, "排行榜已被关闭")
+    if system_service.get_settings(db, "general").get("rank_visible", "true") != "true" and user.role == "user":
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "排行榜已被关闭")
     return stats_service.rank(db, dimension, scope, range, user.id)

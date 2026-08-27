@@ -2,6 +2,7 @@
 
 提供分组按 category 读取/写入；SMTP 密码等敏感项加密。
 """
+
 from __future__ import annotations
 
 from typing import Any
@@ -38,15 +39,18 @@ DEFAULT_SETTINGS: dict[str, tuple[str, str, bool]] = {
     "register_allowed_email_suffixes": ("", "register", False),
     "mail_tpl_register": (
         "您的注册验证码是：{code}，有效期 10 分钟。",
-        "mail_tpl", False,
+        "mail_tpl",
+        False,
     ),
     "mail_tpl_exam_publish": (
         "新考试「{exam_name}」已发布，请在 {end_at} 前完成。",
-        "mail_tpl", False,
+        "mail_tpl",
+        False,
     ),
     "mail_tpl_review_done": (
         "您的考试「{exam_name}」成绩已公布：{score} 分。",
-        "mail_tpl", False,
+        "mail_tpl",
+        False,
     ),
 }
 
@@ -57,12 +61,14 @@ def ensure_defaults(db: Session) -> None:
     for key, (val, cat, enc) in DEFAULT_SETTINGS.items():
         if key in existing:
             continue
-        db.add(Setting(
-            setting_key=key,
-            value=encrypt_value(val) if enc else val,
-            category=cat,
-            encrypted=enc,
-        ))
+        db.add(
+            Setting(
+                setting_key=key,
+                value=encrypt_value(val) if enc else val,
+                category=cat,
+                encrypted=enc,
+            )
+        )
     db.commit()
 
 

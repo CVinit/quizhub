@@ -3,6 +3,7 @@
 注册流程：图形验证码 → 发送邮箱验证码 → 凭验证码完成注册。
 公网部署防扫描：双维度限流（客户端 IP + 邮箱/账号），见 app/core/rate_limit.py。
 """
+
 from __future__ import annotations
 
 from fastapi import APIRouter, BackgroundTasks, Depends, status
@@ -14,7 +15,14 @@ from app.core.rate_limit import check, ip_limit
 from app.database import get_db
 from app.models.user import User
 from app.schemas.auth import (
-    ChangePasswordIn, LoginIn, RegisterIn, ResendIn, SendCodeIn, TokenOut, UserOut, VerifyIn,
+    ChangePasswordIn,
+    LoginIn,
+    RegisterIn,
+    ResendIn,
+    SendCodeIn,
+    TokenOut,
+    UserOut,
+    VerifyIn,
 )
 from app.services import auth_service
 
@@ -61,7 +69,13 @@ def register(
 ):
     check(f"register:email:{payload.email.lower()}", 3, 3600, "注册")
     return auth_service.register(
-        db, payload.email, payload.password, payload.name, payload.code, bg, payload.group_ids,
+        db,
+        payload.email,
+        payload.password,
+        payload.name,
+        payload.code,
+        bg,
+        payload.group_ids,
     )
 
 
@@ -70,6 +84,7 @@ def register_groups(db: Session = Depends(get_db)):
     """公开接口：返回可选分组树与是否必选，供注册页选择分组（无需登录）。"""
     from app.services.group_service import build_tree
     from app.services.system_service import get_settings
+
     settings = get_settings(db, "register")
     required = settings.get("register_group_required", "false").lower() == "true"
     return {"groups": build_tree(db), "required": required}
@@ -127,4 +142,5 @@ def change_password(
 
 def _bad(msg: str):
     from fastapi import HTTPException
+
     return HTTPException(status.HTTP_400_BAD_REQUEST, msg)

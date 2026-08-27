@@ -1,4 +1,5 @@
 """审计日志与草稿路由。"""
+
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, Query
@@ -15,13 +16,23 @@ router = APIRouter(tags=["audit"])
 # ---------- 审计日志（管理端）----------
 @router.get("/admin/audit-logs")
 def list_logs(
-    page: int = Query(1, ge=1), page_size: int = Query(20, ge=1, le=100),
-    actor: int | None = None, action: str | None = None,
-    target_type: str | None = None, keyword: str | None = None,
-    db: Session = Depends(get_db), _user: User = Depends(require_admin),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=100),
+    actor: int | None = None,
+    action: str | None = None,
+    target_type: str | None = None,
+    keyword: str | None = None,
+    db: Session = Depends(get_db),
+    _user: User = Depends(require_admin),
 ):
     items, total = audit_service.list_logs(
-        db, page, page_size, actor, action, target_type, keyword,
+        db,
+        page,
+        page_size,
+        actor,
+        action,
+        target_type,
+        keyword,
     )
     return {"items": items, "total": total, "page": page, "page_size": page_size}
 

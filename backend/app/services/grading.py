@@ -12,6 +12,7 @@ answer 规范（与 import_service 一致）：
 - 拖拽 {"left":"right"}
 - 简答 长文本
 """
+
 from __future__ import annotations
 
 from typing import Any
@@ -57,7 +58,7 @@ def _grade_fill(correct_answer: Any, user_answer: Any) -> bool:
         return False
     if len(correct_answer) != len(user_answer):
         return False
-    for blanks, ua in zip(correct_answer, user_answer):
+    for blanks, ua in zip(correct_answer, user_answer, strict=False):
         if not isinstance(blanks, list):
             blanks = [blanks]
         ua_norm = _norm_str(ua)
@@ -71,7 +72,4 @@ def _grade_drag(correct_answer: Any, user_answer: Any) -> bool:
         return False
     if len(correct_answer) != len(user_answer):
         return False
-    for k, v in correct_answer.items():
-        if _norm_str(user_answer.get(k)) != _norm_str(v):
-            return False
-    return True
+    return all(_norm_str(user_answer.get(k)) == _norm_str(v) for k, v in correct_answer.items())

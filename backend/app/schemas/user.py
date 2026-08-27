@@ -1,7 +1,6 @@
 """用户 schema。"""
-from __future__ import annotations
 
-from typing import Optional
+from __future__ import annotations
 
 from pydantic import BaseModel, EmailStr
 
@@ -13,7 +12,7 @@ class UserListItem(BaseModel):
     role: str
     status: str
     email_verified: bool
-    dept_group_id: Optional[int] = None
+    dept_group_id: int | None = None
     groups: list[int] = []
 
     class Config:
@@ -21,9 +20,9 @@ class UserListItem(BaseModel):
 
 
 class UserUpdate(BaseModel):
-    name: Optional[str] = None
-    role: Optional[str] = None
-    dept_group_id: Optional[int] = None
+    name: str | None = None
+    role: str | None = None
+    dept_group_id: int | None = None
 
 
 class Page(BaseModel):

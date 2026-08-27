@@ -1,4 +1,5 @@
 """判分逻辑单元测试。"""
+
 from app.services.grading import grade
 
 

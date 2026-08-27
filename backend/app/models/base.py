@@ -2,6 +2,7 @@
 
 继承自 Base 并标记 __abstract__，子类无需再显式继承 Base。
 """
+
 from __future__ import annotations
 
 from datetime import datetime, timezone

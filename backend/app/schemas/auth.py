@@ -1,4 +1,5 @@
 """认证 Pydantic schema。"""
+
 from __future__ import annotations
 
 from pydantic import BaseModel, EmailStr, Field
@@ -31,7 +32,7 @@ class LoginIn(BaseModel):
 class TokenOut(BaseModel):
     access_token: str
     token_type: str = "bearer"
-    user: "UserOut"
+    user: UserOut
 
 
 class UserOut(BaseModel):

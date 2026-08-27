@@ -2,8 +2,10 @@
 
 开发期若 SMTP 未配置，回退为打印日志，保证注册流程可走通。
 """
+
 from __future__ import annotations
 
+import logging
 import smtplib
 from email.mime.text import MIMEText
 from email.utils import formataddr
@@ -11,6 +13,8 @@ from email.utils import formataddr
 from sqlalchemy.orm import Session
 
 from app.services.system_service import get_settings
+
+logger = logging.getLogger("quizhub")
 
 
 def _render(tpl: str, **kwargs: object) -> str:
@@ -41,8 +45,8 @@ def send_review_done(db: Session, to_email: str, exam_name: str, score: object) 
 def _send(to_email: str, subject: str, body: str, settings: dict[str, str]) -> None:
     host = settings.get("smtp_host", "")
     if not host:
-        # 开发期未配置 SMTP：回退打印
-        print(f"[mail][fallback] to={to_email} subject={subject} body={body}")
+        # 开发期未配置 SMTP：回退日志
+        logger.info("[mail][fallback] to=%s subject=%s body=%s", to_email, subject, body)
         return
     port = int(settings.get("smtp_port", "465"))
     username = settings.get("smtp_username", "")

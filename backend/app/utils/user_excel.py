@@ -4,6 +4,7 @@
 预览阶段把解析结果暂存到进程内字典（按 confirm_token），确认阶段读取并落库。
 confirm_token 绑定上传用户 id，确认时校验调用者一致，防 IDOR（复用 import_service 模式）。
 """
+
 from __future__ import annotations
 
 import time
@@ -18,20 +19,25 @@ from sqlalchemy.orm import Session
 
 from app.services.user_service import ROLES, STATUSES
 
-
 HEADERS = ["邮箱", "姓名", "角色", "初始密码", "状态", "分组ID"]
 
 # 角色中文 → 英文，便于导入时归一化
 ROLE_CN = {
-    "普通用户": "user", "user": "user",
-    "部门管理员": "dept_admin", "dept_admin": "dept_admin",
-    "超级管理员": "super_admin", "super_admin": "super_admin",
+    "普通用户": "user",
+    "user": "user",
+    "部门管理员": "dept_admin",
+    "dept_admin": "dept_admin",
+    "超级管理员": "super_admin",
+    "super_admin": "super_admin",
 }
 # 状态中文 → 英文
 STATUS_CN = {
-    "正常": "active", "active": "active",
-    "待审批": "pending", "pending": "pending",
-    "已禁用": "disabled", "disabled": "disabled",
+    "正常": "active",
+    "active": "active",
+    "待审批": "pending",
+    "pending": "pending",
+    "已禁用": "disabled",
+    "disabled": "disabled",
 }
 
 HEADER_FILL = PatternFill("solid", fgColor="E60012")
@@ -189,7 +195,9 @@ def preview(db: Session, content: bytes, user_id: int = 0) -> dict:
 
 def consume_preview(confirm_token: str, user_id: int) -> list[dict]:
     """取出并消费预览暂存的有效行（校验 token 绑定用户）。"""
-    from fastapi import HTTPException, status as http_status
+    from fastapi import HTTPException
+    from fastapi import status as http_status
+
     if confirm_token not in _preview_cache:
         raise HTTPException(http_status.HTTP_400_BAD_REQUEST, "预览已过期，请重新上传")
     rows, owner_id, _ts = _preview_cache.pop(confirm_token)

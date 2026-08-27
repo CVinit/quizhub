@@ -14,6 +14,7 @@ config 结构：
 
 返回固化题目清单 id 列表 + 每题分值。
 """
+
 from __future__ import annotations
 
 import random
@@ -47,9 +48,9 @@ def generate_paper(db: Session, config: dict) -> dict:
     candidates = list(db.execute(stmt).all())
     # tags 用 Python 端精确过滤兜底（SQLite JSON 查询能力有限）
     if tags:
-        tag_rows = list(db.execute(
-            select(Question.id, Question.tags).where(Question.id.in_([c[0] for c in candidates]))
-        ).all())
+        tag_rows = list(
+            db.execute(select(Question.id, Question.tags).where(Question.id.in_([c[0] for c in candidates]))).all()
+        )
         tag_map = {r[0]: r[1] for r in tag_rows}
         candidates = [c for c in candidates if tag_map.get(c[0]) and any(t in tag_map[c[0]] for t in tags)]
 
@@ -76,11 +77,10 @@ def generate_paper(db: Session, config: dict) -> dict:
                 n = int(quota * float(ratio))
                 diff_quotas[int(diff_str)] = n
                 remaining -= n
-            if remaining > 0:
+            if remaining > 0 and difficulty_dist:
                 # 余数补给配比最大或首个难度
-                if difficulty_dist:
-                    first_diff = int(next(iter(difficulty_dist)))
-                    diff_quotas[first_diff] = diff_quotas.get(first_diff, 0) + remaining
+                first_diff = int(next(iter(difficulty_dist)))
+                diff_quotas[first_diff] = diff_quotas.get(first_diff, 0) + remaining
             for diff, n in diff_quotas.items():
                 pool = list(by_type_diff.get((qtype, diff), []))
                 rng.shuffle(pool)
@@ -106,7 +106,7 @@ def generate_paper(db: Session, config: dict) -> dict:
             while len(picked_rows) < quota and pool:
                 picked_rows.append(rng.choice(pool))
 
-        for row in (picked_rows[:quota] if allow_dup else picked_rows):
+        for row in picked_rows[:quota] if allow_dup else picked_rows:
             qid = row[0]
             qscore = row[3]
             if qid not in chosen_ids or allow_dup:

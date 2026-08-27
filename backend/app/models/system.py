@@ -1,4 +1,5 @@
 """系统设置、审计日志、草稿。"""
+
 from __future__ import annotations
 
 from sqlalchemy import ForeignKey, Integer, String, Text, UniqueConstraint

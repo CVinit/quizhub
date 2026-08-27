@@ -6,6 +6,7 @@ exam_sessions：考试会话（乐观锁 version），answers 承载逐题作答
 exam_results：结算成绩（含简答复核 published 流程）。
 short_answer_reviews：简答人工复核。
 """
+
 from __future__ import annotations
 
 from sqlalchemy import Boolean, Float, ForeignKey, Integer, String, Text, UniqueConstraint
@@ -83,9 +84,7 @@ class ExamResult(PKMixin, TimestampMixin):
 class ShortAnswerReview(PKMixin):
     __tablename__ = "short_answer_reviews"
 
-    exam_result_id: Mapped[int] = mapped_column(
-        Integer, ForeignKey("exam_results.id"), index=True, nullable=False
-    )
+    exam_result_id: Mapped[int] = mapped_column(Integer, ForeignKey("exam_results.id"), index=True, nullable=False)
     exam_session_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     user_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id"), index=True, nullable=False)
     question_id: Mapped[int] = mapped_column(Integer, ForeignKey("questions.id"), nullable=False)

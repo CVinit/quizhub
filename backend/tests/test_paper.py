@@ -1,4 +1,5 @@
 """规则组卷单元测试。"""
+
 from sqlalchemy import select
 
 from app.database import db_session, init_db
@@ -17,17 +18,33 @@ def _seed_questions():
         db.add(bank)
         db.flush()
         for i in range(10):
-            db.add(Question(
-                bank_id=bank.id, type="单选题", question=f"题目{i}",
-                options=["A", "B", "C", "D"], answer="A",
-                analysis="", difficulty=(i % 3) + 1, tags=["网络"], score=2,
-            ))
+            db.add(
+                Question(
+                    bank_id=bank.id,
+                    type="单选题",
+                    question=f"题目{i}",
+                    options=["A", "B", "C", "D"],
+                    answer="A",
+                    analysis="",
+                    difficulty=(i % 3) + 1,
+                    tags=["网络"],
+                    score=2,
+                )
+            )
         for i in range(5):
-            db.add(Question(
-                bank_id=bank.id, type="多选题", question=f"多选{i}",
-                options=["A", "B", "C"], answer="AB",
-                analysis="", difficulty=2, tags=[], score=3,
-            ))
+            db.add(
+                Question(
+                    bank_id=bank.id,
+                    type="多选题",
+                    question=f"多选{i}",
+                    options=["A", "B", "C"],
+                    answer="AB",
+                    analysis="",
+                    difficulty=2,
+                    tags=[],
+                    score=3,
+                )
+            )
 
 
 def test_generate_paper_by_quota():

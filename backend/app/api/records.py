@@ -1,4 +1,5 @@
 """练习路由（用户端）。"""
+
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends
@@ -8,7 +9,10 @@ from app.core.deps import get_current_user
 from app.database import get_db
 from app.models.user import User
 from app.schemas.record import (
-    PracticeAnswerIn, PracticeStartIn, ShortEvalIn, ToggleMarkIn,
+    PracticeAnswerIn,
+    PracticeStartIn,
+    ShortEvalIn,
+    ToggleMarkIn,
 )
 from app.services import practice_service
 
@@ -23,7 +27,12 @@ def modes(bank_id: int | None = None, db: Session = Depends(get_db), user: User 
 @router.post("/practice/start")
 def start(payload: PracticeStartIn, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     return practice_service.start_practice(
-        db, user.id, payload.mode, payload.type, payload.limit, payload.bank_id,
+        db,
+        user.id,
+        payload.mode,
+        payload.type,
+        payload.limit,
+        payload.bank_id,
     )
 
 

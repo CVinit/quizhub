@@ -5,6 +5,7 @@
 - 启动时刷新「今日 + 昨日」；提供手动刷新接口。
 - 规模 ≤100 用户，预聚合表足够支撑 Top10 与四维度查询。
 """
+
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
@@ -36,21 +37,28 @@ def refresh_daily(db: Session, date_str: str) -> int:
     避免原实现 LIKE '{date_str}%' 把 UTC 与本地日期前缀错配。
     """
     from sqlalchemy import text
+
     # 该日练习记录（UTC + 8h 后取日期 = 本地日期）
-    practice_rows = db.execute(text(
-        "SELECT user_id, COUNT(*) AS cnt, SUM(is_correct) AS ok "
-        "FROM practice_records "
-        "WHERE date(datetime(answered_at, '+8 hours')) = :d "
-        "GROUP BY user_id"
-    ), {"d": date_str}).all()
+    practice_rows = db.execute(
+        text(
+            "SELECT user_id, COUNT(*) AS cnt, SUM(is_correct) AS ok "
+            "FROM practice_records "
+            "WHERE date(datetime(answered_at, '+8 hours')) = :d "
+            "GROUP BY user_id"
+        ),
+        {"d": date_str},
+    ).all()
 
     # 该日已交卷成绩（按 created_at 本地日期归属）
-    exam_rows = db.execute(text(
-        "SELECT user_id, COUNT(*) AS cnt, SUM(score) AS score, SUM(passed) AS pass_cnt "
-        "FROM exam_results "
-        "WHERE date(datetime(created_at, '+8 hours')) = :d "
-        "GROUP BY user_id"
-    ), {"d": date_str}).all()
+    exam_rows = db.execute(
+        text(
+            "SELECT user_id, COUNT(*) AS cnt, SUM(score) AS score, SUM(passed) AS pass_cnt "
+            "FROM exam_results "
+            "WHERE date(datetime(created_at, '+8 hours')) = :d "
+            "GROUP BY user_id"
+        ),
+        {"d": date_str},
+    ).all()
 
     practice_map = {r.user_id: r for r in practice_rows}
     exam_map = {r.user_id: r for r in exam_rows}
@@ -59,13 +67,12 @@ def refresh_daily(db: Session, date_str: str) -> int:
         return 0
 
     # 清空当日旧数据
-    db.execute(
-        StatsUserDaily.__table__.delete().where(StatsUserDaily.date == date_str)
-    )
+    db.execute(StatsUserDaily.__table__.delete().where(StatsUserDaily.date == date_str))
 
     # 一次查询所有用户的分组，消除 N+1
     gid_map: dict[int, int] = {
-        r[0]: r[1] for r in db.execute(
+        r[0]: r[1]
+        for r in db.execute(
             select(UserGroup.user_id, func.min(UserGroup.group_id))
             .where(UserGroup.user_id.in_(list(user_ids)))
             .group_by(UserGroup.user_id)
@@ -77,15 +84,19 @@ def refresh_daily(db: Session, date_str: str) -> int:
         pr = practice_map.get(uid)
         er = exam_map.get(uid)
         group_id = gid_map.get(uid)
-        db.add(StatsUserDaily(
-            user_id=uid, date=date_str, group_id=group_id,
-            answer_count=pr.cnt if pr else 0,
-            correct_count=int(pr.ok or 0) if pr else 0,
-            wrong_count=(pr.cnt - int(pr.ok or 0)) if pr else 0,
-            exam_count=er.cnt if er else 0,
-            exam_score_sum=int(er.score or 0) if er else 0,
-            exam_pass_count=int(er.pass_cnt or 0) if er else 0,
-        ))
+        db.add(
+            StatsUserDaily(
+                user_id=uid,
+                date=date_str,
+                group_id=group_id,
+                answer_count=pr.cnt if pr else 0,
+                correct_count=int(pr.ok or 0) if pr else 0,
+                wrong_count=(pr.cnt - int(pr.ok or 0)) if pr else 0,
+                exam_count=er.cnt if er else 0,
+                exam_score_sum=int(er.score or 0) if er else 0,
+                exam_pass_count=int(er.pass_cnt or 0) if er else 0,
+            )
+        )
         written += 1
     db.commit()
     return written
@@ -126,22 +137,32 @@ def user_panel(db: Session, user: User) -> dict:
     accuracy = round(correct / practiced * 100) if practiced else 0
 
     # 最近 5 次考试
-    results = db.execute(
-        select(ExamResult).where(ExamResult.user_id == user.id)
-        .order_by(ExamResult.id.desc()).limit(5)
-    ).scalars().all()
+    results = (
+        db.execute(select(ExamResult).where(ExamResult.user_id == user.id).order_by(ExamResult.id.desc()).limit(5))
+        .scalars()
+        .all()
+    )
     recent_exams = []
     for r in results:
         from app.models.exam import ExamDefinition
+
         e = db.get(ExamDefinition, r.exam_definition_id)
-        recent_exams.append({
-            "name": e.name if e else "",
-            "score": r.score, "total_score": r.total_score,
-            "passed": r.passed, "published": r.published,
-        })
+        recent_exams.append(
+            {
+                "name": e.name if e else "",
+                "score": r.score,
+                "total_score": r.total_score,
+                "passed": r.passed,
+                "published": r.published,
+            }
+        )
     return {
-        "total": total_q, "practiced": practiced, "correct": correct,
-        "wrong": wrong, "marked": marked, "accuracy": accuracy,
+        "total": total_q,
+        "practiced": practiced,
+        "correct": correct,
+        "wrong": wrong,
+        "marked": marked,
+        "accuracy": accuracy,
         "recent_exams": recent_exams,
     }
 
@@ -150,49 +171,55 @@ def user_panel(db: Session, user: User) -> dict:
 def admin_overview(db: Session) -> dict:
     from app.models.exam import ExamDefinition
     from app.models.record import ShortAnswerReview
+
     total_users = db.execute(select(func.count(User.id))).scalar() or 0
-    active_users = db.execute(
-        select(func.count(User.id)).where(User.status == "active")
-    ).scalar() or 0
-    pending_approvals = db.execute(
-        select(func.count(User.id)).where(User.status == "pending")
-    ).scalar() or 0
+    active_users = db.execute(select(func.count(User.id)).where(User.status == "active")).scalar() or 0
+    pending_approvals = db.execute(select(func.count(User.id)).where(User.status == "pending")).scalar() or 0
     total_questions = db.execute(select(func.count(Question.id))).scalar() or 0
 
     # 完成率：有练习记录的题目数 / 总题数
-    practiced_q = db.execute(
-        select(func.count(func.distinct(QuestionState.question_id)))
-        .where(QuestionState.status != "unanswered")
-    ).scalar() or 0
+    practiced_q = (
+        db.execute(
+            select(func.count(func.distinct(QuestionState.question_id))).where(QuestionState.status != "unanswered")
+        ).scalar()
+        or 0
+    )
     completion_rate = round(practiced_q / total_questions * 100) if total_questions else 0
 
     # 全站正确率
     total_answers = db.execute(select(func.count(PracticeRecord.id))).scalar() or 0
-    correct_answers = db.execute(
-        select(func.count(PracticeRecord.id)).where(PracticeRecord.is_correct == True)  # noqa: E712
-    ).scalar() or 0
+    correct_answers = (
+        db.execute(
+            select(func.count(PracticeRecord.id)).where(PracticeRecord.is_correct == True)  # noqa: E712
+        ).scalar()
+        or 0
+    )
     accuracy = round(correct_answers / total_answers * 100) if total_answers else 0
 
-    total_exams = db.execute(
-        select(func.count(ExamDefinition.id)).where(ExamDefinition.type == "formal")
-    ).scalar() or 0
-    pending_reviews = db.execute(
-        select(func.count(ShortAnswerReview.id)).where(ShortAnswerReview.verdict.is_(None))
-    ).scalar() or 0
+    total_exams = db.execute(select(func.count(ExamDefinition.id)).where(ExamDefinition.type == "formal")).scalar() or 0
+    pending_reviews = (
+        db.execute(select(func.count(ShortAnswerReview.id)).where(ShortAnswerReview.verdict.is_(None))).scalar() or 0
+    )
 
     # 今日活跃用户（今日有练习记录）
     today = _date_str(_utcnow())
-    today_active = db.execute(
-        select(func.count(func.distinct(StatsUserDaily.user_id)))
-        .where(StatsUserDaily.date == today)
-    ).scalar() or 0
+    today_active = (
+        db.execute(
+            select(func.count(func.distinct(StatsUserDaily.user_id))).where(StatsUserDaily.date == today)
+        ).scalar()
+        or 0
+    )
 
     return {
-        "total_users": total_users, "active_users": active_users,
+        "total_users": total_users,
+        "active_users": active_users,
         "pending_approvals": pending_approvals,
-        "total_questions": total_questions, "completion_rate": completion_rate,
-        "accuracy": accuracy, "total_exams": total_exams,
-        "pending_reviews": pending_reviews, "today_active": today_active,
+        "total_questions": total_questions,
+        "completion_rate": completion_rate,
+        "accuracy": accuracy,
+        "total_exams": total_exams,
+        "pending_reviews": pending_reviews,
+        "today_active": today_active,
     }
 
 
@@ -209,13 +236,17 @@ def rank(db: Session, dimension: str, scope: str, range_: str, current_user_id: 
     else:
         since = "0000-00-00"
 
-    stmt = select(
-        StatsUserDaily.user_id,
-        func.sum(StatsUserDaily.answer_count).label("cnt"),
-        func.sum(StatsUserDaily.correct_count).label("ok"),
-        func.sum(StatsUserDaily.exam_score_sum).label("score"),
-        func.sum(StatsUserDaily.exam_count).label("exam_cnt"),
-    ).where(StatsUserDaily.date >= since).group_by(StatsUserDaily.user_id)
+    stmt = (
+        select(
+            StatsUserDaily.user_id,
+            func.sum(StatsUserDaily.answer_count).label("cnt"),
+            func.sum(StatsUserDaily.correct_count).label("ok"),
+            func.sum(StatsUserDaily.exam_score_sum).label("score"),
+            func.sum(StatsUserDaily.exam_count).label("exam_cnt"),
+        )
+        .where(StatsUserDaily.date >= since)
+        .group_by(StatsUserDaily.user_id)
+    )
 
     rows = db.execute(stmt).all()
 
@@ -238,18 +269,21 @@ def rank(db: Session, dimension: str, scope: str, range_: str, current_user_id: 
         else:
             value = 0
         u = db.get(User, uid)
-        items.append({
-            "user_id": uid, "name": u.name or u.email if u else f"#{uid}",
-            "value": value, "answer_count": cnt, "correct_count": ok,
-        })
+        items.append(
+            {
+                "user_id": uid,
+                "name": u.name or u.email if u else f"#{uid}",
+                "value": value,
+                "answer_count": cnt,
+                "correct_count": ok,
+            }
+        )
 
     # 分组维度：聚合到 group
     if scope == "group":
         group_items = {}
         for it in items:
-            gid_row = db.execute(
-                select(UserGroup.group_id).where(UserGroup.user_id == it["user_id"]).limit(1)
-            ).first()
+            gid_row = db.execute(select(UserGroup.group_id).where(UserGroup.user_id == it["user_id"]).limit(1)).first()
             gid = gid_row[0] if gid_row else 0
             g = group_items.setdefault(gid, {"group_id": gid, "value": 0, "count": 0, "members": 0})
             g["value"] += it["value"]
@@ -262,9 +296,12 @@ def rank(db: Session, dimension: str, scope: str, range_: str, current_user_id: 
                 grp = db.get(Group, gid)
                 if grp:
                     gname = grp.name
-            out.append({
-                "name": gname, "value": round(g["value"] / g["count"], 1) if g["count"] else 0,
-            })
+            out.append(
+                {
+                    "name": gname,
+                    "value": round(g["value"] / g["count"], 1) if g["count"] else 0,
+                }
+            )
         out.sort(key=lambda x: x["value"], reverse=True)
         return out[:10]
 
@@ -279,11 +316,14 @@ def rank(db: Session, dimension: str, scope: str, range_: str, current_user_id: 
 
 def _streak(db: Session, user_id: int, since: str) -> int:
     """连续答题天数（从今日往前数）。今日未答但昨日已答，也算昨日起的连胜。"""
-    dates = [r[0] for r in db.execute(
-        select(StatsUserDaily.date).where(
-            StatsUserDaily.user_id == user_id, StatsUserDaily.answer_count > 0
-        ).order_by(StatsUserDaily.date.desc())
-    ).all()]
+    dates = [
+        r[0]
+        for r in db.execute(
+            select(StatsUserDaily.date)
+            .where(StatsUserDaily.user_id == user_id, StatsUserDaily.answer_count > 0)
+            .order_by(StatsUserDaily.date.desc())
+        ).all()
+    ]
     if not dates:
         return 0
     today = _date_str(_utcnow())

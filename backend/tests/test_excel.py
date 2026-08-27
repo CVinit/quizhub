@@ -1,4 +1,5 @@
 """Excel 解析单元测试。"""
+
 from io import BytesIO
 
 from openpyxl import Workbook

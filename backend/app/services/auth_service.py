@@ -2,6 +2,7 @@
 
 注册流程（2026-08-22 重构）：图形验证码 → 发送邮箱验证码 → 凭验证码完成注册。
 """
+
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
@@ -46,24 +47,26 @@ def send_code(db: Session, email: str, bg: BackgroundTasks) -> None:
         # 防探测：不暴露"邮箱已注册"，统一提示需输入验证码
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "请输入发送到该邮箱的验证码完成注册")
     code = gen_verify_code()
-    db.add(EmailVerification(
-        email=email, code=code,
-        expire_at=(datetime.now(timezone.utc) + timedelta(minutes=10)).isoformat(),
-        used=False,
-    ))
+    db.add(
+        EmailVerification(
+            email=email,
+            code=code,
+            expire_at=(datetime.now(timezone.utc) + timedelta(minutes=10)).isoformat(),
+            used=False,
+        )
+    )
     db.commit()
     bg.add_task(mail_service.send_register_code, db, email, code)
 
 
-def verify_code(db: Session, email: str, code: str) -> None:
-    """校验注册验证码（不消费，由 register 完成时消费），仅判断有效性。"""
-    if not _is_code_valid(db, email, code):
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "验证码错误或已过期")
-
-
 def register(
-    db: Session, email: str, password: str, name: str, code: str,
-    bg: BackgroundTasks, group_ids: list[int] | None = None,
+    db: Session,
+    email: str,
+    password: str,
+    name: str,
+    code: str,
+    bg: BackgroundTasks,
+    group_ids: list[int] | None = None,
 ) -> User:
     """凭邮箱验证码完成注册（自验证：注册即 email_verified=True）。
 
@@ -80,6 +83,7 @@ def register(
     # 校验分组 id 合法存在，防止伪造
     if gids:
         from app.models.group import Group
+
         valid = {r[0] for r in db.execute(select(Group.id).where(Group.id.in_(gids))).all()}
         gids = [g for g in gids if g in valid]
         if group_required and not gids:
@@ -102,6 +106,7 @@ def register(
     db.flush()  # 拿到 user.id 再写关联
     if gids:
         from app.models.group import UserGroup
+
         for gid in gids:
             db.add(UserGroup(user_id=user.id, group_id=gid))
     db.commit()
@@ -128,11 +133,15 @@ def _consume_code(db: Session, email: str, code: str) -> bool:
 
 
 def _latest_unused(db: Session, email: str) -> EmailVerification | None:
-    return db.execute(
-        select(EmailVerification)
-        .where(EmailVerification.email == email, EmailVerification.used == False)  # noqa: E712
-        .order_by(EmailVerification.id.desc())
-    ).scalars().first()
+    return (
+        db.execute(
+            select(EmailVerification)
+            .where(EmailVerification.email == email, EmailVerification.used == False)  # noqa: E712
+            .order_by(EmailVerification.id.desc())
+        )
+        .scalars()
+        .first()
+    )
 
 
 # ---------- 旧版邮箱激活流程（保留向后兼容，前端已切换到新流程）----------
@@ -149,9 +158,10 @@ def verify_email(db: Session, email: str, code: str) -> None:
     if not user:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "用户不存在")
     user.email_verified = True
-    if user.status == "pending" and get_settings(db, "register").get(
-        "new_user_need_approve", "false"
-    ).lower() != "true":
+    if (
+        user.status == "pending"
+        and get_settings(db, "register").get("new_user_need_approve", "false").lower() != "true"
+    ):
         user.status = "active"
     db.commit()
 
@@ -164,11 +174,14 @@ def resend(db: Session, email: str, bg: BackgroundTasks) -> None:
     if user.email_verified:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "邮箱已验证")
     code = gen_verify_code()
-    db.add(EmailVerification(
-        email=email, code=code,
-        expire_at=(datetime.now(timezone.utc) + timedelta(minutes=10)).isoformat(),
-        used=False,
-    ))
+    db.add(
+        EmailVerification(
+            email=email,
+            code=code,
+            expire_at=(datetime.now(timezone.utc) + timedelta(minutes=10)).isoformat(),
+            used=False,
+        )
+    )
     db.commit()
     bg.add_task(mail_service.send_register_code, db, email, code)
 

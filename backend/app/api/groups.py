@@ -1,4 +1,5 @@
 """分组路由（管理端）。"""
+
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, status

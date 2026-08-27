@@ -6,6 +6,7 @@
 - 返回 (captcha_id, data_uri)，data_uri 是可直接 <img :src> 的 SVG。
 - 与 app/core/rate_limit 同为单进程方案；多 worker 需切 Redis。
 """
+
 from __future__ import annotations
 
 import base64
@@ -98,7 +99,7 @@ store = CaptchaStore()
 def _render_svg(answer: str) -> str:
     """把 4 位数字渲染成带噪点/干扰线的 SVG 像素图，转 data-uri。"""
     cell = 12  # 每像素 12px
-    gap = 4   # 字符间距 px
+    gap = 4  # 字符间距 px
     cols = 5
     rows = 7
     char_w = cols * cell
@@ -110,8 +111,7 @@ def _render_svg(answer: str) -> str:
 
     rng = _SeededRng(answer)
     parts: list[str] = [
-        f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" '
-        f'viewBox="0 0 {width} {height}">'
+        f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}">'
     ]
     # 背景
     parts.append(f'<rect width="{width}" height="{height}" fill="#f4f4f5"/>')
@@ -119,10 +119,7 @@ def _render_svg(answer: str) -> str:
     # 干扰线
     for _ in range(4):
         x1, y1, x2, y2 = rng.line(width, height)
-        parts.append(
-            f'<line x1="{x1}" y1="{y1}" x2="{x2}" y2="{y2}" '
-            f'stroke="{_BRAND}33" stroke-width="1"/>'
-        )
+        parts.append(f'<line x1="{x1}" y1="{y1}" x2="{x2}" y2="{y2}" stroke="{_BRAND}33" stroke-width="1"/>')
 
     # 像素点阵
     for idx, ch in enumerate(answer):
@@ -136,10 +133,7 @@ def _render_svg(answer: str) -> str:
                 if bit == "1":
                     x = ox + c * cell
                     y = oy + r * cell
-                    parts.append(
-                        f'<rect x="{x}" y="{y}" width="{cell}" height="{cell}" '
-                        f'rx="2" fill="{_BRAND}"/>'
-                    )
+                    parts.append(f'<rect x="{x}" y="{y}" width="{cell}" height="{cell}" rx="2" fill="{_BRAND}"/>')
 
     # 随机噪点
     for _ in range(40):

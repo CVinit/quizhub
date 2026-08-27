@@ -3,6 +3,7 @@
 paper_templates.config：规则组卷配置（题型/难度配比、来源筛选、种子等）。
 exam_definitions.rules：单场考试规则快照（含开放时段、限时、及格线、尝试次数等）。
 """
+
 from __future__ import annotations
 
 from sqlalchemy import Float, ForeignKey, Integer, String
@@ -31,9 +32,7 @@ class ExamDefinition(PKMixin, TimestampMixin):
 
     name: Mapped[str] = mapped_column(String, nullable=False)
     type: Mapped[str] = mapped_column(String, default="formal", nullable=False, index=True)  # EXAM_TYPE
-    paper_template_id: Mapped[int | None] = mapped_column(
-        Integer, ForeignKey("paper_templates.id"), nullable=True
-    )
+    paper_template_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("paper_templates.id"), nullable=True)
     manual_questions: Mapped[list | None] = mapped_column(JSON, nullable=True)  # 手选题 id 列表
     rules: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
     group_ids: Mapped[list | None] = mapped_column(JSON, nullable=True)  # 指派分组

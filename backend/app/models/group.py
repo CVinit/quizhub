@@ -1,4 +1,5 @@
 """分组与用户-分组关联。"""
+
 from __future__ import annotations
 
 from sqlalchemy import ForeignKey, Integer, String, UniqueConstraint
@@ -14,9 +15,7 @@ class Group(PKMixin, TimestampMixin):
 
     name: Mapped[str] = mapped_column(String, nullable=False)
     type: Mapped[str] = mapped_column(String, nullable=False, default="自定义")  # GROUP_TYPE
-    parent_id: Mapped[int | None] = mapped_column(
-        Integer, ForeignKey("groups.id"), nullable=True, index=True
-    )
+    parent_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("groups.id"), nullable=True, index=True)
     sort: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
 
 

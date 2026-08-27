@@ -5,6 +5,7 @@
 填空答案约定：按空位顺序用 | 分隔，每空多等价答案用 / 分隔，如 "答案1a/答案1b|答案2"。
 拖拽题「题项与正确容器」列：每行 "题项:正确容器"，多对用换行分隔。
 """
+
 from __future__ import annotations
 
 from io import BytesIO
@@ -16,11 +17,14 @@ from openpyxl.utils import get_column_letter
 
 from app.schemas.question import UploadPreview, UploadPreviewRow
 
-
 SHEET_ORDER = ["单选题", "多选题", "判断题", "填空题", "简答题", "拖拽题"]
 TYPE_TO_SHEET = {
-    "单选题": "单选题", "多选题": "多选题", "判断题": "判断题",
-    "填空题": "填空题", "简答题": "简答题", "拖拽题": "拖拽题",
+    "单选题": "单选题",
+    "多选题": "多选题",
+    "判断题": "判断题",
+    "填空题": "填空题",
+    "简答题": "简答题",
+    "拖拽题": "拖拽题",
 }
 
 # 各 Sheet 表头
@@ -35,8 +39,12 @@ HEADERS = {
 
 # 答案列在表头中的索引（0-based）
 ANSWER_COL = {
-    "单选题": 2, "多选题": 2, "判断题": 1,
-    "填空题": 1, "简答题": 1, "拖拽题": 1,
+    "单选题": 2,
+    "多选题": 2,
+    "判断题": 1,
+    "填空题": 1,
+    "简答题": 1,
+    "拖拽题": 1,
 }
 
 HEADER_FILL = PatternFill("solid", fgColor="E60012")
@@ -82,14 +90,16 @@ def build_template() -> BytesIO:
         ["所属分组ID", "可留空，留空时使用上传时选择的分组"],
         ["", ""],
         ["转换 Prompt（供豆包/DeepSeek 将 Word 题库转为本 Excel）：", ""],
-        ["",
-         "请把以下 Word 题库按题型分别整理到对应的 Excel Sheet。"
-         "每个 Sheet 第一行是表头，从第二行起每题一行。"
-         "选项用 A.xxx\\nB.xxx 格式；多选答案连写字母如 ABC；"
-         "判断题答案写“正确”或“错误”；"
-         "填空题答案按空位顺序用 | 分隔，每空多个等价答案用 / 分隔；"
-         "拖拽题在“题项与正确容器”列每行写“题项:正确容器”。"
-         "保留题干、解析、难度、知识点标签。输出 .xlsx。"],
+        [
+            "",
+            "请把以下 Word 题库按题型分别整理到对应的 Excel Sheet。"
+            "每个 Sheet 第一行是表头，从第二行起每题一行。"
+            "选项用 A.xxx\\nB.xxx 格式；多选答案连写字母如 ABC；"
+            "判断题答案写“正确”或“错误”；"
+            "填空题答案按空位顺序用 | 分隔，每空多个等价答案用 / 分隔；"
+            "拖拽题在“题项与正确容器”列每行写“题项:正确容器”。"
+            "保留题干、解析、难度、知识点标签。输出 .xlsx。",
+        ],
     ]
     for row in notes:
         ws.append(row)
@@ -104,15 +114,39 @@ def build_template() -> BytesIO:
 
 def _add_example(ws, sheet_type: str) -> None:
     if sheet_type == "单选题":
-        ws.append(["以下哪一项是 HTTP 默认端口？", "A.21\nB.80\nC.443\nD.8080", "B", "HTTP 默认 80，HTTPS 默认 443", 1, "网络,基础", 2, ""])
+        ws.append(
+            [
+                "以下哪一项是 HTTP 默认端口？",
+                "A.21\nB.80\nC.443\nD.8080",
+                "B",
+                "HTTP 默认 80，HTTPS 默认 443",
+                1,
+                "网络,基础",
+                2,
+                "",
+            ]
+        )
     elif sheet_type == "多选题":
-        ws.append(["以下属于关系型数据库的有？", "A.MySQL\nB.Redis\nC.PostgreSQL\nD.MongoDB", "AC", "Redis/MongoDB 为 NoSQL", 2, "数据库", 3, ""])
+        ws.append(
+            [
+                "以下属于关系型数据库的有？",
+                "A.MySQL\nB.Redis\nC.PostgreSQL\nD.MongoDB",
+                "AC",
+                "Redis/MongoDB 为 NoSQL",
+                2,
+                "数据库",
+                3,
+                "",
+            ]
+        )
     elif sheet_type == "判断题":
         ws.append(["HTTP 是无状态协议。", "正确", "HTTP 协议本身不保存客户端状态。", 1, "网络", 2, ""])
     elif sheet_type == "填空题":
         ws.append(["TCP 三次握手的第二次报文标志位是 ____ 与 ____。", "SYN/同步|ACK/确认", "SYN+ACK", 2, "网络", 2, ""])
     elif sheet_type == "简答题":
-        ws.append(["简述 HTTPS 的工作原理。", "HTTPS = HTTP + TLS。客户端请求服务器证书…", "考察 TLS 握手", 3, "安全", 5, ""])
+        ws.append(
+            ["简述 HTTPS 的工作原理。", "HTTPS = HTTP + TLS。客户端请求服务器证书…", "考察 TLS 握手", 3, "安全", 5, ""]
+        )
     elif sheet_type == "拖拽题":
         ws.append(["将协议与默认端口匹配。", "HTTP:80\nHTTPS:443\nSSH:22\nMySQL:3306", "常见端口", 2, "网络", 3, ""])
 
@@ -147,8 +181,10 @@ def parse_workbook(buf: BytesIO) -> UploadPreview:
     # 仅返回前 20 条用于预览
     preview_rows = rows[:20]
     return UploadPreview(
-        rows=preview_rows, total=len(rows),
-        type_dist=type_dist, errors=errors,
+        rows=preview_rows,
+        total=len(rows),
+        type_dist=type_dist,
+        errors=errors,
     )
 
 
@@ -230,15 +266,23 @@ def _parse_row(sheet_name: str, row: tuple, r_idx: int) -> UploadPreviewRow:
     difficulty = _to_int(cells, _col_index(sheet_name, "难度"), default=2, lo=1, hi=3)
     score = _to_float(cells, _col_index(sheet_name, "分值"), default=2.0)
     tags = _parse_tags(cells, _col_index(sheet_name, "知识点标签"))
-    group_id = _to_int(cells, _col_index(sheet_name, "所属分组ID"), default=0) or None
     analysis_col = _col_index(sheet_name, "解析")
     analysis = str(cells[analysis_col] or "").strip() if analysis_col < len(cells) else ""
 
     return UploadPreviewRow(
-        type=qtype, question=question_text, options=options,
-        left_items=left_items, right_items=right_items, answer=answer,
-        analysis=analysis, difficulty=difficulty, tags=tags, score=score,
-        row_index=r_idx, valid=not error, error=error,
+        type=qtype,
+        question=question_text,
+        options=options,
+        left_items=left_items,
+        right_items=right_items,
+        answer=answer,
+        analysis=analysis,
+        difficulty=difficulty,
+        tags=tags,
+        score=score,
+        row_index=r_idx,
+        valid=not error,
+        error=error,
     )
 
 

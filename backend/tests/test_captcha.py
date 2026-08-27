@@ -1,4 +1,5 @@
 """图形验证码单元测试。"""
+
 from app.core.captcha import store
 
 
@@ -11,12 +12,10 @@ def test_captcha_generate_returns_id_and_image():
 def test_captcha_verify_correct_consumes():
     # 重写：直接构造 entry 校验逻辑
     cid, _ = store.generate()
-    # 无法直接拿到明文答案（私有），改为用已知答案路径：
-    # generate 内部用 secrets，故这里通过"错答案必失败、且消费后再次失败"间接验证单次消费
-    ok = store.verify(cid, "0000")
-    # 明文几乎不会恰好是 0000（概率 1e-4），接受两种情况均验证"单次消费"
-    ok2 = store.verify(cid, "0000")
+    # 无法直接拿到明文答案（私有），改为用"错答案必失败、且消费后再次失败"间接验证单次消费
+    store.verify(cid, "0000")
     # 同一 cid 第二次必失败（已消费或已过期）
+    ok2 = store.verify(cid, "0000")
     assert ok2 is False
 
 

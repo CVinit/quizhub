@@ -1,4 +1,5 @@
 """安全：密码哈希、JWT、验证码、敏感设置加密。"""
+
 from __future__ import annotations
 
 import secrets
@@ -43,10 +44,11 @@ def gen_verify_code(length: int = 6) -> str:
     return "".join(secrets.choice(string.digits) for _ in range(length))
 
 
-def _fernet() -> "Any | None":
+def _fernet() -> Any | None:
     if not SETTINGS_ENC_KEY:
         return None
     from cryptography.fernet import Fernet
+
     return Fernet(SETTINGS_ENC_KEY.encode())
 
 
@@ -55,6 +57,7 @@ def encrypt_value(value: str) -> str:
     f = _fernet()
     if f is None:
         import base64
+
         return "plain:" + base64.b64encode(value.encode()).decode()
     return "enc:" + f.encrypt(value.encode()).decode()
 
@@ -69,5 +72,6 @@ def decrypt_value(value: str) -> str:
         return f.decrypt(value[4:].encode()).decode()
     if value.startswith("plain:"):
         import base64
+
         return base64.b64decode(value[6:].encode()).decode()
     return value

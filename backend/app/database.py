@@ -1,13 +1,13 @@
 """SQLAlchemy 引擎与会话，SQLite 开启 WAL 提升并发读。"""
+
 from __future__ import annotations
 
 from contextlib import contextmanager
 
 from sqlalchemy import create_engine, event
-from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
+from sqlalchemy.orm import DeclarativeBase, sessionmaker
 
 from app.config import DB_PATH
-
 
 engine = create_engine(
     f"sqlite:///{DB_PATH}",
@@ -34,6 +34,7 @@ class Base(DeclarativeBase):
 def init_db() -> None:
     """导入全部模型后调用，创建所有表。"""
     import app.models  # noqa: F401  确保所有模型被注册
+
     Base.metadata.create_all(bind=engine)
 
 

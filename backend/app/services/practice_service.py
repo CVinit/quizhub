@@ -1,7 +1,7 @@
 """练习业务：模式选题、逐题判分落库、题目状态、错题本、标记、简答自评。"""
+
 from __future__ import annotations
 
-import random
 from datetime import datetime, timezone
 
 from fastapi import HTTPException, status
@@ -11,7 +11,6 @@ from sqlalchemy.orm import Session
 from app.models.question import Question
 from app.models.record import PracticeRecord, QuestionState
 from app.services.grading import grade
-
 
 PRACTICE_MODES = ("sequence", "random", "type", "wrong", "mark", "bank")
 # 单次练习返回题量上限，避免全量加载 100k 题库
@@ -41,12 +40,9 @@ def list_modes(db: Session, user_id: int, bank_id: int | None = None) -> dict:
 
     # practiced/wrong/marked 来自 QuestionState（无 bank_id），bank_id 非空时 JOIN Question 按范围过滤
     def _count_states(status_filter) -> int:
-        stmt = select(func.count(QuestionState.question_id)).where(
-            QuestionState.user_id == user_id, status_filter
-        )
+        stmt = select(func.count(QuestionState.question_id)).where(QuestionState.user_id == user_id, status_filter)
         if bank_id:
-            stmt = stmt.join(Question, Question.id == QuestionState.question_id
-                             ).where(Question.bank_id == bank_id)
+            stmt = stmt.join(Question, Question.id == QuestionState.question_id).where(Question.bank_id == bank_id)
         return db.execute(stmt).scalar() or 0
 
     practiced = _count_states(QuestionState.status != "unanswered")
@@ -57,17 +53,26 @@ def list_modes(db: Session, user_id: int, bank_id: int | None = None) -> dict:
     bank_rows = db.execute(
         select(QuestionBank.id, QuestionBank.name, func.count(Question.id))
         .join(Question, Question.bank_id == QuestionBank.id, isouter=True)
-        .group_by(QuestionBank.id).order_by(QuestionBank.id.desc())
+        .group_by(QuestionBank.id)
+        .order_by(QuestionBank.id.desc())
     ).all()
     banks = [{"id": r[0], "name": r[1], "count": r[2]} for r in bank_rows]
     return {
-        "total": total, "practiced": practiced, "wrong": wrong, "marked": marked,
-        "type_dist": type_dist, "banks": banks,
+        "total": total,
+        "practiced": practiced,
+        "wrong": wrong,
+        "marked": marked,
+        "type_dist": type_dist,
+        "banks": banks,
     }
 
 
 def start_practice(
-    db: Session, user_id: int, mode: str, type_: str | None, limit: int | None,
+    db: Session,
+    user_id: int,
+    mode: str,
+    type_: str | None,
+    limit: int | None,
     bank_id: int | None = None,
 ) -> list[dict]:
     """按模式返回练习题目。
@@ -81,18 +86,27 @@ def start_practice(
         limit = PRACTICE_LIMIT_MAX
 
     if mode == "wrong":
-        ids = [r[0] for r in db.execute(
-            select(QuestionState.question_id).where(
-                QuestionState.user_id == user_id, QuestionState.status == "wrong"
-            ).limit(limit)
-        ).all()]
+        ids = [
+            r[0]
+            for r in db.execute(
+                select(QuestionState.question_id)
+                .where(QuestionState.user_id == user_id, QuestionState.status == "wrong")
+                .limit(limit)
+            ).all()
+        ]
         rows = _by_ids_with_bank(db, ids, bank_id)
     elif mode == "mark":
-        ids = [r[0] for r in db.execute(
-            select(QuestionState.question_id).where(
-                QuestionState.user_id == user_id, QuestionState.marked == True  # noqa: E712
-            ).limit(limit)
-        ).all()]
+        ids = [
+            r[0]
+            for r in db.execute(
+                select(QuestionState.question_id)
+                .where(
+                    QuestionState.user_id == user_id,
+                    QuestionState.marked == True,  # noqa: E712
+                )
+                .limit(limit)
+            ).all()
+        ]
         rows = _by_ids_with_bank(db, ids, bank_id)
     elif mode == "type":
         if not type_:
@@ -134,17 +148,27 @@ def answer_question(db: Session, user_id: int, question_id: int, user_answer, mo
     now = _now()
 
     # 写练习记录
-    db.add(PracticeRecord(
-        user_id=user_id, question_id=question_id, bank_id=q.bank_id, mode=mode,
-        user_answer=user_answer, is_correct=is_correct, self_eval=None, answered_at=now,
-    ))
+    db.add(
+        PracticeRecord(
+            user_id=user_id,
+            question_id=question_id,
+            bank_id=q.bank_id,
+            mode=mode,
+            user_answer=user_answer,
+            is_correct=is_correct,
+            self_eval=None,
+            answered_at=now,
+        )
+    )
 
     # 更新题目状态
-    st = db.execute(select(QuestionState).where(
-        QuestionState.user_id == user_id, QuestionState.question_id == question_id
-    )).scalar_one_or_none()
+    st = db.execute(
+        select(QuestionState).where(QuestionState.user_id == user_id, QuestionState.question_id == question_id)
+    ).scalar_one_or_none()
     if st is None:
-        st = QuestionState(user_id=user_id, question_id=question_id, status="unanswered", marked=False, marked_note="", answered_at=now)
+        st = QuestionState(
+            user_id=user_id, question_id=question_id, status="unanswered", marked=False, marked_note="", answered_at=now
+        )
         db.add(st)
 
     if is_correct is True:
@@ -157,7 +181,7 @@ def answer_question(db: Session, user_id: int, question_id: int, user_answer, mo
     db.commit()
     return {
         "is_correct": is_correct,
-        "correct_answer": q.answer if is_correct is not None else q.answer,
+        "correct_answer": q.answer,
         "analysis": q.analysis,
         "reference_answer": q.answer if q.type == "简答题" else None,
     }
@@ -166,29 +190,45 @@ def answer_question(db: Session, user_id: int, question_id: int, user_answer, mo
 def get_progress(db: Session, user_id: int) -> dict:
     """顺序练习进度：当前已练习数 + 总数（用 COUNT，避免全表载入）。"""
     total = db.execute(select(func.count(Question.id))).scalar() or 0
-    practiced = db.execute(
-        select(func.count(QuestionState.question_id)).where(
-            QuestionState.user_id == user_id, QuestionState.status != "unanswered"
-        )
-    ).scalar() or 0
+    practiced = (
+        db.execute(
+            select(func.count(QuestionState.question_id)).where(
+                QuestionState.user_id == user_id, QuestionState.status != "unanswered"
+            )
+        ).scalar()
+        or 0
+    )
     return {"total": total, "practiced": practiced}
 
 
 def recent_practice(db: Session, user_id: int, limit: int = 10) -> list[dict]:
     """最近练习记录（面板用）。"""
-    rows = db.execute(
-        select(PracticeRecord).where(PracticeRecord.user_id == user_id)
-        .order_by(PracticeRecord.id.desc()).limit(limit)
-    ).scalars().all()
+    rows = (
+        db.execute(
+            select(PracticeRecord)
+            .where(PracticeRecord.user_id == user_id)
+            .order_by(PracticeRecord.id.desc())
+            .limit(limit)
+        )
+        .scalars()
+        .all()
+    )
     out = []
     for r in rows:
         q = db.get(Question, r.question_id)
-        out.append({
-            "id": r.id, "question_id": r.question_id,
-            "question": (q.question[:50] + "…") if q and len(q.question) > 50 else (q.question if q else "（题目已删除）"),
-            "type": q.type if q else "", "mode": r.mode,
-            "is_correct": r.is_correct, "answered_at": r.answered_at,
-        })
+        out.append(
+            {
+                "id": r.id,
+                "question_id": r.question_id,
+                "question": (q.question[:50] + "…")
+                if q and len(q.question) > 50
+                else (q.question if q else "（题目已删除）"),
+                "type": q.type if q else "",
+                "mode": r.mode,
+                "is_correct": r.is_correct,
+                "answered_at": r.answered_at,
+            }
+        )
     return out
 
 
@@ -196,11 +236,18 @@ def toggle_mark(db: Session, user_id: int, question_id: int, marked: bool, note:
     q = db.get(Question, question_id)
     if not q:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "题目不存在")
-    st = db.execute(select(QuestionState).where(
-        QuestionState.user_id == user_id, QuestionState.question_id == question_id
-    )).scalar_one_or_none()
+    st = db.execute(
+        select(QuestionState).where(QuestionState.user_id == user_id, QuestionState.question_id == question_id)
+    ).scalar_one_or_none()
     if st is None:
-        st = QuestionState(user_id=user_id, question_id=question_id, status="unanswered", marked=False, marked_note="", answered_at=_now())
+        st = QuestionState(
+            user_id=user_id,
+            question_id=question_id,
+            status="unanswered",
+            marked=False,
+            marked_note="",
+            answered_at=_now(),
+        )
         db.add(st)
     st.marked = marked
     st.marked_note = note
@@ -215,18 +262,21 @@ def short_eval(db: Session, user_id: int, question_id: int, mastered: bool) -> N
     now = _now()
     # 更新最近的练习记录自评
     rec = db.execute(
-        select(PracticeRecord).where(
-            PracticeRecord.user_id == user_id, PracticeRecord.question_id == question_id
-        ).order_by(PracticeRecord.id.desc()).limit(1)
+        select(PracticeRecord)
+        .where(PracticeRecord.user_id == user_id, PracticeRecord.question_id == question_id)
+        .order_by(PracticeRecord.id.desc())
+        .limit(1)
     ).scalar_one_or_none()
     if rec:
         rec.self_eval = mastered
         rec.is_correct = mastered
-    st = db.execute(select(QuestionState).where(
-        QuestionState.user_id == user_id, QuestionState.question_id == question_id
-    )).scalar_one_or_none()
+    st = db.execute(
+        select(QuestionState).where(QuestionState.user_id == user_id, QuestionState.question_id == question_id)
+    ).scalar_one_or_none()
     if st is None:
-        st = QuestionState(user_id=user_id, question_id=question_id, status="unanswered", marked=False, marked_note="", answered_at=now)
+        st = QuestionState(
+            user_id=user_id, question_id=question_id, status="unanswered", marked=False, marked_note="", answered_at=now
+        )
         db.add(st)
     st.status = "correct" if mastered else "wrong"
     st.answered_at = now
@@ -235,8 +285,15 @@ def short_eval(db: Session, user_id: int, question_id: int, mastered: bool) -> N
 
 def _to_dict(q: Question) -> dict:
     return {
-        "id": q.id, "type": q.type, "question": q.question,
-        "options": q.options, "left_items": q.left_items, "right_items": q.right_items,
-        "analysis": q.analysis, "difficulty": q.difficulty, "tags": q.tags, "score": q.score,
+        "id": q.id,
+        "type": q.type,
+        "question": q.question,
+        "options": q.options,
+        "left_items": q.left_items,
+        "right_items": q.right_items,
+        "analysis": q.analysis,
+        "difficulty": q.difficulty,
+        "tags": q.tags,
+        "score": q.score,
         "group_id": q.group_id,
     }

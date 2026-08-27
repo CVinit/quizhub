@@ -3,19 +3,20 @@
 匹配 SQLite + 单 uvicorn 进程的轻量化架构，无需 Redis。
 若生产改多 worker（gunicorn -w N），需切换为分布式后端（如 Redis），否则各 worker 计数独立。
 """
+
 from __future__ import annotations
 
 import os
 import threading
 import time
-from typing import Callable
+from collections.abc import Callable
 
 from fastapi import HTTPException, Request, status
 
-# 是否信任反向代理头 X-Forwarded-For（默认信任，生产建议走 Nginx 反代）。
-# Nginx 必须用 `proxy_set_header X-Forwarded-For $remote_addr;` 覆盖该头以防伪造。
-# 裸跑 uvicorn（无反代）时设为 false，直接用连接对端地址。
-_TRUST_PROXY = os.getenv("TRAINING_TRUST_PROXY", "true").lower() in ("1", "true", "yes", "on")
+# 是否信任反向代理头 X-Forwarded-For。默认不信任（裸跑 uvicorn 时安全），
+# 仅当确认上游 Nginx 已用 `proxy_set_header X-Forwarded-For $remote_addr;`
+# 覆盖该头（防伪造）时，再经 TRAINING_TRUST_PROXY=true 显式开启。
+_TRUST_PROXY = os.getenv("TRAINING_TRUST_PROXY", "false").lower() in ("1", "true", "yes", "on")
 
 
 def get_client_ip(request: Request) -> str:
