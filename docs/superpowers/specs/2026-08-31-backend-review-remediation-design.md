@@ -216,8 +216,9 @@ uv run pytest --cov=app --cov-report=term-missing --cov-fail-under=75
 2. 运行可重入迁移脚本：先做邮箱/重复成绩/题目快照可回填检查；检查不通过则不修改 schema。
 3. 检查通过后，在事务中创建 `ImportPreview`、`RateLimitBucket`，增加 `ExamSession.shuffle_maps`、`ExamQuestion.snapshot`，回填快照和旧进行中会话的 identity 映射，最后创建结果和邮箱唯一索引。
 4. 迁移完成后部署只使用新 schema 的代码，不保留旧内存 token 双读逻辑。
-5. 启动后运行完整测试和一次手动导入/开考/交卷冒烟；失败则停止服务并用 backup 恢复。
-6. 不修改现有路由路径，前端只需兼容后端返回的重排选项。
+5. 清空并按全部历史日期重建 `StatsUserDaily`，确保旧聚合中的模拟考试和未公布成绩被移除；重建成功后才开放排行接口。
+6. 启动后运行完整测试和一次手动导入/开考/交卷冒烟；失败则停止服务，同时回滚旧版本代码和数据库 backup，不能只恢复数据库。
+7. 不修改现有路由路径，前端只需兼容后端返回的重排选项。
 
 ## 验收标准
 
