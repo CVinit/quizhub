@@ -73,11 +73,13 @@ AND exam_results.published = 1
 - 已存在会话或成绩时，禁止重新发布或改变核心规则。
 - 发布前必须验证题目引用、模板引用、时间格式、时间先后和试卷非空。
 
-所有更新/发布使用带状态条件的 SQL UPDATE 并检查 rowcount；SQLite 写锁冲突返回 503 并由调用方重试。时间窗口继续由 `_within_time_window()` 作为开考的最终判定，状态展示可通过统一的 `effective_status()` 派生，不要求每分钟写库。
+所有更新/发布使用带状态条件的 SQL UPDATE 并检查 rowcount。涉及规则发布、token 消费、复核/公布的竞争事务显式使用 `BEGIN IMMEDIATE`，配置 busy timeout，并进行有限次数整事务重试；仍失败时返回 503。时间窗口继续由 `_within_time_window()` 作为开考的最终判定，状态展示可通过统一的 `effective_status()` 派生，不要求每分钟写库。
 
 ### 题目快照
 
-`ExamQuestion` 增加 `snapshot` JSON 字段，保存首次固化时的 `type/question/options/left_items/right_items/answer/analysis/score`。会话展示和交卷判分只读取快照，不再读取可被管理员修改的 `Question` 当前内容。已发布考试引用的题目仍可在题库中维护，但不会影响历史考试。旧数据迁移时，如果快照为空，先按当前题目回填；无法回填的考试阻断迁移并要求人工处理。
+`ExamQuestion` 增加 `snapshot` JSON 字段，保存 `type/question/options/left_items/right_items/answer/analysis`。考试从 `draft` 发布为 `published` 的同一事务内完成题目固化和快照写入，快照不允许延迟到首次开考。会话展示和交卷判分只读取快照，不再读取可被管理员修改的 `Question` 当前内容。
+
+分值的唯一数据源仍为 `ExamQuestion.score`；总分、客观题判分、简答复核和成绩公布都读取该列，`snapshot` 不重复保存 score。旧数据迁移时，如果快照为空，按当前题目回填；无法回填的考试阻断迁移并要求人工处理。
 
 ### 会话级选项打乱
 
@@ -95,7 +97,7 @@ AND exam_results.published = 1
 
 开考时根据会话随机源为单选、多选题生成映射并保存；`session_payload()` 返回按映射重排后的选项，但仍使用前端现有 A/B/C 字母交互。交卷时使用反向映射把用户答案还原到快照答案坐标后调用 `grade()`。判断、填空、简答和拖拽题不改变现有语义。
 
-`ExamQuestion.shuffle_map` 保留为旧字段，不再作为新逻辑的数据源；新逻辑唯一以 `ExamSession.shuffle_maps` 为准。旧会话若 `shuffle_maps` 为空，则在同一事务中用 CAS 方式生成并保存兼容映射；已经提交的会话不再修改。映射方向固定为“显示字母 -> 快照原始字母”，并校验为双射。
+`ExamQuestion.shuffle_map` 保留为旧字段，不再作为新逻辑的数据源；新逻辑唯一以 `ExamSession.shuffle_maps` 为准。新会话在创建会话的同一事务内生成并保存映射。旧的进行中会话若 `shuffle_maps` 为空，一律写入 identity 映射，保证已经保存的答案字母不会被重新解释；已经提交的会话不再修改。映射方向固定为“显示字母 -> 快照原始字母”，并校验为双射。
 
 ### 答案语法
 
@@ -141,13 +143,14 @@ UPDATE import_previews
 SET status = 'succeeded', consumed_at = :now, result = :result
 WHERE token_hash = :hash
   AND owner_id = :owner_id
+  AND kind = :kind
   AND status = 'pending'
   AND expires_at > :now
 ```
 
-实际实现先在同一写事务中校验并导入数据，最后用上面的条件 UPDATE 标记 `succeeded` 后提交；任何异常都回滚 token 和导入数据，token 保持可重试。客户端在网络超时后再次提交时，如果已是 `succeeded`，直接返回保存的 `result`，而不是重复导入。并发请求只有一个能更新成功，另一个在提交后读取到 `succeeded` 并返回同一结果。
+实际实现使用 `BEGIN IMMEDIATE` 开启写事务，在同一事务中校验并导入数据，最后用上面的条件 UPDATE 标记 `succeeded` 后提交；任何异常都回滚 token 和导入数据，token 保持可重试。客户端在网络超时后再次提交时，只有相同 `owner_id + kind` 且状态为 `succeeded` 才返回已保存的 200 `result`；其他情况统一返回 400。并发请求只有一个能更新成功，另一个在提交后读取到同一 `succeeded` 结果。
 
-外部错误统一为“预览不可用”（400），不区分不存在、过期、归属不符和已消费；详细原因只写内部日志。SQLite 锁冲突设置 busy timeout，超过重试次数返回 503。
+外部错误统一为“预览不可用”（400），不区分不存在、过期、归属不符或 kind 不符；已成功消费的同 owner/kind 重试是上述唯一例外。详细原因只写内部日志。SQLite 锁冲突设置 busy timeout，超过重试次数返回 503。
 
 增加过期记录清理函数，在预览创建和启动维护时执行；迁移脚本必须可重入，失败时保留原表并可回滚。
 
@@ -165,13 +168,15 @@ WHERE token_hash = :hash
 
 ### 复核与统计一致性
 
-复核提交和成绩公布都要求 `ExamResult.published = false`。复核记录的条件 UPDATE 同时检查所属成绩未公布；公布操作在同一写事务内重新统计待复核记录并更新成绩。已经公布的成绩不允许再复核或加分。公布成功后，针对受影响日期调用可重入的 `refresh_daily()`，启动刷新和手动刷新作为兜底。
+复核提交和成绩公布都要求 `ExamResult.published = false`。复核记录的条件 UPDATE 同时检查所属成绩未公布；公布操作在同一 `BEGIN IMMEDIATE` 写事务内重新统计待复核记录并更新成绩。已经公布的成绩不允许再复核或加分。
+
+所有把 `published` 从 false 改为 true 的路径都必须在业务事务提交后刷新对应日期统计，包括 `submit_exam()` 立即公布和 `publish_results()` 人工公布。刷新使用新 Session 执行可重入的 `refresh_daily()`；刷新失败记录错误并由启动刷新/手动刷新兜底。
 
 具体条件更新使用 `EXISTS` 子查询检查所属 `ExamResult.published = false`。SQLite 写事务会串行化复核和公布：先提交复核则公布看到新分数；先提交公布则后续复核 rowcount 为 0 并返回 409。
 
 ## 错误处理
 
-- token 不存在、过期、归属不符或已消费统一返回同一种 400，不泄露 token 状态或其他用户的 payload。
+- token 不存在、过期、归属不符或 kind 不符统一返回同一种 400，不泄露 token 状态或其他用户的 payload；同 owner/kind 的成功重试返回原成功结果。
 - 已发布考试修改返回 409，避免被误认为参数错误。
 - 非法题目答案、非法引用和时间配置返回 400。
 - Excel 可预期解析异常统一转换为 400，并确保数据库事务回滚；未知程序异常保留 500，避免吞掉真实缺陷。
@@ -205,11 +210,13 @@ uv run pytest --cov=app --cov-report=term-missing --cov-fail-under=75
 
 ## 迁移与发布
 
-1. 先新增模型和迁移脚本，保证旧数据库可以增量升级；迁移脚本单事务、可重入，保留原表直到校验完成。
-2. 迁移前停止写入并执行 SQLite checkpoint/backup，不直接复制正在变化的 WAL/SHM 文件。
-3. 迁移脚本依次处理 `ImportPreview`、`RateLimitBucket`、`ExamSession.shuffle_maps`、`ExamQuestion.snapshot`、`ExamResult.exam_session_id` 唯一索引和邮箱大小写唯一索引；任何重复/无法回填数据都先报告并停止。
-4. 先部署兼容读取逻辑，再启用新的 token 写入、题目快照和会话 shuffle 字段；滚动部署期间不使用旧的进程内 token 缓存。
-5. 迁移完成后运行完整测试和一次手动导入/开考/交卷冒烟。
+本次 SQLite 发布采用停机维护，不做滚动部署：
+
+1. 停止全部应用进程和写入，执行 checkpoint，并使用 SQLite backup API 生成一致性备份。
+2. 运行可重入迁移脚本：先做邮箱/重复成绩/题目快照可回填检查；检查不通过则不修改 schema。
+3. 检查通过后，在事务中创建 `ImportPreview`、`RateLimitBucket`，增加 `ExamSession.shuffle_maps`、`ExamQuestion.snapshot`，回填快照和旧进行中会话的 identity 映射，最后创建结果和邮箱唯一索引。
+4. 迁移完成后部署只使用新 schema 的代码，不保留旧内存 token 双读逻辑。
+5. 启动后运行完整测试和一次手动导入/开考/交卷冒烟；失败则停止服务并用 backup 恢复。
 6. 不修改现有路由路径，前端只需兼容后端返回的重排选项。
 
 ## 验收标准
