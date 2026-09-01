@@ -1,0 +1,44 @@
+# 版本控制 / CI / 编辑器
+.git
+.github
+.claude
+
+# 本地依赖与缓存
+backend/.venv
+frontend/node_modules
+**/__pycache__
+**/*.py[cod]
+backend/.pytest_cache
+backend/.mypy_cache
+backend/.ruff_cache
+backend/*.egg-info
+
+# 构建产物（镜像内重新构建）
+frontend/dist
+
+# 运行时数据（经卷挂载注入容器）
+backend/data
+*.db
+*.db-wal
+*.db-shm
+*.db-journal
+
+# 镜像运行不需要的测试与文档
+backend/tests
+docs
+
+# 敏感文件与宿主机部署配置
+.env
+.env.*
+*.pem
+*.key
+docker-compose.yml
+
+# 一键启动脚本（宿主机用，容器内由 entrypoint 接管）
+start.sh
+start.bat
+start.ps1
+
+# 顶层无关资料
+*.docx
+*.xlsx

@@ -27,6 +27,11 @@ quizhub/
 ├── frontend/            # Vue3 + TS 前端
 │   └── src/              # views / layouts / components / api / stores / composables
 ├── docs/                # 需求 / 架构 / UI-UX / 任务清单 / 部署 / 审计等文档
+├── .github/workflows/   # GitHub Actions：自动构建镜像并推送 GHCR
+├── docker/              # 容器入口与健康检查脚本
+├── Dockerfile           # 多阶段构建（前端 dist + 后端 venv → 单镜像）
+├── docker-compose.yml   # 容器编排（其他设备拉取镜像一键部署）
+├── .env.example         # 容器部署环境变量模板
 ├── start.sh              # 一键启动（Linux/macOS，bash）
 ├── start.bat             # 一键启动（Windows CMD）
 └── start.ps1             # 一键启动（Windows PowerShell）
@@ -95,6 +100,37 @@ Windows 注意点：
 - SQLite WAL 模式在 Windows 正常工作，`training.db-wal`/`-shm` 自动生成，无需配置。
 - 若 8000 端口被占用，改 `--port 8001`。
 - 生产密钥环境变量设置：PowerShell `$env:TRAINING_SECRET_KEY="..."`；CMD `set TRAINING_SECRET_KEY=...`。
+
+## Docker 部署
+
+镜像由 GitHub Actions 自动构建并发布到 GitHub Container Registry：**`ghcr.io/cvinit/quizhub`**（多架构 amd64/arm64）。
+
+| 触发 | 产出镜像标签 |
+| --- | --- |
+| 推送 `main` / 手动触发 | `latest`、`main`、`sha-<commit>` |
+| 推送 `v*` 标签（如 `v1.2.0`） | `1.2.0`、`1.2` |
+| Pull Request | 仅构建验证，不推送 |
+
+### 其他设备拉取最新镜像部署
+
+```bash
+mkdir quizhub && cd quizhub
+curl -fsSLO https://raw.githubusercontent.com/CVinit/quizhub/main/docker-compose.yml
+curl -fsSLO https://raw.githubusercontent.com/CVinit/quizhub/main/.env.example
+mv .env.example .env
+
+# 编辑 .env：至少填入 TRAINING_SECRET_KEY（文件内有生成命令注释）
+docker compose up -d          # 自动拉取最新镜像并启动
+```
+
+访问 `http://<服务器IP>:8000`。更新版本：`docker compose pull && docker compose up -d`。
+
+- 数据（SQLite + 上传文件）持久化在 `./data/`，备份该目录即可
+- 日志：`docker compose logs -f`；容器内置 HEALTHCHECK（探测 `/api/system/site`）
+- 若 GHCR 包可见性为 Private，拉取前先 `docker login ghcr.io`（需 PAT），或在 GitHub 仓库 → Packages → quizhub → Package settings 改为 Public
+- 容器以非 root（uid 1000）运行：绑定挂载的宿主机数据目录需可写（`sudo chown -R 1000:1000 ./data`）
+
+详见 [docs/deployment.md](docs/deployment.md) 的「容器化部署」章节。
 
 ## 默认账号
 

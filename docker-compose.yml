@@ -1,0 +1,25 @@
+# QuizHub 生产容器部署
+# 用法：cp .env.example .env 并填入 TRAINING_SECRET_KEY，然后 docker compose up -d
+# 更新：docker compose pull && docker compose up -d
+services:
+  quizhub:
+    image: ghcr.io/cvinit/quizhub:latest
+    restart: unless-stopped
+    ports:
+      # 宿主机端口可用 .env 的 HTTP_PORT 覆盖（默认 8000）
+      - "${HTTP_PORT:-8000}:8000"
+    environment:
+      # 必填：JWT 签名密钥。缺失时应用生成进程级随机密钥，容器重启后所有登录失效
+      TRAINING_SECRET_KEY: ${TRAINING_SECRET_KEY:?请在 .env 中设置 TRAINING_SECRET_KEY}
+      # 可选：SMTP 密码等敏感设置的 Fernet 加密密钥（未设置则拒绝写入敏感设置）
+      TRAINING_ENC_KEY: ${TRAINING_ENC_KEY:-}
+      # 仅首次建库时生效的超管账号；不设置密码则初始化脚本生成一次性随机密码（见容器日志）
+      TRAINING_SUPER_ADMIN_EMAIL: ${TRAINING_SUPER_ADMIN_EMAIL:-admin@example.com}
+      TRAINING_SUPER_ADMIN_PASSWORD: ${TRAINING_SUPER_ADMIN_PASSWORD:-}
+      # 反向代理后设为 true：从 X-Forwarded-For 取真实客户端 IP（限流/审计依赖）
+      TRAINING_TRUST_PROXY: ${TRAINING_TRUST_PROXY:-false}
+      # 前后端同源部署无需配置；需要跨域时改为允许的来源列表（逗号分隔）
+      TRAINING_CORS_ORIGINS: ${TRAINING_CORS_ORIGINS:-*}
+    volumes:
+      # SQLite 数据库与上传文件持久化到宿主机，备份该目录即可
+      - ./data:/opt/quizhub/backend/data

@@ -64,6 +64,10 @@ desktop.ini
 # ===== Claude Code 本地配置 =====
 .claude/settings.local.json
 
+# ===== Docker 部署 =====
+# 仓库内 compose 部署时生成的运行时数据（docker-compose.yml 卷挂载 ./data）
+/data/
+
 # ===== 顶层非项目资料（与代码无关的复习文档）=====
 /基础班知识总结与复习资料.docx
 /基础班知识总结与复习资料.xlsx

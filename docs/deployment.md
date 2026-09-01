@@ -10,6 +10,7 @@
 | Node.js | 18+ |
 | 包管理 | uv（后端）/ pnpm 或 npm（前端） |
 | 数据库 | SQLite3（WAL 模式，无需独立部署） |
+| Docker（容器部署，可选） | 20+，含 Compose V2 |
 
 ## 二、目录结构
 
@@ -62,7 +63,57 @@ pnpm install && pnpm build               # 产物输出到 frontend/dist
 
 后端 `main.py` 会自动托管 `frontend/dist` 作为静态资源，无需额外 Nginx。
 
-## 五、环境变量
+## 五、容器化部署（Docker）
+
+镜像经 GitHub Actions 自动构建并发布到 GitHub Container Registry（GHCR）：`ghcr.io/cvinit/quizhub`，多架构 `linux/amd64` + `linux/arm64`。
+
+### 1. 自动构建规则（`.github/workflows/docker-image.yml`）
+
+| 触发 | 推送标签 |
+| --- | --- |
+| 推送 `main` / 手动 workflow_dispatch | `latest`、`main`、`sha-<commit>` |
+| 推送 `v*` 标签 | `<version>`、`<major.minor>` |
+| Pull Request | 仅构建验证，不推送 |
+
+单容器方案：多阶段构建（Node 构建前端 dist → uv 安装后端依赖 → `python:3.12-slim` 运行），容器内布局 `/opt/quizhub/{backend,frontend/dist}`，由后端继续托管前端静态资源；入口脚本幂等执行 `init_db` + 增量迁移后以 uvicorn 单进程启动（与 SQLite WAL、内存限流的架构假设一致）。
+
+### 2. 首次发布
+
+改动合并到 `main` 后 Actions 自动构建并推送。首次推送后建议把包设为公开：GitHub 仓库 → Packages → quizhub → Package settings → Change visibility → Public。若保持 Private，其他设备拉取前需 `docker login ghcr.io`（使用具备 `read:packages` 权限的 PAT）。
+
+### 3. 其他设备拉取部署（docker compose）
+
+```bash
+mkdir quizhub && cd quizhub
+curl -fsSLO https://raw.githubusercontent.com/CVinit/quizhub/main/docker-compose.yml
+curl -fsSLO https://raw.githubusercontent.com/CVinit/quizhub/main/.env.example
+mv .env.example .env          # 至少填入 TRAINING_SECRET_KEY
+docker compose up -d          # 拉取 latest 并启动
+```
+
+访问 `http://<服务器IP>:8000`。更新版本：`docker compose pull && docker compose up -d`。数据（SQLite 库 + 上传文件）持久化在宿主机 `./data/`，备份该目录即可。
+
+### 4. 本地构建（可选）
+
+```bash
+docker build -t quizhub:local .
+docker run -d --name quizhub -p 8000:8000 \
+  -e TRAINING_SECRET_KEY="$(python3 -c 'import secrets; print(secrets.token_urlsafe(48))')" \
+  -v "$(pwd)/data:/opt/quizhub/backend/data" \
+  quizhub:local
+```
+
+### 5. 容器要点
+
+| 项 | 说明 |
+| --- | --- |
+| 非 root 运行 | 容器内 uid/gid 1000；绑定挂载宿主机目录需可写：`mkdir -p data && sudo chown -R 1000:1000 data` |
+| 健康检查 | 镜像内置 HEALTHCHECK，探测公开接口 `/api/system/site`，`docker ps` 查看 healthy 状态 |
+| 反向代理 | Nginx/Caddy 转发后设 `TRAINING_TRUST_PROXY=true`（见 `.env.example`），限流/审计才能取到真实 IP |
+| 端口 | 宿主机映射端口经 `.env` 的 `HTTP_PORT` 覆盖；容器内固定 8000，必要时用 `PORT` 环境变量改内部端口 |
+| 超管密码 | 未设置 `TRAINING_SUPER_ADMIN_PASSWORD` 时，首次启动生成的一次性密码打印在容器日志中 |
+
+## 六、环境变量
 
 通过环境变量注入密钥（生产环境务必设置）：
 
@@ -81,7 +132,7 @@ pnpm install && pnpm build               # 产物输出到 frontend/dist
 python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
 ```
 
-## 六、SMTP 邮件配置
+## 七、SMTP 邮件配置
 
 登录管理后台 → 系统管理 → 基础设置/SMTP 邮件：
 
@@ -91,14 +142,14 @@ python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().d
 
 > 未配置 SMTP 时，验证码邮件不会发送，也不会把收件人或验证码写入后端日志。
 
-## 七、题库导入
+## 八、题库导入
 
 1. 管理后台 → 题库管理 → 上传题库
 2. 下载 Excel 模板（6 个题型 Sheet + 说明 Sheet + 大模型转换 Prompt）
 3. 可借助豆包/DeepSeek 等大模型按 Prompt 将 Word 题库转为该 Excel 格式
 4. 选分组/题库 → 上传预览 → 查看错误报告 → 确认导入
 
-## 八、运行单元测试
+## 九、运行单元测试
 
 ```bash
 cd backend
@@ -108,7 +159,7 @@ uv run pytest tests/ -v
 
 覆盖判分（grading）、Excel 解析（excel）、规则组卷（paper）。
 
-## 九、生产部署建议
+## 十、生产部署建议
 
 - **进程管理**：用 `gunicorn -k uvicorn.workers.UvicornWorker app.main:app` 或 systemd 托管
 - **反向代理**：Nginx 转发 80/443 到 8000，配置 SSL
@@ -145,11 +196,14 @@ uv run pytest tests/ -v
 
 **反代 IP 伪造防护**：仅信任 `X-Forwarded-For` 的**最右侧一段**（由可信反代写入）。当前实现取首段，生产建议将 Nginx 配置为 `proxy_set_header X-Forwarded-For $remote_addr;`（覆盖而非追加），则首段即真实客户端，取首段安全。
 
-## 十、常见问题
+## 十一、常见问题
 
 | 问题 | 解决 |
 | --- | --- |
 | 端口 8000 被占用 | `--port` 指定其他端口 |
+| 容器重启后所有登录失效 | `.env` 未设置 `TRAINING_SECRET_KEY`，应用退回进程级随机密钥 |
+| 容器启动报数据库只读/无法写入 | 绑定挂载的宿主机数据目录属主不是 uid 1000，`sudo chown -R 1000:1000 ./data` |
+| 拉取镜像提示 denied | GHCR 包为 Private：`docker login ghcr.io`（PAT 含 `read:packages`）或将包改为 Public |
 | 前端样式/主题色不生效 | 清浏览器缓存，或检查「基础设置 → 主题色」 |
 | SMTP 测试邮件未收到 | 查看后端日志的 `[mail][fallback]` 或 SMTP 服务器拒信 |
-| 数据库迁移（表结构变更） | SQLite 用 `ALTER TABLE` 增量补列；重大变更重建库 |
+| 数据库迁移（表结构变更） | SQLite 用 `ALTER TABLE` 增量补列；重大变更重建库（容器入口每次启动自动幂等迁移） |
