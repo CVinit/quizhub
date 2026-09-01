@@ -7,16 +7,21 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+from typing import cast
 
 from fastapi import HTTPException, status
-from sqlalchemy import select
+from sqlalchemy import or_, select, update
+from sqlalchemy.engine import CursorResult
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.models.exam import ExamDefinition, ExamQuestion, PaperTemplate
-from app.models.question import Question
+from app.models.group import Group, UserGroup
+from app.models.question import Question, QuestionBank
 from app.models.record import ExamResult, ExamSession, ShortAnswerReview
 from app.models.user import User
+from app.services import mail_service
 from app.services.grading import grade
 from app.services.paper_service import generate_paper
 from app.services.system_service import get_settings
@@ -28,21 +33,40 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _user_can_access_exam(e: ExamDefinition, user_group_ids: list[int]) -> bool:
+def _user_can_access_exam(e: ExamDefinition, user_group_ids: set[int]) -> bool:
     """考试指派分组与用户分组有交集（空指派表示不限）。"""
     e_groups = e.group_ids or []
     return not e_groups or bool(set(e_groups).intersection(user_group_ids))
 
 
-def _within_time_window(e: ExamDefinition, now: str) -> tuple[bool, str]:
+def _parse_time(value: str) -> datetime:
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "考试时间配置无效") from None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _within_time_window(e: ExamDefinition, now: datetime) -> tuple[bool, str]:
     """正式考试时段校验。返回 (是否在窗口内, 状态)。"""
     if e.type != "formal":
         return True, ""
-    if e.start_at and now < e.start_at:
+    if e.start_at and now < _parse_time(e.start_at):
         return False, "not_started"
-    if e.end_at and now > e.end_at:
+    if e.end_at and now >= _parse_time(e.end_at):
         return False, "ended"
     return True, ""
+
+
+def _is_overtime(e: ExamDefinition, sess: ExamSession, now: datetime | None = None) -> bool:
+    """按服务端开始时间和考试截止时间判断是否超时。"""
+    now = now or datetime.now(timezone.utc)
+    deadline = _parse_time(sess.started_at) + timedelta(minutes=e.duration_min)
+    if e.end_at:
+        deadline = min(deadline, _parse_time(e.end_at))
+    return now >= deadline
 
 
 # ---------- 用户端：可用考试 ----------
@@ -54,9 +78,11 @@ def list_available(db: Session, user: User) -> list[dict]:
     """
     from app.models.group import UserGroup
 
-    user_group_ids = [r[0] for r in db.execute(select(UserGroup.group_id).where(UserGroup.user_id == user.id)).all()]
+    user_group_ids = {r[0] for r in db.execute(select(UserGroup.group_id).where(UserGroup.user_id == user.id)).all()}
+    if user.dept_group_id:
+        user_group_ids.add(user.dept_group_id)
 
-    now = _now()
+    now = datetime.now(timezone.utc)
     rows = (
         db.execute(
             select(ExamDefinition)
@@ -139,12 +165,14 @@ def start_exam(db: Session, user: User, exam_id: int) -> dict:
     if e.type == "formal":
         from app.models.group import UserGroup
 
-        user_group_ids = [
+        user_group_ids = {
             r[0] for r in db.execute(select(UserGroup.group_id).where(UserGroup.user_id == user.id)).all()
-        ]
+        }
+        if user.dept_group_id:
+            user_group_ids.add(user.dept_group_id)
         if not _user_can_access_exam(e, user_group_ids):
             raise HTTPException(status.HTTP_403_FORBIDDEN, "您不在该考试指派范围内")
-        ok, _state = _within_time_window(e, _now())
+        ok, _state = _within_time_window(e, datetime.now(timezone.utc))
         if not ok:
             raise HTTPException(status.HTTP_400_BAD_REQUEST, "考试不在开放时段")
     # 是否有进行中的会话
@@ -186,13 +214,30 @@ def start_exam(db: Session, user: User, exam_id: int) -> dict:
         remaining_sec=e.duration_min * 60,
     )
     db.add(sess)
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        ongoing = db.execute(
+            select(ExamSession).where(
+                ExamSession.exam_definition_id == exam_id,
+                ExamSession.user_id == user.id,
+                ExamSession.status.in_(["in_progress", "scoring"]),
+            )
+        ).scalar_one_or_none()
+        if ongoing:
+            return _session_payload(db, ongoing, e)
+        raise
     db.refresh(sess)
     return _session_payload(db, sess, e)
 
 
 def _ensure_exam_questions(db: Session, e: ExamDefinition) -> list[int]:
-    """确保 exam_questions 已固化，返回题目 id 列表。"""
+    """确保 exam_questions 已固化，返回题目 id 列表。
+
+    固化本身用单条 commit 收尾；并发首次固化由 (exam_definition_id, question_id)
+    唯一约束兜底：后到请求若已存在则直接读取，不重复插入。
+    """
     existing = db.execute(select(ExamQuestion).where(ExamQuestion.exam_definition_id == e.id)).scalars().all()
     if existing:
         return sorted({eq.question_id for eq in existing})
@@ -200,6 +245,8 @@ def _ensure_exam_questions(db: Session, e: ExamDefinition) -> list[int]:
     # 确定题目来源
     if e.manual_questions:
         qids = list(e.manual_questions)
+        if len(qids) != len(set(qids)):
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "同一考试不能重复添加题目")
     elif e.paper_template_id:
         tpl = db.get(PaperTemplate, e.paper_template_id)
         if tpl and tpl.question_ids:
@@ -224,10 +271,35 @@ def _ensure_exam_questions(db: Session, e: ExamDefinition) -> list[int]:
 
 
 def _persist_exam_questions(db: Session, exam_id: int, qids: list[int], scores: dict | None) -> None:
+    """固化题目。并发安全：插入前再次确认无已固化行（唯一约束兜底），逐 seq 构造后单次提交。
+
+    不再在被调函数内提前 commit 破坏调用方事务边界：本函数仅在「首次固化」分支调用，
+    调用方（start_exam）已无未提交写，故此处 commit 是安全的收尾点。
+    """
+    if len(qids) != len(set(qids)):
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "同一考试不能重复添加题目")
+    existing_questions = {row[0] for row in db.execute(select(Question.id).where(Question.id.in_(qids))).all()}
+    missing = set(qids) - existing_questions
+    if missing:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "考试包含不存在的题目")
+    # 并发兜底：唯一约束 + 插入前复核，避免双请求都读到 existing=[] 后重复插入
+    already = db.execute(select(ExamQuestion.id).where(ExamQuestion.exam_definition_id == exam_id).limit(1)).first()
+    if already:
+        return
+    pending = []
     for seq, qid in enumerate(qids):
         score = (scores or {}).get(qid, 2)
-        db.add(ExamQuestion(exam_definition_id=exam_id, question_id=qid, seq=seq, score=score, shuffle_map=None))
-    db.commit()
+        pending.append(
+            ExamQuestion(exam_definition_id=exam_id, question_id=qid, seq=seq, score=score, shuffle_map=None)
+        )
+    if pending:
+        try:
+            db.add_all(pending)
+            db.commit()
+        except IntegrityError:
+            # 并发首次固化，他方已插入：回滚本事务内可能的写，交由后续读取已有行
+            db.rollback()
+    db.expire_all()
 
 
 def _session_payload(db: Session, sess: ExamSession, e: ExamDefinition) -> dict:
@@ -240,11 +312,11 @@ def _session_payload(db: Session, sess: ExamSession, e: ExamDefinition) -> dict:
     qids = [eq.question_id for eq in eqs]
     q_map: dict[int, Question] = {}
     if qids:
-        for q in db.execute(select(Question).where(Question.id.in_(qids))).scalars().all():
-            q_map[q.id] = q
+        for question in db.execute(select(Question).where(Question.id.in_(qids))).scalars().all():
+            q_map[question.id] = question
     questions = []
     for eq in eqs:
-        q = q_map.get(eq.question_id)
+        q: Question | None = q_map.get(eq.question_id)
         if q:
             questions.append(
                 {
@@ -275,27 +347,44 @@ def _session_payload(db: Session, sess: ExamSession, e: ExamDefinition) -> dict:
 def submit_answer(db: Session, user: User, session_id: int, qid: int, answer, version: int) -> dict:
     """原子条件更新 answers + version，避免并发覆盖（原实现为非原子 SELECT-check-UPDATE）。
 
-    原子 UPDATE ... WHERE id=? AND version=? 形如架构决策：affected=0 → 409。
+    原子 UPDATE ... WHERE id=? AND version=? AND status='in_progress' 形如架构决策：
+    affected=0 → 409。status 条件防止 submit_exam 已置 scoring 后，滞后的 submit_answer
+    仍按旧 version 写入并污染已结算会话的 answers。
     """
     sess = db.get(ExamSession, session_id)
     if not sess or sess.user_id != user.id:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "考试会话不存在")
     if sess.status != "in_progress":
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "考试已结束，无法作答")
+    e = db.get(ExamDefinition, sess.exam_definition_id)
+    if not e:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "考试定义不存在")
+    if _is_overtime(e, sess):
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "考试已超时，请提交试卷")
+    if not db.execute(
+        select(ExamQuestion.id).where(
+            ExamQuestion.exam_definition_id == sess.exam_definition_id,
+            ExamQuestion.question_id == qid,
+        )
+    ).first():
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "题目不属于当前考试")
 
     # 合并答案（基于本次读取的 answers 快照）
     answers = dict(sess.answers or {})
     answers[str(qid)] = {"answer": answer, "answered_at": _now()}
     new_version = version + 1
 
-    # 原子条件更新：仅当数据库当前 version == 期望 version 时才写入
-    result = db.execute(
-        ExamSession.__table__.update()
-        .where(ExamSession.id == session_id, ExamSession.version == version)
-        .values(answers=answers, version=new_version)
+    # 原子条件更新：仅当数据库当前 version == 期望 version 且会话仍在进行中时才写入
+    result = cast(
+        CursorResult,
+        db.execute(
+            update(ExamSession)
+            .where(ExamSession.id == session_id, ExamSession.version == version, ExamSession.status == "in_progress")
+            .values(answers=answers, version=new_version)
+        ),
     )
     if result.rowcount == 0:
-        # version 已被他人改动 → 冲突
+        # version 已被他人改动 或 会话已结束 → 冲突
         raise HTTPException(status.HTTP_409_CONFLICT, "数据版本冲突，请刷新后重试")
 
     db.commit()
@@ -310,9 +399,13 @@ _SCORING_TIMEOUT_SEC = 30 * 60
 def _recover_stuck_scoring(db: Session) -> int:
     """回收超时的 scoring 会话：将其重置回 in_progress，释放被卡死的尝试次数。
 
-    返回回收的会话数。仅在单进程串行写的前提下安全（SQLite WAL）。
+    仅重置「无 ExamResult 且超时」的会话：含 ExamResult 的 scoring 会话是合法
+    等待简答复核状态（submit_exam 已写 result 但会话保持 scoring），绝不可被回收，
+    否则会让考生重新作答、改答案，污染复核流程。仅在单进程串行写的前提下安全（SQLite WAL）。
     """
     from datetime import datetime, timezone
+
+    from app.models.record import ExamResult
 
     cutoff_iso = datetime.now(timezone.utc).timestamp() - _SCORING_TIMEOUT_SEC
     rows = db.execute(select(ExamSession).where(ExamSession.status == "scoring")).scalars().all()
@@ -323,6 +416,10 @@ def _recover_stuck_scoring(db: Session) -> int:
         except (ValueError, TypeError):
             continue
         if ts < cutoff_iso:
+            # 已有成绩记录 → 合法待复核会话，跳过
+            has_result = db.execute(select(ExamResult.id).where(ExamResult.exam_session_id == s.id)).first()
+            if has_result:
+                continue
             s.status = "in_progress"
             recovered += 1
     if recovered:
@@ -341,15 +438,16 @@ def submit_exam(db: Session, user: User, session_id: int) -> dict:
 
     # 正式考试截止时间校验：超过 end_at 仍允许交卷但判为超时（成绩置 0），
     # 避免仅靠前端计时、用户越过截止时间仍正常得分。
-    overtime = False
-    if e.type == "formal" and e.end_at and _now() > e.end_at:
-        overtime = True
+    overtime = _is_overtime(e, sess)
 
     # 幂等保护：原子把状态置为 scoring，若已非 in_progress 则 rowcount=0，避免重复提交
-    locked = db.execute(
-        ExamSession.__table__.update()
-        .where(ExamSession.id == session_id, ExamSession.status == "in_progress")
-        .values(status="scoring", submitted_at=_now())
+    locked = cast(
+        CursorResult,
+        db.execute(
+            update(ExamSession)
+            .where(ExamSession.id == session_id, ExamSession.status == "in_progress")
+            .values(status="scoring", submitted_at=_now())
+        ),
     )
     if locked.rowcount == 0:
         # 已被并发提交或已交卷：返回已有结果（幂等），而非报错
@@ -362,11 +460,17 @@ def submit_exam(db: Session, user: User, session_id: int) -> dict:
                 "passed": existing.passed,
                 "correct_count": existing.correct_count,
                 "total_count": existing.total_count,
-                "overtime": False,
+                "overtime": existing.overtime,
             }
         if existing and not existing.published:
-            return {"need_review": True, "message": "含简答题，待管理员复核后公布成绩", "overtime": False}
+            return {"need_review": True, "message": "含简答题，待管理员复核后公布成绩", "overtime": existing.overtime}
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "考试已结束")
+
+    # 锁定成功后，answers 必须以数据库当前值为准：本函数入口的 db.get(ExamSession) 读到的是
+    # 进入函数时的快照，而在「读快照 → 滞后的 submit_answer 提交并 commit → 本请求锁定 scoring」
+    # 这一窗口下，sess.answers 仍是旧内存快照，直接用它判分会丢失滞后提交的作答。锁定的 Core UPDATE
+    # 不刷新 ORM 对象，故此处显式 refresh 重新读取（含任何并发已 commit 的 answers）。
+    db.refresh(sess)
 
     eqs = db.execute(select(ExamQuestion).where(ExamQuestion.exam_definition_id == e.id)).scalars().all()
 
@@ -374,26 +478,26 @@ def submit_exam(db: Session, user: User, session_id: int) -> dict:
     qids = [eq.question_id for eq in eqs]
     q_map: dict[int, Question] = {}
     if qids:
-        for q in db.execute(select(Question).where(Question.id.in_(qids))).scalars().all():
-            q_map[q.id] = q
+        for question in db.execute(select(Question).where(Question.id.in_(qids))).scalars().all():
+            q_map[question.id] = question
 
     correct_count = 0
     total_count = len(eqs)
     objective_score = 0.0
-    total_score = sum(eq.score for eq in eqs) or 100
+    total_score = sum(eq.score for eq in eqs) if eqs else 0
     need_review = False
     short_answers: list[tuple[int, str, str]] = []
 
     answers = sess.answers or {}
     # 超时则客观题不计分，但仍记录作答并走复核流程（若有简答）
     for eq in eqs:
-        q = q_map.get(eq.question_id)
+        q: Question | None = q_map.get(eq.question_id)
         if not q:
             continue
         user_ans = answers.get(str(q.id), {}).get("answer")
         if q.type == "简答题":
             need_review = True
-            short_answers.append((q.id, user_ans or "", q.answer or ""))
+            short_answers.append((q.id, str(user_ans or ""), str(q.answer or "")))
         else:
             ok = grade(q.type, q.answer, user_ans)
             if ok and not overtime:
@@ -416,6 +520,7 @@ def submit_exam(db: Session, user: User, session_id: int) -> dict:
         objective_score=objective_score,
         need_review=need_review,
         published=(not need_review and e.show_score_immediately and not overtime),
+        overtime=overtime,
     )
     db.add(result)
     db.flush()  # 拿到 result.id 再写简答复核记录的外键
@@ -591,8 +696,9 @@ def preview_paper(db: Session, config: dict) -> dict:
     paper = generate_paper(db, config)
     qids = paper["question_ids"]
     questions = []
+    question_map = {q.id: q for q in db.execute(select(Question).where(Question.id.in_(qids))).scalars().all()}
     for qid in qids:
-        q = db.get(Question, qid)
+        q = question_map.get(qid)
         if q:
             questions.append(
                 {
@@ -628,22 +734,96 @@ def create_template(db: Session, payload, user: User) -> dict:
 
 
 # ---------- 管理端：正式考试 ----------
-def list_exams(db: Session) -> list[dict]:
-    # 仅返回正式考试，模拟考为自助发起、不进管理列表，避免 mock 污染
+def list_exams(db: Session, scope: set[int] | None = None) -> list[dict]:
+    """管理端正式考试列表。scope 非 None（部门管理员）时仅返回指派分组落在
+    其子树内、或无指派（全量）的考试由 super_admin 可见——这里按 group_ids 与 scope 取交集过滤，
+    无指派的考试仅 super_admin 可见（避免 dept_admin 看到未指派给其部门的考试）。
+    """
     rows = (
         db.execute(select(ExamDefinition).where(ExamDefinition.type == "formal").order_by(ExamDefinition.id.desc()))
         .scalars()
         .all()
     )
-    return [_exam_brief(e, e.status) for e in rows]
+    out = []
+    for e in rows:
+        if scope is not None:
+            e_groups = e.group_ids or []
+            if not e_groups or not set(e_groups).issubset(scope):
+                # 无指派考试默认全员可见，但部门管理员不应看到此类全局考试
+                continue
+        out.append(_exam_brief(e, e.status))
+    return out
 
 
-def list_results(db: Session, exam_id: int | None = None) -> list[dict]:
+def _check_exam_scope(db: Session, e: ExamDefinition, scope: set[int] | None) -> None:
+    """部门管理员操作考试前的归属校验：考试指派分组须与 scope 有交集。"""
+    if scope is None:
+        return
+    e_groups = e.group_ids or []
+    if not e_groups or not set(e_groups).issubset(scope):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "无权操作该考试")
+
+
+def _validate_exam_group_ids(db: Session, group_ids: list[int] | None, scope: set[int] | None) -> None:
+    """创建/更新考试时校验指派分组均在调用者数据范围内（防指派到其他部门）。"""
+    if scope is not None and not group_ids:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "部门管理员必须指定本部门考试分组")
+    if not group_ids:
+        return
+    existing = {row[0] for row in db.execute(select(Group.id).where(Group.id.in_(group_ids))).all()}
+    if existing != set(group_ids):
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "考试指派分组不存在")
+    if scope is None:
+        return
+    for gid in group_ids:
+        if gid not in scope:
+            raise HTTPException(status.HTTP_403_FORBIDDEN, "无权指派该分组")
+
+
+def _validate_exam_question_scope(
+    db: Session,
+    manual_questions: list[int] | None,
+    rules: dict | None,
+    paper_template_id: int | None,
+    scope: set[int] | None,
+) -> None:
+    """防止部门管理员把范围外题目带入其考试。"""
+    if scope is None:
+        return
+    if paper_template_id is not None:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "部门管理员不能使用全局试卷模板")
+    if manual_questions:
+        rows = db.execute(
+            select(Question.id, Question.group_id, QuestionBank.group_id)
+            .join(QuestionBank, QuestionBank.id == Question.bank_id, isouter=True)
+            .where(Question.id.in_(manual_questions))
+        ).all()
+        allowed = {row[0] for row in rows if row[1] in scope or row[2] in scope}
+        if allowed != set(manual_questions):
+            raise HTTPException(status.HTTP_403_FORBIDDEN, "考试包含范围外题目")
+        return
+    source_groups = (rules or {}).get("group_ids") or []
+    if not source_groups or not set(source_groups).issubset(scope):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "部门管理员组卷必须限定本部门题目")
+    source_banks = (rules or {}).get("bank_ids") or []
+    if source_banks:
+        bank_groups = {
+            row[0] for row in db.execute(select(QuestionBank.group_id).where(QuestionBank.id.in_(source_banks))).all()
+        }
+        if not bank_groups or not bank_groups.issubset(scope):
+            raise HTTPException(status.HTTP_403_FORBIDDEN, "组卷包含范围外题库")
+
+
+def list_results(
+    db: Session, exam_id: int | None = None, scope: set[int] | None = None, limit: int = 500
+) -> list[dict]:
     """管理端：考试成绩列表（JOIN 一次取齐关联信息，消除 N+1）。
 
+    scope 非 None（部门管理员）时仅返回其数据范围内用户的成绩，杜绝跨部门窥探成绩。
     保留返回 list 的契约：前端按全部成绩做客户端关键字过滤，未引入分页控件，
     故不改变响应结构；性能瓶颈（逐行 db.get）已由 JOIN 消除。
     """
+    from app.core.deps import users_in_scope
     from app.models.exam import ExamDefinition
     from app.models.record import ExamResult, ExamSession
     from app.models.user import User
@@ -662,8 +842,26 @@ def list_results(db: Session, exam_id: int | None = None) -> list[dict]:
     )
     if exam_id:
         stmt = stmt.where(ExamResult.exam_definition_id == exam_id)
+    if scope is not None:
+        if not exam_id:
+            allowed_exam_ids = {
+                row[0]
+                for row in db.execute(select(ExamDefinition.id, ExamDefinition.group_ids)).all()
+                if row[1] and set(row[1]).issubset(scope)
+            }
+            if not allowed_exam_ids:
+                return []
+            stmt = stmt.where(ExamResult.exam_definition_id.in_(allowed_exam_ids))
+        else:
+            exam = db.get(ExamDefinition, exam_id)
+            if not exam or not exam.group_ids or not set(exam.group_ids).issubset(scope):
+                return []
+        scoped_user_ids = users_in_scope(db, scope)
+        if not scoped_user_ids:
+            return []
+        stmt = stmt.where(ExamResult.user_id.in_(scoped_user_ids))
 
-    rows = db.execute(stmt.order_by(ExamResult.id.desc())).all()
+    rows = db.execute(stmt.order_by(ExamResult.id.desc()).limit(limit)).all()
     out = []
     for r in rows:
         res = r[0]
@@ -686,7 +884,11 @@ def list_results(db: Session, exam_id: int | None = None) -> list[dict]:
     return out
 
 
-def create_exam(db: Session, payload, user: User) -> dict:
+def create_exam(db: Session, payload, user: User, scope: set[int] | None = None) -> dict:
+    if scope is not None and payload.type != "formal":
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "部门管理员只能创建正式考试")
+    _validate_exam_group_ids(db, payload.group_ids, scope)
+    _validate_exam_question_scope(db, payload.manual_questions, payload.rules, payload.paper_template_id, scope)
     e = ExamDefinition(
         name=payload.name,
         type=payload.type,
@@ -711,10 +913,20 @@ def create_exam(db: Session, payload, user: User) -> dict:
     return {"id": e.id, "name": e.name, "status": e.status}
 
 
-def update_exam(db: Session, exam_id: int, payload: dict) -> dict:
+def update_exam(db: Session, exam_id: int, payload: dict, scope: set[int] | None = None) -> dict:
     e = db.get(ExamDefinition, exam_id)
     if not e:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "考试不存在")
+    _check_exam_scope(db, e, scope)
+    if "group_ids" in payload:
+        _validate_exam_group_ids(db, payload.get("group_ids"), scope)
+    _validate_exam_question_scope(
+        db,
+        payload.get("manual_questions", e.manual_questions),
+        payload.get("rules", e.rules),
+        payload.get("paper_template_id", e.paper_template_id),
+        scope,
+    )
     for k in (
         "name",
         "rules",
@@ -737,13 +949,26 @@ def update_exam(db: Session, exam_id: int, payload: dict) -> dict:
     return {"id": e.id, "name": e.name, "status": e.status}
 
 
-def publish_exam(db: Session, exam_id: int) -> dict:
+def publish_exam(db: Session, exam_id: int, scope: set[int] | None = None, bg=None) -> dict:
     e = db.get(ExamDefinition, exam_id)
     if not e:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "考试不存在")
+    _check_exam_scope(db, e, scope)
     e.status = "published"
     db.commit()
     db.refresh(e)
+    if bg is not None:
+        stmt = select(User).where(User.status == "active")
+        if e.group_ids:
+            stmt = (
+                stmt.outerjoin(UserGroup, UserGroup.user_id == User.id)
+                .where(or_(UserGroup.group_id.in_(e.group_ids), User.dept_group_id.in_(e.group_ids)))
+                .distinct()
+            )
+        recipients = db.execute(stmt).scalars().all()
+        settings = get_settings(db)
+        for recipient in recipients:
+            bg.add_task(mail_service.send_exam_publish, settings, recipient.email, e.name, e.end_at or "考试结束前")
     return {"id": e.id, "status": e.status}
 
 

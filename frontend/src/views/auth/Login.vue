@@ -16,7 +16,7 @@
           <router-link to="/verify">重新发送验证码</router-link>
         </div>
       </el-form>
-      <p class="hint">默认超管：admin@example.com / admin12345</p>
+      <p class="hint">管理员账号请使用部署时配置的邮箱和密码</p>
     </el-card>
   </div>
 </template>

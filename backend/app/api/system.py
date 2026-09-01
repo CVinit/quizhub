@@ -125,6 +125,7 @@ _LABELS = {
     "register_open": "开放注册",
     "new_user_need_approve": "新用户需审批",
     "register_group_required": "注册时必选分组",
+    "register_allowed_group_ids": "允许公开注册加入的分组ID",
     "register_allowed_email_suffixes": "允许注册邮箱后缀(逗号分隔,留空不限制)",
     "mail_tpl_register": "注册验证码模板",
     "mail_tpl_exam_publish": "考试发布通知模板",
@@ -170,7 +171,10 @@ def list_settings(category: str | None = None, db: Session = Depends(get_db), _u
 
 @router.put("/settings")
 def update_settings(payload: SettingsUpdateIn, db: Session = Depends(get_db), user: User = Depends(require_super)):
-    system_service.update_settings(db, payload.category, payload.updates)
+    try:
+        system_service.update_settings(db, payload.category, payload.updates)
+    except ValueError as exc:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
     audit_log(db, user.id, "settings.update", "setting", payload.category, {"keys": list(payload.updates.keys())})
     return {"success": True}
 

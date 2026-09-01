@@ -13,9 +13,11 @@ export const BP_TABLET = '(min-width: 768px) and (max-width: 1199px)'
 export const BP_DESKTOP = '(min-width: 1200px)'
 
 export function useResponsive() {
-  const isMobile = ref(false)
-  const isTablet = ref(false)
-  const isDesktop = ref(true)
+  // 首帧同步求值，保证依赖 isMobile 的初始渲染（如答题卡展开态）不闪烁
+  const hasMql = typeof window !== 'undefined' && !!window.matchMedia
+  const isMobile = ref(hasMql && window.matchMedia(BP_MOBILE).matches)
+  const isTablet = ref(hasMql && window.matchMedia(BP_TABLET).matches)
+  const isDesktop = ref(hasMql && window.matchMedia(BP_DESKTOP).matches)
 
   let mqlMobile: MediaQueryList | null = null
   let mqlTablet: MediaQueryList | null = null
@@ -26,13 +28,10 @@ export function useResponsive() {
   const onDesktop = (e: MediaQueryListEvent) => { isDesktop.value = e.matches }
 
   onMounted(() => {
-    if (typeof window === 'undefined' || !window.matchMedia) return
+    if (!hasMql) return
     mqlMobile = window.matchMedia(BP_MOBILE)
     mqlTablet = window.matchMedia(BP_TABLET)
     mqlDesktop = window.matchMedia(BP_DESKTOP)
-    isMobile.value = mqlMobile.matches
-    isTablet.value = mqlTablet.matches
-    isDesktop.value = mqlDesktop.matches
     mqlMobile.addEventListener('change', onMobile)
     mqlTablet.addEventListener('change', onTablet)
     mqlDesktop.addEventListener('change', onDesktop)

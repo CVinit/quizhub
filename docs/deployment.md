@@ -37,9 +37,7 @@ training-platform/
 2. `backend/` 执行 `uv sync && python scripts/init_db.py`（建表、默认设置、超管账号）
 3. 启动 `uvicorn app.main:app --host 0.0.0.0 --port 8000`
 
-访问 http://localhost:8000，使用超管账号登录：
-- 邮箱：`admin@example.com`
-- 密码：`admin12345`
+访问 http://localhost:8000，使用初始化时配置的超管邮箱和密码登录。
 
 > 首次登录后请立即在「系统管理 → 基础设置」或个人中心修改密码。
 
@@ -51,6 +49,7 @@ training-platform/
 cd backend
 uv sync                                  # 安装依赖到 .venv
 uv run python scripts/init_db.py         # 初始化数据库
+uv run python scripts/migrate_2026_08_28.py # 既有库迁移
 uv run uvicorn app.main:app --host 0.0.0.0 --port 8000
 ```
 
@@ -70,11 +69,11 @@ pnpm install && pnpm build               # 产物输出到 frontend/dist
 | 变量 | 说明 | 默认值 |
 | --- | --- | --- |
 | `TRAINING_SECRET_KEY` | JWT 签名密钥 | 未设置则生成进程级随机密钥（重启后登录失效） |
-| `TRAINING_ENC_KEY` | Fernet 密钥（加密 SMTP 密码等），32 字节 url-safe base64 | 空（开发期回退 base64） |
+| `TRAINING_ENC_KEY` | Fernet 密钥（加密 SMTP 密码等），32 字节 url-safe base64 | 空（非空敏感设置拒绝写入） |
 | `TRAINING_SUPER_ADMIN_EMAIL` | 初始超管邮箱 | `admin@example.com` |
-| `TRAINING_SUPER_ADMIN_PASSWORD` | 初始超管密码 | `admin12345` |
+| `TRAINING_SUPER_ADMIN_PASSWORD` | 初始超管密码 | 未设置时初始化脚本生成一次性随机密码 |
 | `TRAINING_CORS_ORIGINS` | 允许跨域来源，逗号分隔；`*` 时禁用凭据 | `*` |
-| `TRAINING_TRUST_PROXY` | 是否信任 `X-Forwarded-For` 取真实 IP（反代后建议 `true`，裸跑建议 `false`） | `true` |
+| `TRAINING_TRUST_PROXY` | 是否信任 `X-Forwarded-For` 取真实 IP（反代后建议 `true`，裸跑建议 `false`） | `false` |
 
 生成 Fernet 密钥：
 
@@ -90,7 +89,7 @@ python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().d
 2. SMTP 密码经 Fernet 加密存储（需先配置 `TRAINING_ENC_KEY`）
 3. 点击「发送测试邮件」验证
 
-> 未配置 SMTP 时，验证码邮件回退打印到后端日志（控制台），不影响注册流程。
+> 未配置 SMTP 时，验证码邮件不会发送，也不会把收件人或验证码写入后端日志。
 
 ## 七、题库导入
 

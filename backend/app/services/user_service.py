@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-import secrets
-import string
+from collections import defaultdict
+from typing import cast
 
 from fastapi import HTTPException, status
-from sqlalchemy import func, or_, select
+from sqlalchemy import delete, func, or_, select
 from sqlalchemy.orm import Session
 
 from app.core.security import hash_password
@@ -17,12 +17,6 @@ from app.services.audit_service import log as audit_log
 # 角色与状态白名单：管理员新增/导入用户时校验，防伪造非法角色
 ROLES = ("user", "dept_admin", "super_admin")
 STATUSES = ("active", "pending", "disabled")
-
-
-def _gen_password(length: int = 12) -> str:
-    """生成随机强密码（字母+数字）。"""
-    alphabet = string.ascii_letters + string.digits
-    return "".join(secrets.choice(alphabet) for _ in range(length))
 
 
 def list_users(
@@ -61,9 +55,14 @@ def list_users(
         )
     total = db.execute(select(func.count()).select_from(stmt.subquery())).scalar() or 0
     rows = db.execute(stmt.order_by(User.id.desc()).offset((page - 1) * page_size).limit(page_size)).scalars().all()
+    group_map: dict[int, list[int]] = defaultdict(list)
+    if rows:
+        for uid, gid in db.execute(
+            select(UserGroup.user_id, UserGroup.group_id).where(UserGroup.user_id.in_([u.id for u in rows]))
+        ).all():
+            group_map[uid].append(gid)
     items = []
     for u in rows:
-        gids = [ug.group_id for ug in db.execute(select(UserGroup.group_id).where(UserGroup.user_id == u.id)).all()]
         items.append(
             {
                 "id": u.id,
@@ -73,7 +72,7 @@ def list_users(
                 "status": u.status,
                 "email_verified": u.email_verified,
                 "dept_group_id": u.dept_group_id,
-                "groups": gids,
+                "groups": group_map.get(u.id, []),
             }
         )
     return items, total
@@ -94,7 +93,7 @@ def approve(db: Session, actor: int, user_id: int, scope: set[int] | None = None
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "该用户非待审批状态")
     u.status = "active"
     db.commit()
-    audit_log(db, actor, "user.approve", "user", user_id, {"email": u.email})
+    audit_log(db, actor, "user.approve", "user", user_id)
     db.refresh(u)
     return u
 
@@ -104,7 +103,7 @@ def set_status(db: Session, actor: int, user_id: int, enabled: bool, scope: set[
     u = _get(db, user_id)
     u.status = "active" if enabled else "disabled"
     db.commit()
-    audit_log(db, actor, "user.enable" if enabled else "user.disable", "user", user_id, {"email": u.email})
+    audit_log(db, actor, "user.enable" if enabled else "user.disable", "user", user_id)
     db.refresh(u)
     return u
 
@@ -113,24 +112,18 @@ def reset_password(
     db: Session,
     actor: int,
     user_id: int,
-    new_password: str | None = None,
+    new_password: str,
     scope: set[int] | None = None,
 ) -> str:
-    """重置密码。未提供 new_password 时生成随机强密码（12 位字母数字）。
-
-    不再恒用弱口令 "123456"；返回生成的新密码供管理员告知用户，并强制用户首次登录修改。
-    超级管理员不受 scope 限制；部门管理员仅可重置本部门子树内用户。
-    """
+    """重置密码。新密码由管理员通过安全渠道提供，不在响应中返回。"""
     _check_scope(db, user_id, scope)
     u = _get(db, user_id)
-    if not new_password:
-        alphabet = string.ascii_letters + string.digits
-        new_password = "".join(secrets.choice(alphabet) for _ in range(12))
     if len(new_password) < 6:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "密码至少 6 位")
     u.password_hash = hash_password(new_password)
+    u.token_version += 1
     db.commit()
-    audit_log(db, actor, "user.reset_password", "user", user_id, {"email": u.email})
+    audit_log(db, actor, "user.reset_password", "user", user_id)
     return new_password
 
 
@@ -165,7 +158,7 @@ def update_user(
         changes["dept_group_id"] = dept_group_id
     db.commit()
     if changes:
-        audit_log(db, actor, "user.update", "user", user_id, {"email": u.email, **changes})
+        audit_log(db, actor, "user.update", "user", user_id, changes)
     db.refresh(u)
     return u
 
@@ -178,17 +171,17 @@ def assign_groups(
     scope: set[int] | None = None,
 ) -> None:
     _check_scope(db, user_id, scope)
-    u = _get(db, user_id)
+    _get(db, user_id)
     # 部门管理员只能分配其范围内的分组
     if scope is not None:
         for gid in group_ids:
             if gid not in scope:
                 raise HTTPException(status.HTTP_403_FORBIDDEN, "无权分配该分组")
-    db.execute(UserGroup.__table__.delete().where(UserGroup.user_id == user_id))
+    db.execute(delete(UserGroup).where(UserGroup.user_id == user_id))
     for gid in group_ids:
         db.add(UserGroup(user_id=user_id, group_id=gid))
     db.commit()
-    audit_log(db, actor, "user.assign_groups", "user", user_id, {"email": u.email, "group_ids": group_ids})
+    audit_log(db, actor, "user.assign_groups", "user", user_id, {"group_ids": group_ids})
 
 
 def _get(db: Session, user_id: int) -> User:
@@ -220,11 +213,11 @@ def create_user(
     """管理员手动新增用户。
 
     - email 唯一性校验；
-    - password 留空则生成随机强密码并返回，便于管理员告知用户；
+    - password 由管理员提供，不在响应中返回；
     - role/status 白名单校验；
     - group_ids 合法性校验后写入关联；
     - 跳过邮箱验证流程（email_verified=True），管理员新增即视为可信账号。
-    返回 (user, plain_password)。
+    返回 (user, "")。
     """
     email = (email or "").strip().lower()
     if not email or "@" not in email:
@@ -238,9 +231,7 @@ def create_user(
     if existing:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "该邮箱已存在")
 
-    if not password:
-        password = _gen_password()
-    if len(password) < 6:
+    if not password or len(password) < 6:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "密码至少 6 位")
 
     gids = _normalize_group_ids(db, group_ids)
@@ -265,23 +256,26 @@ def create_user(
         "user",
         user.id,
         {
-            "email": user.email,
             "role": role,
             "status": status_,
             "group_ids": gids,
         },
     )
-    return user, password
+    return user, ""
 
 
 def import_users(
     db: Session,
     actor: int,
     rows: list[dict],
+    scope: set[int] | None = None,
+    actor_role: str = "user",
 ) -> dict:
     """批量导入用户（管理员已预览确认）。rows 每项含 email/name/role/password/status/group_ids。
 
     单行失败不中断整体导入，逐行收集成功/失败计数与失败明细，统一提交成功项。
+    - scope：部门管理员数据范围；非 None 时导入用户的 group_ids 必须落在 scope 内（防水平越权）。
+    - actor_role：调用者角色；非 super_admin 不得导入管理员账号（防垂直越权，与 create_user 路由守卫一致）。
     """
     success = 0
     failed = 0
@@ -302,16 +296,24 @@ def import_users(
             role = str(r.get("role") or "user").strip() or "user"
             if role not in ROLES:
                 raise ValueError(f"角色非法: {role}")
+            # 仅超级管理员可导入管理员账号（垂直越权防护）
+            if role in ("dept_admin", "super_admin") and actor_role != "super_admin":
+                raise ValueError("仅超级管理员可创建管理员账号")
             st = str(r.get("status") or "active").strip() or "active"
             if st not in STATUSES:
                 raise ValueError(f"状态非法: {st}")
             pwd = str(r.get("password") or "").strip()
             if not pwd:
-                pwd = _gen_password()
+                raise ValueError("初始密码不能为空")
             if len(pwd) < 6:
                 raise ValueError("密码至少 6 位")
             name = str(r.get("name") or "").strip() or email.split("@")[0]
             gids = _normalize_group_ids(db, r.get("group_ids"))
+            # 部门管理员只能把导入用户分配到本部门子树内的分组（水平越权防护）
+            if scope is not None:
+                for gid in gids:
+                    if gid not in scope:
+                        raise ValueError("无权分配该分组")
             u = User(
                 email=email,
                 password_hash=hash_password(pwd),
@@ -323,7 +325,6 @@ def import_users(
             pending_users.append(u)
             # 临时挂在行上以便回填 id 与密码
             r["_user"] = u
-            r["_password"] = pwd
             r["_gids"] = gids
             success += 1
         except Exception as e:  # 单行失败不影响其他行
@@ -334,11 +335,11 @@ def import_users(
         db.flush()
         # 回填 user_group 关联的 user_id
         for r in rows:
-            u = r.get("_user")
-            if not u:
+            row_user = cast(User | None, r.get("_user"))
+            if not row_user:
                 continue
             for gid in r.get("_gids", []):
-                db.add(UserGroup(user_id=u.id, group_id=gid))
+                db.add(UserGroup(user_id=row_user.id, group_id=gid))
     db.commit()
     audit_log(
         db,
@@ -352,8 +353,4 @@ def import_users(
             "total": len(rows),
         },
     )
-    # 返回成功用户明文密码，便于管理员导出告知
-    created = [
-        {"email": r["_user"].email, "name": r["_user"].name, "password": r["_password"]} for r in rows if r.get("_user")
-    ]
-    return {"success": success, "failed": failed, "errors": errors, "created": created}
+    return {"success": success, "failed": failed, "errors": errors}

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from io import BytesIO
 from typing import Any
+from zipfile import BadZipFile, ZipFile
 
 from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Alignment, Font, PatternFill
@@ -18,6 +19,9 @@ from openpyxl.utils import get_column_letter
 from app.schemas.question import UploadPreview, UploadPreviewRow
 
 SHEET_ORDER = ["单选题", "多选题", "判断题", "填空题", "简答题", "拖拽题"]
+PARSE_ROW_MAX = 10000
+MAX_WORKBOOK_UNCOMPRESSED = 100 * 1024 * 1024
+MAX_CELL_CHARS = 10000
 TYPE_TO_SHEET = {
     "单选题": "单选题",
     "多选题": "多选题",
@@ -156,6 +160,8 @@ def parse_workbook(buf: BytesIO) -> UploadPreview:
 
     使用 read_only 模式降低内存占用。
     """
+    validate_workbook_archive(buf.getvalue())
+    buf.seek(0)
     wb = load_workbook(buf, data_only=True, read_only=True)
     rows: list[UploadPreviewRow] = []
     errors: list[dict] = []
@@ -167,6 +173,8 @@ def parse_workbook(buf: BytesIO) -> UploadPreview:
                 continue
             ws = wb[sheet_name]
             for r_idx, row in enumerate(ws.iter_rows(min_row=2, values_only=True), start=2):
+                if r_idx > PARSE_ROW_MAX + 1:
+                    break
                 if not row or all(c is None or str(c).strip() == "" for c in row):
                     continue
                 parsed = _parse_row(sheet_name, row, r_idx)
@@ -175,6 +183,10 @@ def parse_workbook(buf: BytesIO) -> UploadPreview:
                     type_dist[sheet_name] = type_dist.get(sheet_name, 0) + 1
                 else:
                     errors.append({"sheet": sheet_name, "row": r_idx, "error": parsed.error})
+                if len(rows) >= PARSE_ROW_MAX:
+                    break
+            if len(rows) >= PARSE_ROW_MAX:
+                break
     finally:
         wb.close()
 
@@ -186,6 +198,17 @@ def parse_workbook(buf: BytesIO) -> UploadPreview:
         type_dist=type_dist,
         errors=errors,
     )
+
+
+def validate_workbook_archive(content: bytes) -> None:
+    """限制 xlsx 解压体积，避免小压缩包展开耗尽内存。"""
+    try:
+        with ZipFile(BytesIO(content)) as archive:
+            total = sum(info.file_size for info in archive.infolist())
+    except BadZipFile:
+        raise ValueError("上传文件不是有效的 xlsx 工作簿") from None
+    if total > MAX_WORKBOOK_UNCOMPRESSED:
+        raise ValueError("工作簿解压后超过大小上限")
 
 
 def _parse_row(sheet_name: str, row: tuple, r_idx: int) -> UploadPreviewRow:
@@ -201,7 +224,9 @@ def _parse_row(sheet_name: str, row: tuple, r_idx: int) -> UploadPreviewRow:
     options = left_items = right_items = None
     answer: Any = None
 
-    if not question_text:
+    if any(isinstance(cell, str) and len(cell) > MAX_CELL_CHARS for cell in cells):
+        error = "单元格内容过长"
+    elif not question_text:
         error = "题干为空"
 
     if not error and qtype in ("单选题", "多选题"):

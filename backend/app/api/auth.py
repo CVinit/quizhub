@@ -82,12 +82,13 @@ def register(
 @router.get("/register-groups")
 def register_groups(db: Session = Depends(get_db)):
     """公开接口：返回可选分组树与是否必选，供注册页选择分组（无需登录）。"""
+    from app.services.auth_service import allowed_register_group_ids
     from app.services.group_service import build_tree
     from app.services.system_service import get_settings
 
     settings = get_settings(db, "register")
     required = settings.get("register_group_required", "false").lower() == "true"
-    return {"groups": build_tree(db), "required": required}
+    return {"groups": build_tree(db, allowed_register_group_ids(db)), "required": required}
 
 
 @router.post("/verify")

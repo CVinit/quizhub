@@ -4,13 +4,14 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile, status
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, EmailStr, Field
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
 from sqlalchemy.orm import Session
 
 from app.core.deps import dept_scope_ids, require_admin
 from app.database import get_db
 from app.models.user import User
 from app.schemas.group import UserGroupAssign
+from app.schemas.user import UserUpdate
 from app.services import user_service
 from app.utils import user_excel
 
@@ -18,16 +19,34 @@ router = APIRouter(prefix="/admin/users", tags=["users"])
 
 
 class ResetPasswordIn(BaseModel):
-    new_password: str | None = None  # None → 生成随机强密码
+    model_config = ConfigDict(extra="forbid")
+
+    new_password: str = Field(min_length=6, max_length=72)
+
+    @field_validator("new_password")
+    @classmethod
+    def validate_password_bytes(cls, value: str) -> str:
+        if len(value.encode("utf-8")) > 72:
+            raise ValueError("密码 UTF-8 编码后不能超过 72 字节")
+        return value
 
 
 class UserCreateIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     email: EmailStr
     name: str = Field(default="", max_length=50)
     role: str = Field(default="user")
-    password: str | None = Field(default=None, max_length=72)  # None → 生成随机密码
+    password: str = Field(min_length=6, max_length=72)
     status: str = Field(default="active")
     group_ids: list[int] = Field(default_factory=list)
+
+    @field_validator("password")
+    @classmethod
+    def validate_password_bytes(cls, value: str) -> str:
+        if len(value.encode("utf-8")) > 72:
+            raise ValueError("密码 UTF-8 编码后不能超过 72 字节")
+        return value
 
 
 @router.get("")
@@ -73,7 +92,7 @@ def create_user(
         for gid in payload.group_ids:
             if gid not in scope:
                 raise HTTPException(status.HTTP_403_FORBIDDEN, "无权分配该分组")
-    u, plain = user_service.create_user(
+    u, _ = user_service.create_user(
         db,
         user.id,
         payload.email,
@@ -96,28 +115,27 @@ def create_user(
         "status": u.status,
         "email_verified": u.email_verified,
         "dept_group_id": u.dept_group_id,
-        "password": plain,
     }
 
 
 @router.put("/{user_id}")
 def update_user(
     user_id: int,
-    payload: dict,
+    payload: UserUpdate,
     db: Session = Depends(get_db),
     user: User = Depends(require_admin),
 ):
     # 角色变更仅超级管理员可执行（部门管理员不得提权）
-    if payload.get("role") is not None and user.role != "super_admin":
+    if payload.role is not None and user.role != "super_admin":
         raise HTTPException(status.HTTP_403_FORBIDDEN, "仅超级管理员可修改用户角色")
     scope = dept_scope_ids(db, user)
     u = user_service.update_user(
         db,
         user.id,
         user_id,
-        payload.get("name"),
-        payload.get("role"),
-        payload.get("dept_group_id"),
+        payload.name,
+        payload.role,
+        payload.dept_group_id,
         scope,
     )
     return _to_dict(u)
@@ -145,8 +163,8 @@ def reset_password(
     db: Session = Depends(get_db),
     user: User = Depends(require_admin),
 ):
-    new_pwd = user_service.reset_password(db, user.id, user_id, payload.new_password, dept_scope_ids(db, user))
-    return {"success": True, "new_password": new_pwd}
+    user_service.reset_password(db, user.id, user_id, payload.new_password, dept_scope_ids(db, user))
+    return {"success": True}
 
 
 @router.post("/{user_id}/groups")
@@ -183,6 +201,8 @@ async def import_preview(
 
     check(f"user-import-preview:user:{user.id}", 20, 3600, "用户导入")
     settings = __import_settings_max_mb(db)
+    if not (file.filename or "").lower().endswith(".xlsx"):
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "仅支持 .xlsx 文件")
     max_bytes = int(settings * 1024 * 1024)
     declared = file.size or 0
     if declared and declared > max_bytes:
@@ -198,7 +218,10 @@ async def import_preview(
             raise HTTPException(status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, f"文件超过上限 {settings}MB")
         chunks.append(chunk)
     content = b"".join(chunks)
-    return user_excel.preview(db, content, user.id)
+    try:
+        return user_excel.preview(db, content, user.id)
+    except ValueError as exc:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
 
 
 @router.post("/import")
@@ -207,8 +230,15 @@ def import_users(
     db: Session = Depends(get_db),
     user: User = Depends(require_admin),
 ):
-    rows = user_excel.consume_preview(confirm_token, user.id)
-    res = user_service.import_users(db, user.id, rows)
+    # 与手动新增一致：非超级管理员不得导入管理员账号（垂直越权防护）
+    if user.role != "super_admin":
+        rows = user_excel.consume_preview(confirm_token, user.id)
+        for r in rows:
+            if str(r.get("role") or "user") != "user":
+                raise HTTPException(status.HTTP_403_FORBIDDEN, "仅超级管理员可创建管理员账号")
+    else:
+        rows = user_excel.consume_preview(confirm_token, user.id)
+    res = user_service.import_users(db, user.id, rows, scope=dept_scope_ids(db, user), actor_role=user.role)
     return res
 
 

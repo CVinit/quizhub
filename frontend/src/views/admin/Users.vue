@@ -118,8 +118,8 @@
           </el-select>
         </el-form-item>
         <el-form-item label="初始密码">
-          <el-input v-model="addForm.password" placeholder="留空自动生成随机密码" />
-          <div class="field-tip">留空将自动生成 12 位随机密码；自定义至少 6 位</div>
+          <el-input v-model="addForm.password" type="password" show-password placeholder="请输入至少 6 位密码" />
+          <div class="field-tip">初始密码由管理员设置，请通过安全渠道告知用户</div>
         </el-form-item>
         <el-form-item label="状态">
           <el-select v-model="addForm.status" style="width: 100%">
@@ -197,14 +197,6 @@
           <el-result :icon="importResult.failed === 0 ? 'success' : 'warning'"
             :title="`导入完成：成功 ${importResult.success}，失败 ${importResult.failed}`">
           </el-result>
-          <el-alert v-if="importResult.created.length" type="info" :closable="false" show-icon style="margin: 8px 0 12px">
-            以下为系统生成的密码（留空密码的用户），请妥善记录并安全告知对应用户：
-          </el-alert>
-          <el-table v-if="importResult.created.length" :data="importResult.created" border size="small" max-height="260">
-            <el-table-column prop="email" label="邮箱" min-width="200" show-overflow-tooltip />
-            <el-table-column prop="name" label="姓名" width="120" />
-            <el-table-column prop="password" label="初始密码" width="160" />
-          </el-table>
           <el-collapse v-if="importResult.errors.length" style="margin-top: 12px">
             <el-collapse-item :title="`失败清单（${importResult.errors.length}）`">
               <el-table :data="importResult.errors" border size="small">
@@ -266,6 +258,10 @@ const addRules: FormRules = {
     { required: true, message: '请输入邮箱', trigger: 'blur' },
     { type: 'email', message: '邮箱格式不正确', trigger: 'blur' },
   ],
+  password: [
+    { required: true, message: '请输入初始密码', trigger: 'blur' },
+    { min: 6, message: '密码至少 6 位', trigger: 'blur' },
+  ],
 }
 
 // 批量导入
@@ -317,17 +313,15 @@ const onSaveEdit = async () => {
   }
 }
 const onResetPwd = async (row: UserItem) => {
-  await ElMessageBox.confirm(
-    `确认为「${row.email}」生成新的随机密码？重置后请将新密码安全告知该用户。`,
-    '重置密码',
-    { type: 'warning' },
-  )
-  const res = await userApi.resetPassword(row.id)
-  // 展示生成的新密码，便于管理员复制并告知用户
-  ElMessageBox.alert(`新密码：${res.new_password}`, '重置成功', {
-    confirmButtonText: '我已知晓',
-    type: 'success',
+  const { value } = await ElMessageBox.prompt(`为「${row.email}」设置新密码`, '重置密码', {
+    inputType: 'password',
+    inputPattern: /^.{6,72}$/,
+    inputErrorMessage: '密码长度必须为 6~72 位',
+    confirmButtonText: '确认',
+    cancelButtonText: '取消',
   })
+  await userApi.resetPassword(row.id, value)
+  ElMessage.success('密码已重置，请通过安全渠道告知用户')
 }
 const onToggle = async (row: UserItem, enable: boolean) => {
   if (enable) await userApi.enable(row.id)
@@ -370,11 +364,11 @@ const onSaveAdd = async () => {
         email: addForm.email,
         name: addForm.name,
         role: addForm.role as any,
-        password: addForm.password || undefined,
+        password: addForm.password,
         status: addForm.status as any,
         group_ids: addForm.group_ids,
       })
-      ElMessageBox.alert(`新用户「${res.email}」创建成功，初始密码：${res.password}`, '创建成功', {
+      ElMessageBox.alert(`新用户「${res.email}」创建成功，请通过安全渠道告知初始密码`, '创建成功', {
         confirmButtonText: '我已知晓', type: 'success',
       })
       addVisible.value = false

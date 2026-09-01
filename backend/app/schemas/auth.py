@@ -2,7 +2,13 @@
 
 from __future__ import annotations
 
-from pydantic import BaseModel, EmailStr, Field
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
+
+
+def _validate_password_bytes(value: str) -> str:
+    if len(value.encode("utf-8")) > 72:
+        raise ValueError("密码 UTF-8 编码后不能超过 72 字节")
+    return value
 
 
 class SendCodeIn(BaseModel):
@@ -17,6 +23,8 @@ class RegisterIn(BaseModel):
     name: str = Field(default="", max_length=50)
     code: str = Field(min_length=4, max_length=10)
     group_ids: list[int] = Field(default_factory=list)  # 注册时选择的分组（可空，视设置是否必选）
+
+    _password_bytes = field_validator("password")(_validate_password_bytes)
 
 
 class VerifyIn(BaseModel):
@@ -36,15 +44,14 @@ class TokenOut(BaseModel):
 
 
 class UserOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
     id: int
     email: EmailStr
     name: str
     role: str
     status: str
     email_verified: bool
-
-    class Config:
-        from_attributes = True
 
 
 class ResendIn(BaseModel):
@@ -54,6 +61,8 @@ class ResendIn(BaseModel):
 class ChangePasswordIn(BaseModel):
     old_password: str
     new_password: str = Field(min_length=6, max_length=72)
+
+    _password_bytes = field_validator("new_password")(_validate_password_bytes)
 
 
 TokenOut.model_rebuild()

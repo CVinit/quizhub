@@ -49,8 +49,10 @@ def _norm_str(v: Any) -> str:
 def _grade_fill(correct_answer: Any, user_answer: Any) -> bool:
     """correct_answer: list[list[str]]（每空等价答案列表）。
     user_answer: list[str]（每空用户答案）或单字符串。
+
+    空答案（correct_answer 为空列表）视为无效题，一律判错，避免空 zip 恒真把任意作答判满分。
     """
-    if not isinstance(correct_answer, list):
+    if not isinstance(correct_answer, list) or not correct_answer:
         return False
     if isinstance(user_answer, str):
         user_answer = [user_answer]
@@ -68,7 +70,8 @@ def _grade_fill(correct_answer: Any, user_answer: Any) -> bool:
 
 
 def _grade_drag(correct_answer: Any, user_answer: Any) -> bool:
-    if not isinstance(correct_answer, dict) or not isinstance(user_answer, dict):
+    """空答案（correct_answer 为空 dict）视为无效题，一律判错，避免空 all([]) 恒真。"""
+    if not isinstance(correct_answer, dict) or not correct_answer or not isinstance(user_answer, dict):
         return False
     if len(correct_answer) != len(user_answer):
         return False

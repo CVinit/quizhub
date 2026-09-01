@@ -121,13 +121,15 @@
 
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, reactive, ref } from 'vue'
-import { useRoute, useRouter } from 'vue-router'
+import { useRoute, useRouter, onBeforeRouteLeave } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Clock, ArrowDown, ArrowUp } from '@element-plus/icons-vue'
 import { examApi, type ExamSession } from '@/api/exam'
+import { useResponsive } from '@/composables/useResponsive'
 
 const route = useRoute()
 const router = useRouter()
+const { isMobile } = useResponsive()
 const loading = ref(true)
 const session = ref<ExamSession | null>(null)
 const version = ref(1)
@@ -135,7 +137,8 @@ const currentSeq = ref(0)
 const submitting = ref(false)
 const countdown = ref('')
 const urgent = ref(false)
-const cardOpen = ref(false) // 手机端答题卡默认折叠
+const cardOpen = ref(!isMobile.value) // 手机端答题卡默认折叠，桌面端展开
+const submitted = ref(false)
 
 const picked = ref('') // 当前单选/判断
 const multiPicked = ref<string[]>([])
@@ -261,11 +264,21 @@ const onDrop = (right: string) => {
 const unassign = (right: string) => { delete dragMap[right]; save(null) }
 
 const reload = async () => {
-  const sid = Number(route.params.id)
-  // 重新拉会话状态
-  const s = await examApi.start(Number(route.query.examId) || 0).catch(() => null)
-  // 退回考试列表更稳妥
-  router.push('/exam')
+  // 版本冲突：重新拉取会话恢复进度（start 幂等；模拟考试用会话详情），失败则退回列表
+  try {
+    const examId = Number(route.query.examId) || 0
+    const s = examId ? await examApi.start(examId) : await examApi.sessionDetail(Number(route.params.id))
+    if ((s as any).finished) {
+      ElMessage.warning('该考试已交卷')
+      router.push('/exam')
+      return
+    }
+    session.value = s
+    version.value = s.version
+    syncFromAnswers()
+  } catch {
+    router.push('/exam')
+  }
 }
 
 const startTimer = () => {
@@ -300,6 +313,7 @@ const doSubmit = async (auto: boolean) => {
   try {
     const sid = session.value!.session_id
     const res = await examApi.submit(sid)
+    submitted.value = true // 交卷成功后再跳转，避免被离开守卫拦截
     if (res.need_review) {
       await ElMessageBox.alert('已交卷。本次考试含简答题，成绩待管理员复核后公布。', '提交成功', { type: 'info' })
     } else if (res.score !== undefined) {
@@ -351,6 +365,29 @@ const load = async () => {
 
 onMounted(load)
 onUnmounted(() => { if (timer) clearInterval(timer) })
+
+// 考试中防误触：路由离开需确认（交卷成功后放行）
+onBeforeRouteLeave(async () => {
+  if (submitted.value) return true
+  try {
+    await ElMessageBox.confirm(
+      '考试尚未交卷，作答记录已自动保存，返回后可重新进入继续作答（计时不停）。确定离开吗？',
+      '离开考试', { type: 'warning', confirmButtonText: '离开', cancelButtonText: '继续作答' },
+    )
+    return true
+  } catch {
+    return false
+  }
+})
+
+// 浏览器关闭/刷新提示
+const onBeforeUnload = (e: BeforeUnloadEvent) => {
+  if (submitted.value) return
+  e.preventDefault()
+  e.returnValue = ''
+}
+onMounted(() => window.addEventListener('beforeunload', onBeforeUnload))
+onUnmounted(() => window.removeEventListener('beforeunload', onBeforeUnload))
 </script>
 
 <style scoped>

@@ -5,7 +5,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
 
-from app.core.deps import get_current_user, require_admin
+from app.core.deps import dept_scope_ids, get_current_user, require_admin
 from app.database import get_db
 from app.models.user import User
 from app.services import audit_service
@@ -22,8 +22,10 @@ def list_logs(
     action: str | None = None,
     target_type: str | None = None,
     keyword: str | None = None,
+    from_: str | None = Query(None, alias="from"),
+    to: str | None = None,
     db: Session = Depends(get_db),
-    _user: User = Depends(require_admin),
+    user: User = Depends(require_admin),
 ):
     items, total = audit_service.list_logs(
         db,
@@ -33,6 +35,9 @@ def list_logs(
         action,
         target_type,
         keyword,
+        dept_scope_ids(db, user),
+        from_,
+        to,
     )
     return {"items": items, "total": total, "page": page, "page_size": page_size}
 

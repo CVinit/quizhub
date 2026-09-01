@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import math
 from typing import Any
 
 from sqlalchemy import select
@@ -35,6 +36,7 @@ DEFAULT_SETTINGS: dict[str, tuple[str, str, bool]] = {
     "new_user_need_approve": ("false", "register", False),
     # 注册时是否必须选择分组（true 则至少选一个）
     "register_group_required": ("false", "register", False),
+    "register_allowed_group_ids": ("", "register", False),
     # 允许注册的邮箱后缀，逗号分隔，如 "@company.com,@edu.cn"；留空表示不限制
     "register_allowed_email_suffixes": ("", "register", False),
     "mail_tpl_register": (
@@ -83,14 +85,20 @@ def get_settings(db: Session, category: str | None = None) -> dict[str, str]:
 
 
 def update_settings(db: Session, category: str, updates: dict[str, Any]) -> None:
+    if category not in {value[1] for value in DEFAULT_SETTINGS.values()}:
+        raise ValueError("设置分类无效")
     for key, val in updates.items():
         if key not in DEFAULT_SETTINGS:
-            continue
+            raise ValueError(f"设置项无效: {key}")
         _, cat, enc = DEFAULT_SETTINGS[key]
         if cat != category:
+            raise ValueError(f"设置项不属于分类 {category}: {key}")
+        if enc and str(val) == "******":
+            # 设置列表接口返回的掩码只用于展示，不能覆盖数据库中的真实密文。
             continue
         row = db.execute(select(Setting).where(Setting.setting_key == key)).scalar_one_or_none()
         sval = str(val)
+        _validate_value(key, sval)
         if enc:
             sval = encrypt_value(sval)
         if row is None:
@@ -98,3 +106,27 @@ def update_settings(db: Session, category: str, updates: dict[str, Any]) -> None
         else:
             row.value = sval
     db.commit()
+
+
+def _validate_value(key: str, value: str) -> None:
+    if key in {"rank_visible", "smtp_use_tls", "register_open", "new_user_need_approve", "register_group_required"}:
+        if value.lower() not in {"true", "false"}:
+            raise ValueError(f"{key} 必须是 true 或 false")
+    elif key == "smtp_port":
+        if not value.isdigit() or not 1 <= int(value) <= 65535:
+            raise ValueError("SMTP 端口必须在 1~65535 之间")
+    elif key in {"default_pass_score", "default_exam_duration_min", "max_questions_per_exam", "upload_max_size_mb"}:
+        try:
+            number = float(value)
+        except ValueError:
+            raise ValueError(f"{key} 必须是数字") from None
+        if not math.isfinite(number) or number < 0:
+            raise ValueError(f"{key} 必须是非负有限数字")
+    elif key == "register_allowed_group_ids":
+        for group_id in value.replace("，", ",").split(","):
+            if group_id.strip() and (not group_id.strip().isdigit() or int(group_id) <= 0):
+                raise ValueError("公开注册分组 ID 必须是正整数")
+    elif key == "upload_allowed_ext":
+        extensions = [ext.strip().lower() for ext in value.replace("，", ",").split(",") if ext.strip()]
+        if not extensions or any(not ext.startswith(".") or ext != ".xlsx" for ext in extensions):
+            raise ValueError("当前仅支持 .xlsx 上传")

@@ -6,7 +6,7 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Upload
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
-from app.core.deps import require_admin
+from app.core.deps import dept_scope_ids, require_admin
 from app.database import get_db
 from app.models.user import User
 from app.schemas.question import (
@@ -24,13 +24,13 @@ router = APIRouter(prefix="/admin", tags=["questions"])
 
 # ---------- 题库来源 ----------
 @router.get("/question-banks")
-def list_banks(db: Session = Depends(get_db), _user: User = Depends(require_admin)):
-    return question_service.list_banks(db)
+def list_banks(db: Session = Depends(get_db), user: User = Depends(require_admin)):
+    return question_service.list_banks(db, dept_scope_ids(db, user))
 
 
 @router.post("/question-banks", status_code=status.HTTP_201_CREATED)
 def create_bank(payload: QuestionBankCreate, db: Session = Depends(get_db), user: User = Depends(require_admin)):
-    b = question_service.create_bank(db, payload)
+    b = question_service.create_bank(db, payload, dept_scope_ids(db, user))
     audit_log(db, user.id, "question_bank.create", "question_bank", b.id, {"name": b.name})
     return b
 
@@ -46,7 +46,7 @@ def list_questions(
     difficulty: int | None = None,
     keyword: str | None = None,
     db: Session = Depends(get_db),
-    _user: User = Depends(require_admin),
+    user: User = Depends(require_admin),
 ):
     rows, total = question_service.list_questions(
         db,
@@ -57,13 +57,14 @@ def list_questions(
         group_id,
         difficulty,
         keyword,
+        dept_scope_ids(db, user),
     )
     return {"total": total, "page": page, "page_size": page_size, "items": rows}
 
 
 @router.post("/questions", status_code=status.HTTP_201_CREATED)
 def create_question(payload: QuestionCreate, db: Session = Depends(get_db), user: User = Depends(require_admin)):
-    q = question_service.create_question(db, payload)
+    q = question_service.create_question(db, payload, dept_scope_ids(db, user))
     audit_log(db, user.id, "question.create", "question", q.id, {"type": payload.type})
     return q
 
@@ -72,14 +73,14 @@ def create_question(payload: QuestionCreate, db: Session = Depends(get_db), user
 def update_question(
     qid: int, payload: QuestionUpdate, db: Session = Depends(get_db), user: User = Depends(require_admin)
 ):
-    q = question_service.update_question(db, qid, payload)
+    q = question_service.update_question(db, qid, payload, dept_scope_ids(db, user))
     audit_log(db, user.id, "question.update", "question", qid, payload.model_dump(exclude_unset=True))
     return q
 
 
 @router.delete("/questions/{qid}", status_code=status.HTTP_204_NO_CONTENT)
 def delete_question(qid: int, db: Session = Depends(get_db), user: User = Depends(require_admin)):
-    question_service.delete_question(db, qid)
+    question_service.delete_question(db, qid, dept_scope_ids(db, user))
     audit_log(db, user.id, "question.delete", "question", qid)
 
 
@@ -111,6 +112,14 @@ async def upload_preview(
     check(f"upload-preview:user:{user.id}", 20, 3600, "题库上传")
     # 上传大小限制：读取前校验 Content-Length 与系统设置 upload_max_size_mb
     settings = get_settings(db, "upload")
+    allowed_ext = {
+        ext.strip().lower()
+        for ext in settings.get("upload_allowed_ext", ".xlsx").replace("，", ",").split(",")
+        if ext.strip()
+    }
+    filename = (file.filename or "").lower()
+    if not any(filename.endswith(ext) for ext in allowed_ext):
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "文件扩展名不在允许列表内")
     max_mb = float(settings.get("upload_max_size_mb", "10") or "10")
     max_bytes = int(max_mb * 1024 * 1024)
     declared = file.size or 0
@@ -128,7 +137,10 @@ async def upload_preview(
             raise HTTPException(status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, f"文件超过上限 {max_mb}MB")
         chunks.append(chunk)
     content = b"".join(chunks)
-    return import_service.preview(db, content, group_id, bank_id, bank_name, user.id)
+    try:
+        return import_service.preview(db, content, group_id, bank_id, bank_name, user.id, dept_scope_ids(db, user))
+    except ValueError as exc:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
 
 
 @router.post("/upload/import")
@@ -137,6 +149,6 @@ def upload_import(
     db: Session = Depends(get_db),
     user: User = Depends(require_admin),
 ):
-    res = import_service.do_import(db, confirm_token, user.id)
+    res = import_service.do_import(db, confirm_token, user.id, dept_scope_ids(db, user))
     audit_log(db, user.id, "question.import", "questions", "", {"success": res.success, "failed": res.failed})
     return res

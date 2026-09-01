@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 
 from fastapi import HTTPException, status
 from sqlalchemy import func, select
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Session
 
 from app.models.question import Question
@@ -85,6 +86,7 @@ def start_practice(
     if limit is None or limit > PRACTICE_LIMIT_MAX:
         limit = PRACTICE_LIMIT_MAX
 
+    rows: list[Question]
     if mode == "wrong":
         ids = [
             r[0]
@@ -114,18 +116,18 @@ def start_practice(
         stmt = select(Question).where(Question.type == type_)
         if bank_id:
             stmt = stmt.where(Question.bank_id == bank_id)
-        rows = db.execute(stmt.order_by(Question.id).limit(limit)).scalars().all()
+        rows = list(db.execute(stmt.order_by(Question.id).limit(limit)).scalars().all())
     elif mode == "random":
         # SQL 端随机抽样，避免把全库载入 Python 再 shuffle
         stmt = select(Question)
         if bank_id:
             stmt = stmt.where(Question.bank_id == bank_id)
-        rows = db.execute(stmt.order_by(func.random()).limit(limit)).scalars().all()
+        rows = list(db.execute(stmt.order_by(func.random()).limit(limit)).scalars().all())
     else:  # sequence
         stmt = select(Question)
         if bank_id:
             stmt = stmt.where(Question.bank_id == bank_id)
-        rows = db.execute(stmt.order_by(Question.id).limit(limit)).scalars().all()
+        rows = list(db.execute(stmt.order_by(Question.id).limit(limit)).scalars().all())
 
     return [_to_dict(q) for q in rows]
 
@@ -162,14 +164,21 @@ def answer_question(db: Session, user_id: int, question_id: int, user_answer, mo
     )
 
     # 更新题目状态
+    db.execute(
+        sqlite_insert(QuestionState)
+        .values(
+            user_id=user_id,
+            question_id=question_id,
+            status="unanswered",
+            marked=False,
+            marked_note="",
+            answered_at=now,
+        )
+        .on_conflict_do_nothing(index_elements=["user_id", "question_id"])
+    )
     st = db.execute(
         select(QuestionState).where(QuestionState.user_id == user_id, QuestionState.question_id == question_id)
-    ).scalar_one_or_none()
-    if st is None:
-        st = QuestionState(
-            user_id=user_id, question_id=question_id, status="unanswered", marked=False, marked_note="", answered_at=now
-        )
-        db.add(st)
+    ).scalar_one()
 
     if is_correct is True:
         st.status = "correct"
@@ -259,6 +268,8 @@ def short_eval(db: Session, user_id: int, question_id: int, mastered: bool) -> N
     q = db.get(Question, question_id)
     if not q:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "题目不存在")
+    if q.type != "简答题":
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "只有简答题可以自评")
     now = _now()
     # 更新最近的练习记录自评
     rec = db.execute(
@@ -267,17 +278,27 @@ def short_eval(db: Session, user_id: int, question_id: int, mastered: bool) -> N
         .order_by(PracticeRecord.id.desc())
         .limit(1)
     ).scalar_one_or_none()
-    if rec:
-        rec.self_eval = mastered
-        rec.is_correct = mastered
+    if not rec:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "请先提交简答答案")
+    if rec.self_eval is not None:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "该简答题已经自评")
+    rec.self_eval = mastered
+    rec.is_correct = mastered
+    db.execute(
+        sqlite_insert(QuestionState)
+        .values(
+            user_id=user_id,
+            question_id=question_id,
+            status="unanswered",
+            marked=False,
+            marked_note="",
+            answered_at=now,
+        )
+        .on_conflict_do_nothing(index_elements=["user_id", "question_id"])
+    )
     st = db.execute(
         select(QuestionState).where(QuestionState.user_id == user_id, QuestionState.question_id == question_id)
-    ).scalar_one_or_none()
-    if st is None:
-        st = QuestionState(
-            user_id=user_id, question_id=question_id, status="unanswered", marked=False, marked_note="", answered_at=now
-        )
-        db.add(st)
+    ).scalar_one()
     st.status = "correct" if mastered else "wrong"
     st.answered_at = now
     db.commit()

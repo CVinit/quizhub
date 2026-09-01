@@ -98,9 +98,9 @@
 - [x] M14.8 手机端导航重设计：新增底部固定导航栏（首页/答题/考试/错题/我的），比汉堡按钮更直观可见；汉堡+抽屉保留为次级入口（标记/排行/管理后台等）；main 底部留 72px 避让导航栏
 
 ## M15：用户手动新增与批量导入（2026-08-25 增量）
-- [x] M15.1 重置密码修复：`api/user.ts` `resetPassword` 改为传 `{}` body（后端 `ResetPasswordIn` 为必填 body，无 body 触发 422）；`Users.vue` 重置确认文案由「重置为 123456」改为「生成随机密码」并用 `ElMessageBox.alert` 展示新密码
-- [x] M15.2 后端用户创建：`user_service.create_user`（邮箱唯一校验、角色/状态白名单、分组合法性校验、随机强密码、email_verified 直通、审计）；`api/users.py` 新增 `UserCreateIn` schema 与 `POST /admin/users`（创建管理员账号限超级管理员）
+- [x] M15.1 重置密码安全化：`ResetPasswordIn` 要求管理员提交新密码，HTTP 响应不回传密码；`Users.vue` 使用密码输入框并通过安全渠道告知用户
+- [x] M15.2 后端用户创建：`user_service.create_user`（邮箱唯一校验、角色/状态白名单、分组合法性校验、管理员提供初始密码、email_verified 直通、审计）；`api/users.py` 新增 `UserCreateIn` schema 与 `POST /admin/users`（创建管理员账号限超级管理员）
 - [x] M15.3 后端 Excel 批量导入：`utils/user_excel.py` 模板生成（邮箱/姓名/角色/初始密码/状态/分组ID + 说明 Sheet）+ 解析预览（中英文角色/状态归一化、分组ID逗号分隔、单行错误收集、token 暂存复用 import_service 模式、防 IDOR）；`api/users.py` 新增 `GET /admin/users/import/template`、`POST /admin/users/import/preview`、`POST /admin/users/import`
-- [x] M15.4 后端导入落库：`user_service.import_users` 批量插入（单行失败不中断、文件内邮箱去重、分组关联回填、返回成功用户明文密码便于管理员告知）
-- [x] M15.5 前端：`api/user.ts` 新增 create / importTemplate / importPreview / doImport 与类型；`Users.vue` 工具栏新增「新增用户」「批量导入」按钮，新增用户对话框（邮箱/姓名/角色/初始密码/状态/分组树多选），批量导入步骤式对话框（下载模板→上传预览→确认导入，含错误清单与生成密码清单）
-- [x] M15.6 端到端验证：新增用户 201（随机密码返回）/ 重复邮箱 400 / 创建管理员权限校验；重置密码 `{}` body 200；模板下载；预览解析（含错误行）；确认导入成功+失败统计+生成密码清单；库校验分组与 email_verified；`vue-tsc --noEmit` 通过、`vite build` 通过（9.22s），无回归
+- [x] M15.4 后端导入落库：`user_service.import_users` 批量插入（单行失败不中断、文件内邮箱去重、分组关联回填、初始密码必填且不回传）
+- [x] M15.5 前端：`api/user.ts` 新增 create / importTemplate / importPreview / doImport 与类型；`Users.vue` 工具栏新增「新增用户」「批量导入」按钮，新增用户对话框（邮箱/姓名/角色/初始密码/状态/分组树多选），批量导入步骤式对话框（下载模板→上传预览→确认导入，含错误清单）
+- [x] M15.6 端到端验证：新增用户/重置密码输入校验、重复邮箱 400、创建管理员权限校验、模板下载、预览解析（含错误行）、确认导入成功+失败统计；库校验分组与 email_verified；`vue-tsc --noEmit` 通过、`vite build` 通过（9.22s），无回归

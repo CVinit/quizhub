@@ -33,11 +33,13 @@ def preview(
     bank_id: int | None,
     bank_name: str = "",
     user_id: int = 0,
+    scope: set[int] | None = None,
 ) -> dict:
     """解析并暂存预览。返回 preview + confirm_token。
 
     bank_id 优先使用既有题库；否则导入时以 bank_name 命名新建一个题库。
     """
+    _validate_scope(db, group_id, bank_id, scope)
     buf = BytesIO(content)
     preview_obj: UploadPreview = parse_workbook(buf)
     valid_rows = [r for r in _full_rows(preview_obj, buf) if r.valid]
@@ -87,10 +89,9 @@ def _full_rows(preview: UploadPreview, buf: BytesIO) -> list[UploadPreviewRow]:
             if sheet_name not in wb.sheetnames:
                 continue
             ws = wb[sheet_name]
-            if ws.max_row and ws.max_row > _IMPORT_ROW_MAX + 10:
-                # 行数过多直接截断，避免遍历恶意超大表
-                pass
             for r_idx, row in enumerate(ws.iter_rows(min_row=2, values_only=True), start=2):
+                if r_idx > _IMPORT_ROW_MAX + 1:
+                    break
                 if not row or all(c is None or str(c).strip() == "" for c in row):
                     continue
                 out.append(_parse_row(sheet_name, row, r_idx))
@@ -101,7 +102,7 @@ def _full_rows(preview: UploadPreview, buf: BytesIO) -> list[UploadPreviewRow]:
     return out
 
 
-def do_import(db: Session, confirm_token: str, user_id: int = 0) -> UploadImportResult:
+def do_import(db: Session, confirm_token: str, user_id: int = 0, scope: set[int] | None = None) -> UploadImportResult:
     """根据 confirm_token 把暂存的有效题目落库。校验调用者与 token 绑定一致。
 
     bank_id 优先；为空则按 bank_name 自动建一个题库（question_bank）作为本次导入归属。
@@ -110,12 +111,18 @@ def do_import(db: Session, confirm_token: str, user_id: int = 0) -> UploadImport
         from fastapi import HTTPException, status
 
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "预览已过期，请重新上传")
-    rows, group_id, bank_id, bank_name, owner_id, ts = _preview_cache.pop(confirm_token)
+    rows, group_id, bank_id, bank_name, owner_id, ts = _preview_cache[confirm_token]
     # token 绑定用户校验（防 IDOR）：仅上传者本人可导入
     if user_id and owner_id and user_id != owner_id:
         from fastapi import HTTPException, status
 
         raise HTTPException(status.HTTP_403_FORBIDDEN, "无权导入他人预览数据")
+    if time.time() - ts > _PREVIEW_TTL:
+        from fastapi import HTTPException, status
+
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "预览已过期，请重新上传")
+    _validate_scope(db, group_id, bank_id, scope)
+    _preview_cache.pop(confirm_token, None)
 
     # 没有指定既有题库时，按名称自动新建一个题库（同次上传即一个题库）
     if not bank_id:
@@ -158,6 +165,34 @@ def do_import(db: Session, confirm_token: str, user_id: int = 0) -> UploadImport
         db.add_all(pending)
     db.commit()
     return UploadImportResult(success=success, failed=failed)
+
+
+def _validate_scope(db: Session, group_id: int | None, bank_id: int | None, scope: set[int] | None) -> None:
+    """校验导入目标分组和题库，且在确认导入时再次执行。"""
+    from app.models.group import Group
+
+    if group_id is not None and not db.get(Group, group_id):
+        from fastapi import HTTPException, status
+
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "分组不存在")
+    if scope is not None and (group_id is None or group_id not in scope):
+        from fastapi import HTTPException, status
+
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "无权导入到该分组")
+    if bank_id:
+        bank = db.get(QuestionBank, bank_id)
+        if not bank:
+            from fastapi import HTTPException, status
+
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "题库不存在")
+        if scope is not None and (bank.group_id is None or bank.group_id not in scope):
+            from fastapi import HTTPException, status
+
+            raise HTTPException(status.HTTP_403_FORBIDDEN, "无权导入到该题库")
+        if group_id is not None and bank.group_id is not None and group_id != bank.group_id:
+            from fastapi import HTTPException, status
+
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "导入分组必须与题库分组一致")
 
 
 def _ensure_unique_tags(db: Session, tags: list[str]) -> None:

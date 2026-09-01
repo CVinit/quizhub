@@ -35,6 +35,8 @@ uv sync
 if errorlevel 1 ( echo [错误] uv sync 失败 & pause & exit /b 1 )
 uv run python scripts\init_db.py
 if errorlevel 1 ( echo [错误] 数据库初始化失败 & pause & exit /b 1 )
+uv run python scripts\migrate_2026_08_28.py
+if errorlevel 1 ( echo [错误] 数据库迁移失败 & pause & exit /b 1 )
 
 echo [3/3] 启动后端 (http://localhost:8000)...
 uv run uvicorn app.main:app --host 0.0.0.0 --port 8000

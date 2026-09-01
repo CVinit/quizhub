@@ -79,3 +79,22 @@ def test_short_answer_returns_none():
 
 def test_short_answer_empty_still_none():
     assert grade("简答题", "参考答案", "") is None
+
+
+# ---------- 空答案边界：拒绝空填空/空拖拽被判满分（Critical B1 回归）----------
+def test_fill_empty_correct_answer_rejected():
+    """空填空题（correct_answer=[]）不可把任意作答判满分，应返回 False。"""
+    assert grade("填空题", [], ["任何答案"]) is False
+    assert grade("填空题", [], []) is False
+    assert grade("填空题", [], None) is False
+
+
+def test_drag_empty_correct_answer_rejected():
+    """空拖拽题（correct_answer={}）不可把任意作答判满分，应返回 False。"""
+    assert grade("拖拽题", {}, {"任意": "答案"}) is False
+    assert grade("拖拽题", {}, {}) is False
+    assert grade("拖拽题", {}, None) is False
+
+
+def test_unknown_type_rejected():
+    assert grade("未知题型", "A", "A") is False

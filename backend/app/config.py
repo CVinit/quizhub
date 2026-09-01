@@ -41,13 +41,13 @@ ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24 * 7  # 7 天
 # Fernet 密钥（用于加密 SMTP 密码等敏感设置）；32 url-safe base64 字节
 SETTINGS_ENC_KEY = os.getenv("TRAINING_ENC_KEY", "")
 if not SETTINGS_ENC_KEY:
-    logger.warning(
-        "TRAINING_ENC_KEY 未设置，敏感设置仅以 base64 可逆编码存储。生产环境务必经环境变量注入 Fernet 密钥。"
-    )
+    logger.warning("TRAINING_ENC_KEY 未设置，写入非空敏感设置将被拒绝。生产环境务必经环境变量注入 Fernet 密钥。")
 
 # 超管初始化账号（init_db.py 使用）
 SUPER_ADMIN_EMAIL = os.getenv("TRAINING_SUPER_ADMIN_EMAIL", "admin@example.com")
-SUPER_ADMIN_PASSWORD = os.getenv("TRAINING_SUPER_ADMIN_PASSWORD", "admin12345")
+SUPER_ADMIN_PASSWORD = os.getenv("TRAINING_SUPER_ADMIN_PASSWORD", "")
+# 标记是否未配置口令，供 init_db.py 生成一次性初始化口令
+SUPER_ADMIN_PASSWORD_IS_DEFAULT = not os.getenv("TRAINING_SUPER_ADMIN_PASSWORD")
 
 
 DATA_DIR.mkdir(parents=True, exist_ok=True)

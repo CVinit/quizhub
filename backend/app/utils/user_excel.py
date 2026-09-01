@@ -18,6 +18,7 @@ from openpyxl.utils import get_column_letter
 from sqlalchemy.orm import Session
 
 from app.services.user_service import ROLES, STATUSES
+from app.utils.excel import MAX_CELL_CHARS, validate_workbook_archive
 
 HEADERS = ["邮箱", "姓名", "角色", "初始密码", "状态", "分组ID"]
 
@@ -75,7 +76,7 @@ def build_template() -> BytesIO:
         ["邮箱", "必填，唯一；重复邮箱该行失败"],
         ["姓名", "可留空，留空时取邮箱 @ 前缀"],
         ["角色", "普通用户 / 部门管理员 / 超级管理员，留空默认普通用户"],
-        ["初始密码", "可留空，留空时系统自动生成随机密码；填写则至少 6 位"],
+        ["初始密码", "必填，至少 6 位；请通过安全渠道告知用户"],
         ["状态", "正常 / 待审批 / 已禁用，留空默认正常"],
         ["分组ID", "可留空；多个分组用英文逗号分隔，如 3,5"],
         ["", ""],
@@ -130,7 +131,9 @@ def _parse_row(row: tuple, r_idx: int) -> dict:
     group_ids = _parse_group_ids(cells[5])
 
     error = ""
-    if not email:
+    if any(isinstance(cell, str) and len(cell) > MAX_CELL_CHARS for cell in cells):
+        error = "单元格内容过长"
+    elif not email:
         error = "邮箱为空"
     elif "@" not in email:
         error = "邮箱格式不正确"
@@ -143,7 +146,9 @@ def _parse_row(row: tuple, r_idx: int) -> dict:
     if status_raw and st not in STATUSES:
         error = error or f"状态非法: {status_raw}"
 
-    if password and len(password) < 6:
+    if not password:
+        error = error or "初始密码不能为空"
+    elif len(password) < 6:
         error = error or "初始密码至少 6 位"
 
     return {
@@ -161,6 +166,7 @@ def _parse_row(row: tuple, r_idx: int) -> dict:
 
 def preview(db: Session, content: bytes, user_id: int = 0) -> dict:
     """解析上传工作簿，暂存有效行，返回预览 + confirm_token。"""
+    validate_workbook_archive(content)
     buf = BytesIO(content)
     wb = load_workbook(buf, data_only=True, read_only=True)
     rows: list[dict] = []
@@ -169,6 +175,8 @@ def preview(db: Session, content: bytes, user_id: int = 0) -> dict:
         if "用户" in wb.sheetnames:
             ws = wb["用户"]
             for r_idx, row in enumerate(ws.iter_rows(min_row=2, values_only=True), start=2):
+                if r_idx > _IMPORT_ROW_MAX + 1:
+                    break
                 if not row or all(c is None or str(c).strip() == "" for c in row):
                     continue
                 parsed = _parse_row(row, r_idx)
@@ -184,8 +192,9 @@ def preview(db: Session, content: bytes, user_id: int = 0) -> dict:
     token = uuid.uuid4().hex
     _preview_cache[token] = (valid_rows, user_id, time.time())
     _gc_cache()
+    preview_rows = [{key: value for key, value in row.items() if key != "password"} for row in rows[:50]]
     return {
-        "rows": rows[:50],  # 仅返回前 50 条用于预览
+        "rows": preview_rows,  # 仅返回前 50 条用于预览，避免回传初始密码
         "total": len(rows),
         "valid_count": len(valid_rows),
         "errors": errors,
@@ -200,9 +209,12 @@ def consume_preview(confirm_token: str, user_id: int) -> list[dict]:
 
     if confirm_token not in _preview_cache:
         raise HTTPException(http_status.HTTP_400_BAD_REQUEST, "预览已过期，请重新上传")
-    rows, owner_id, _ts = _preview_cache.pop(confirm_token)
+    rows, owner_id, created_at = _preview_cache[confirm_token]
     if user_id and owner_id and user_id != owner_id:
         raise HTTPException(http_status.HTTP_403_FORBIDDEN, "无权导入他人预览数据")
+    if time.time() - created_at > _PREVIEW_TTL:
+        raise HTTPException(http_status.HTTP_400_BAD_REQUEST, "预览已过期，请重新上传")
+    _preview_cache.pop(confirm_token, None)
     return rows
 
 

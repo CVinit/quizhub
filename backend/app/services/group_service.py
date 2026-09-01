@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from fastapi import HTTPException, status
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
 from app.models.group import Group, UserGroup
@@ -12,25 +12,32 @@ from app.schemas.group import GroupCreate, GroupUpdate
 GROUP_TYPES = ("部门", "专业", "班级", "自定义")
 
 
-def build_tree(db: Session) -> list[dict]:
-    """返回分组树形结构（带 children）。"""
+def build_tree(db: Session, scope: set[int] | None = None) -> list[dict]:
+    """返回分组树形结构（带 children）。
+
+    scope 非 None（部门管理员）时仅返回其子树内的分组，并按子树根重建树形，
+    防止向部门管理员泄露其他部门的组织结构。
+    """
     rows = db.execute(select(Group).order_by(Group.sort, Group.id)).scalars().all()
+    if scope is not None:
+        rows = [r for r in rows if r.id in scope]
     nodes: dict[int, dict] = {}
     for r in rows:
         nodes[r.id] = {
             "id": r.id,
             "name": r.name,
             "type": r.type,
-            "parent_id": r.parent_id,
+            "parent_id": r.parent_id if (r.parent_id is not None and r.parent_id in nodes) else None,
             "sort": r.sort,
             "children": [],
         }
-    roots: list[dict] = []
-    for n in nodes.values():
-        if n["parent_id"] and n["parent_id"] in nodes:
-            nodes[n["parent_id"]]["children"].append(n)
-        else:
-            roots.append(n)
+    # 第二遍：构建父子关系（scope 外的 parent 视为根）
+    for r in rows:
+        n = nodes[r.id]
+        pid = r.parent_id
+        if pid is not None and pid in nodes:
+            nodes[pid]["children"].append(n)
+    roots: list[dict] = [n for n in nodes.values() if n["parent_id"] is None]
     return roots
 
 
@@ -83,7 +90,7 @@ def delete_group(db: Session, group_id: int) -> None:
     if _has_questions(db, group_id):
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "该分组下存在题目，请先迁移或解除题目归属")
     # 解除用户关联
-    db.execute(UserGroup.__table__.delete().where(UserGroup.group_id == group_id))
+    db.execute(delete(UserGroup).where(UserGroup.group_id == group_id))
     db.delete(g)
     db.commit()
 

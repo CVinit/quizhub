@@ -23,7 +23,7 @@ def log(
     actor: int | None,
     action: str,
     target_type: str = "",
-    target_id: str = "",
+    target_id: object = "",
     detail: dict[str, Any] | None = None,
     ip: str = "",
 ) -> None:
@@ -52,7 +52,15 @@ def list_logs(
     action: str | None = None,
     target_type: str | None = None,
     keyword: str | None = None,
+    scope: set[int] | None = None,
+    from_: str | None = None,
+    to: str | None = None,
 ) -> tuple[list[dict], int]:
+    """审计日志列表。
+
+    scope 非 None（部门管理员）时仅返回其数据范围内用户作为操作者的日志，
+    系统级（actor 为空）日志仅 super_admin 可见——避免部门管理员窥探其他部门/超管操作。
+    """
     stmt = select(AuditLog)
     if actor:
         stmt = stmt.where(AuditLog.actor == actor)
@@ -60,6 +68,10 @@ def list_logs(
         stmt = stmt.where(AuditLog.action.like(f"%{action}%"))
     if target_type:
         stmt = stmt.where(AuditLog.target_type == target_type)
+    if from_:
+        stmt = stmt.where(AuditLog.created_at >= from_)
+    if to:
+        stmt = stmt.where(AuditLog.created_at <= to)
     if keyword:
         from sqlalchemy import or_
 
@@ -71,6 +83,14 @@ def list_logs(
                 AuditLog.target_id.like(kw),
             )
         )
+    # 部门管理员数据范围过滤：仅看范围内操作者产生的日志
+    if scope is not None:
+        from app.core.deps import users_in_scope
+
+        scoped_actors = users_in_scope(db, scope)
+        if not scoped_actors:
+            return [], 0
+        stmt = stmt.where(AuditLog.actor.in_(scoped_actors))
 
     from sqlalchemy import func
 
@@ -86,7 +106,8 @@ def list_logs(
         out.append(
             {
                 "id": r.id,
-                "actor": u.name or u.email if u else "系统",
+                "actor": f"用户#{u.id}" if u else "系统",
+                "actor_id": r.actor,
                 "action": r.action,
                 "target_type": r.target_type,
                 "target_id": r.target_id,

@@ -4,26 +4,27 @@ from __future__ import annotations
 
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, FiniteFloat
 
 
 class ExamAnswerIn(BaseModel):
     question_id: int
     answer: Any = None
-    version: int
+    version: int = Field(ge=1)
 
 
 class ExamCreateIn(BaseModel):
-    name: str
-    type: str = "formal"  # mock/formal
+    model_config = ConfigDict(extra="forbid")
+    name: str = Field(min_length=1, max_length=200)
+    type: str = Field("formal", pattern="^(mock|formal)$")
     paper_template_id: int | None = None
     manual_questions: list[int] | None = None
-    rules: dict = {}
+    rules: dict = Field(default_factory=dict)
     group_ids: list[int] | None = None
     start_at: str | None = None
     end_at: str | None = None
-    duration_min: int = 90
-    pass_score: float = Field(60, ge=0)
+    duration_min: int = Field(90, ge=1, le=1440)
+    pass_score: FiniteFloat = Field(60, ge=0)
     max_attempts: int = Field(0, ge=0)
     show_score_immediately: bool = True
     show_analysis: bool = False
@@ -31,13 +32,14 @@ class ExamCreateIn(BaseModel):
 
 
 class ExamUpdateIn(BaseModel):
-    name: str | None = None
+    model_config = ConfigDict(extra="forbid")
+    name: str | None = Field(None, min_length=1, max_length=200)
     rules: dict | None = None
     group_ids: list[int] | None = None
     start_at: str | None = None
     end_at: str | None = None
     duration_min: int | None = Field(None, ge=1)
-    pass_score: float | None = Field(None, ge=0)
+    pass_score: FiniteFloat | None = Field(None, ge=0)
     max_attempts: int | None = Field(None, ge=0)
     show_score_immediately: bool | None = None
     show_analysis: bool | None = None
@@ -47,16 +49,19 @@ class ExamUpdateIn(BaseModel):
 
 
 class PaperTemplateIn(BaseModel):
-    name: str
-    mode: str = "mock"
+    model_config = ConfigDict(extra="forbid")
+    name: str = Field(min_length=1, max_length=200)
+    mode: str = Field("mock", pattern="^(mock|formal)$")
     config: dict
     group_ids: list[int] | None = None
 
 
 class ReviewIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
     verdict: str  # pass/fail/partial
-    partial_score: float | None = Field(None, ge=0)
+    partial_score: FiniteFloat | None = Field(None, ge=0)
 
 
 class MockConfigIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
     config: dict

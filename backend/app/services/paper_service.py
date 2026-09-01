@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import random
 
+from fastapi import HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -31,6 +32,29 @@ def generate_paper(db: Session, config: dict) -> dict:
     difficulty_dist: dict[str, float] = config.get("difficulty_dist") or {}
     seed = config.get("seed")
     allow_dup = config.get("allow_duplicate", False)
+    max_q = config.get("max_questions", 100)
+    if not isinstance(max_q, int) or isinstance(max_q, bool) or not 1 <= max_q <= 1000:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "max_questions 必须在 1~1000 之间")
+    if allow_dup:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "当前试卷模型不支持重复题目")
+    if not isinstance(type_quota, dict) or any(
+        not isinstance(quota, int) or isinstance(quota, bool) or quota < 0 or quota > 1000
+        for quota in type_quota.values()
+    ):
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "题型数量配置无效")
+    if not isinstance(difficulty_dist, dict):
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "难度配比配置无效")
+    try:
+        ratios = [float(ratio) for ratio in difficulty_dist.values()]
+        difficulty_keys = {int(key) for key in difficulty_dist}
+    except (TypeError, ValueError):
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "难度配比配置无效") from None
+    if (
+        any(ratio < 0 or ratio > 1 for ratio in ratios)
+        or sum(ratios) > 1.000001
+        or not difficulty_keys.issubset({1, 2, 3})
+    ):
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "难度配比必须是 1~3 的非负比例，合计不能超过 1")
     bank_ids = config.get("bank_ids") or []
     group_ids = config.get("group_ids") or []
     tags = config.get("tags") or []
@@ -115,7 +139,6 @@ def generate_paper(db: Session, config: dict) -> dict:
                 total_score += qscore
 
     # 上限
-    max_q = config.get("max_questions", 100)
     if len(chosen_ids) > max_q:
         chosen_ids = chosen_ids[:max_q]
         total_score = sum(scores[q] for q in chosen_ids)

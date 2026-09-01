@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, status
+from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
-from app.core.deps import require_admin
+from app.core.deps import dept_scope_ids, require_admin
 from app.database import get_db
 from app.models.user import User
 from app.schemas.group import GroupCreate, GroupOut, GroupUpdate
@@ -16,12 +16,16 @@ router = APIRouter(prefix="/admin/groups", tags=["groups"])
 
 
 @router.get("")
-def list_tree(db: Session = Depends(get_db), _user: User = Depends(require_admin)):
-    return group_service.build_tree(db)
+def list_tree(db: Session = Depends(get_db), user: User = Depends(require_admin)):
+    return group_service.build_tree(db, dept_scope_ids(db, user))
 
 
 @router.post("", response_model=GroupOut, status_code=status.HTTP_201_CREATED)
 def create(payload: GroupCreate, db: Session = Depends(get_db), user: User = Depends(require_admin)):
+    scope = dept_scope_ids(db, user)
+    # 部门管理员只能在自身子树内建子分组（parent 须在 scope 内，或建在根需 super_admin）
+    if scope is not None and (payload.parent_id is None or payload.parent_id not in scope):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "无权在该分组下创建子分组")
     g = group_service.create_group(db, payload)
     audit_log(db, user.id, "group.create", "group", g.id, {"name": g.name, "type": g.type})
     return g
@@ -29,6 +33,12 @@ def create(payload: GroupCreate, db: Session = Depends(get_db), user: User = Dep
 
 @router.put("/{group_id}", response_model=GroupOut)
 def update(group_id: int, payload: GroupUpdate, db: Session = Depends(get_db), user: User = Depends(require_admin)):
+    scope = dept_scope_ids(db, user)
+    if scope is not None and group_id not in scope:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "无权操作该分组")
+    # 部门管理员不可把分组挂到自身子树外的父分组（防扩张数据范围）
+    if scope is not None and payload.parent_id is not None and payload.parent_id not in scope:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "无权挂到该父分组")
     g = group_service.update_group(db, group_id, payload)
     audit_log(db, user.id, "group.update", "group", group_id, payload.model_dump(exclude_unset=True))
     return g
@@ -36,5 +46,8 @@ def update(group_id: int, payload: GroupUpdate, db: Session = Depends(get_db), u
 
 @router.delete("/{group_id}", status_code=status.HTTP_204_NO_CONTENT)
 def delete(group_id: int, db: Session = Depends(get_db), user: User = Depends(require_admin)):
+    scope = dept_scope_ids(db, user)
+    if scope is not None and group_id not in scope:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "无权操作该分组")
     group_service.delete_group(db, group_id)
     audit_log(db, user.id, "group.delete", "group", group_id)

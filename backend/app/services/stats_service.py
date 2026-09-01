@@ -9,8 +9,9 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+from typing import Any
 
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
 
 from app.models.group import Group, UserGroup
@@ -63,11 +64,11 @@ def refresh_daily(db: Session, date_str: str) -> int:
     practice_map = {r.user_id: r for r in practice_rows}
     exam_map = {r.user_id: r for r in exam_rows}
     user_ids = set(practice_map) | set(exam_map)
+    # 即使当天没有源数据，也必须清理旧聚合，避免删除/更正源数据后继续展示旧结果。
+    db.execute(delete(StatsUserDaily).where(StatsUserDaily.date == date_str))
     if not user_ids:
+        db.commit()
         return 0
-
-    # 清空当日旧数据
-    db.execute(StatsUserDaily.__table__.delete().where(StatsUserDaily.date == date_str))
 
     # 一次查询所有用户的分组，消除 N+1
     gid_map: dict[int, int] = {
@@ -93,7 +94,7 @@ def refresh_daily(db: Session, date_str: str) -> int:
                 correct_count=int(pr.ok or 0) if pr else 0,
                 wrong_count=(pr.cnt - int(pr.ok or 0)) if pr else 0,
                 exam_count=er.cnt if er else 0,
-                exam_score_sum=int(er.score or 0) if er else 0,
+                exam_score_sum=float(er.score or 0) if er else 0,
                 exam_pass_count=int(er.pass_cnt or 0) if er else 0,
             )
         )
@@ -136,20 +137,21 @@ def user_panel(db: Session, user: User) -> dict:
     marked = int(row.marked or 0)
     accuracy = round(correct / practiced * 100) if practiced else 0
 
-    # 最近 5 次考试
-    results = (
-        db.execute(select(ExamResult).where(ExamResult.user_id == user.id).order_by(ExamResult.id.desc()).limit(5))
-        .scalars()
-        .all()
-    )
-    recent_exams = []
-    for r in results:
-        from app.models.exam import ExamDefinition
+    # 最近 5 次考试，一次 JOIN 取出考试名。
+    from app.models.exam import ExamDefinition
 
-        e = db.get(ExamDefinition, r.exam_definition_id)
+    results = db.execute(
+        select(ExamResult, ExamDefinition.name)
+        .join(ExamDefinition, ExamDefinition.id == ExamResult.exam_definition_id)
+        .where(ExamResult.user_id == user.id)
+        .order_by(ExamResult.id.desc())
+        .limit(5)
+    ).all()
+    recent_exams = []
+    for r, exam_name in results:
         recent_exams.append(
             {
-                "name": e.name if e else "",
+                "name": exam_name,
                 "score": r.score,
                 "total_score": r.total_score,
                 "passed": r.passed,
@@ -168,16 +170,40 @@ def user_panel(db: Session, user: User) -> dict:
 
 
 # ---------- 管理端概览 ----------
-def admin_overview(db: Session) -> dict:
+def admin_overview(db: Session, scope: set[int] | None = None) -> dict:
+    """管理端概览指标。
+
+    scope 非 None（部门管理员）时各项用户/考试/复核指标均限定在其数据范围内：
+    用户按 users_in_scope 取 id 集合过滤；考试按 group_ids 与 scope 取交集过滤。
+    super_admin（scope=None）返回全站指标。
+    """
+    from app.core.deps import users_in_scope
     from app.models.exam import ExamDefinition
     from app.models.record import ShortAnswerReview
 
-    total_users = db.execute(select(func.count(User.id))).scalar() or 0
-    active_users = db.execute(select(func.count(User.id)).where(User.status == "active")).scalar() or 0
-    pending_approvals = db.execute(select(func.count(User.id)).where(User.status == "pending")).scalar() or 0
+    # 部门管理员可见用户 id 集合（None 表示全量）
+    user_ids = users_in_scope(db, scope)  # set[int] | None
+
+    if user_ids is None:
+        total_users = db.execute(select(func.count(User.id))).scalar() or 0
+        active_users = db.execute(select(func.count(User.id)).where(User.status == "active")).scalar() or 0
+        pending_approvals = db.execute(select(func.count(User.id)).where(User.status == "pending")).scalar() or 0
+    else:
+        total_users = len(user_ids)
+        if user_ids:
+            active_users = (
+                db.execute(select(func.count(User.id)).where(User.id.in_(user_ids), User.status == "active")).scalar()
+                or 0
+            )
+            pending_approvals = (
+                db.execute(select(func.count(User.id)).where(User.id.in_(user_ids), User.status == "pending")).scalar()
+                or 0
+            )
+        else:
+            active_users = pending_approvals = 0
     total_questions = db.execute(select(func.count(Question.id))).scalar() or 0
 
-    # 完成率：有练习记录的题目数 / 总题数
+    # 完成率：有练习记录的题目数 / 总题数（题库为全站共享，不按部门过滤）
     practiced_q = (
         db.execute(
             select(func.count(func.distinct(QuestionState.question_id))).where(QuestionState.status != "unanswered")
@@ -186,29 +212,58 @@ def admin_overview(db: Session) -> dict:
     )
     completion_rate = round(practiced_q / total_questions * 100) if total_questions else 0
 
-    # 全站正确率
-    total_answers = db.execute(select(func.count(PracticeRecord.id))).scalar() or 0
-    correct_answers = (
-        db.execute(
-            select(func.count(PracticeRecord.id)).where(PracticeRecord.is_correct == True)  # noqa: E712
-        ).scalar()
-        or 0
-    )
+    # 正确率：按可见用户的练习记录统计
+    if user_ids is None or user_ids:
+        ans_stmt = select(func.count(PracticeRecord.id))
+        correct_stmt = select(func.count(PracticeRecord.id)).where(PracticeRecord.is_correct == True)  # noqa: E712
+        if user_ids is not None:
+            ans_stmt = ans_stmt.where(PracticeRecord.user_id.in_(user_ids))
+            correct_stmt = correct_stmt.where(PracticeRecord.user_id.in_(user_ids))
+        total_answers = db.execute(ans_stmt).scalar() or 0
+        correct_answers = db.execute(correct_stmt).scalar() or 0
+    else:
+        total_answers = correct_answers = 0
     accuracy = round(correct_answers / total_answers * 100) if total_answers else 0
 
-    total_exams = db.execute(select(func.count(ExamDefinition.id)).where(ExamDefinition.type == "formal")).scalar() or 0
-    pending_reviews = (
-        db.execute(select(func.count(ShortAnswerReview.id)).where(ShortAnswerReview.verdict.is_(None))).scalar() or 0
-    )
+    # 正式考试数：按指派分组与 scope 取交集过滤（无指派考试仅 super_admin 计入）
+    exam_stmt = select(func.count(ExamDefinition.id)).where(ExamDefinition.type == "formal")
+    if scope is not None:
+        exam_rows = db.execute(
+            select(ExamDefinition.id, ExamDefinition.group_ids).where(ExamDefinition.type == "formal")
+        ).all()
+        total_exams = sum(1 for _eid, gids in exam_rows if gids and set(gids) & scope)
+    else:
+        total_exams = db.execute(exam_stmt).scalar() or 0
+
+    # 待复核简答：按可见用户过滤
+    review_stmt = select(func.count(ShortAnswerReview.id)).where(ShortAnswerReview.verdict.is_(None))
+    if user_ids is not None:
+        if user_ids:
+            review_stmt = review_stmt.where(ShortAnswerReview.user_id.in_(user_ids))
+        else:
+            pending_reviews = 0
+            today_active = 0
+            return {
+                "total_users": total_users,
+                "active_users": active_users,
+                "pending_approvals": pending_approvals,
+                "total_questions": total_questions,
+                "completion_rate": completion_rate,
+                "accuracy": accuracy,
+                "total_exams": total_exams,
+                "pending_reviews": pending_reviews,
+                "today_active": today_active,
+            }
+        pending_reviews = db.execute(review_stmt).scalar() or 0
+    else:
+        pending_reviews = db.execute(review_stmt).scalar() or 0
 
     # 今日活跃用户（今日有练习记录）
     today = _date_str(_utcnow())
-    today_active = (
-        db.execute(
-            select(func.count(func.distinct(StatsUserDaily.user_id))).where(StatsUserDaily.date == today)
-        ).scalar()
-        or 0
-    )
+    today_stmt = select(func.count(func.distinct(StatsUserDaily.user_id))).where(StatsUserDaily.date == today)
+    if user_ids is not None:
+        today_stmt = today_stmt.where(StatsUserDaily.user_id.in_(user_ids))
+    today_active = db.execute(today_stmt).scalar() or 0
 
     return {
         "total_users": total_users,
@@ -256,8 +311,9 @@ def rank(db: Session, dimension: str, scope: str, range_: str, current_user_id: 
         uid = r.user_id
         cnt = int(r.cnt or 0)
         ok = int(r.ok or 0)
-        score = int(r.score or 0)
+        score: float = float(r.score or 0)
         exam_cnt = int(r.exam_cnt or 0)
+        value: float | int
         if dimension == "accuracy":
             value = round(ok / cnt * 100) if cnt else 0
         elif dimension == "count":
@@ -281,7 +337,7 @@ def rank(db: Session, dimension: str, scope: str, range_: str, current_user_id: 
 
     # 分组维度：聚合到 group
     if scope == "group":
-        group_items = {}
+        group_items: dict[int, dict[str, Any]] = {}
         for it in items:
             gid_row = db.execute(select(UserGroup.group_id).where(UserGroup.user_id == it["user_id"]).limit(1)).first()
             gid = gid_row[0] if gid_row else 0

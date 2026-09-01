@@ -126,7 +126,7 @@ def _render_svg(answer: str) -> str:
         glyph = _DIGITS[int(ch)]
         ox = pad_x + idx * (char_w + gap)
         # 轻微随机垂直抖动，增加机器识别难度
-        jitter = rng.int(-3, 3)
+        jitter = rng.randint(-3, 3)
         oy = pad_y + jitter
         for r, row_bits in enumerate(glyph):
             for c, bit in enumerate(row_bits):
@@ -137,8 +137,8 @@ def _render_svg(answer: str) -> str:
 
     # 随机噪点
     for _ in range(40):
-        x = rng.int(0, width - 2)
-        y = rng.int(0, height - 2)
+        x = rng.randint(0, width - 2)
+        y = rng.randint(0, height - 2)
         parts.append(f'<circle cx="{x}" cy="{y}" r="1" fill="#90939966"/>')
 
     parts.append("</svg>")
@@ -160,10 +160,10 @@ class _SeededRng:
         self._state = (self._state * 1103515245 + 12345) & 0x7FFFFFFF
         return self._state
 
-    def int(self, lo: int, hi: int) -> int:
+    def randint(self, lo: int, hi: int) -> int:
         if hi <= lo:
             return lo
         return lo + (self._next() % (hi - lo + 1))
 
     def line(self, w: int, h: int) -> tuple[int, int, int, int]:
-        return self.int(0, w), self.int(0, h), self.int(0, w), self.int(0, h)
+        return self.randint(0, w), self.randint(0, h), self.randint(0, w), self.randint(0, h)

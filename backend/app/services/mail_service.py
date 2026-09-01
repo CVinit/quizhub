@@ -10,10 +10,6 @@ import smtplib
 from email.mime.text import MIMEText
 from email.utils import formataddr
 
-from sqlalchemy.orm import Session
-
-from app.services.system_service import get_settings
-
 logger = logging.getLogger("quizhub")
 
 
@@ -24,20 +20,17 @@ def _render(tpl: str, **kwargs: object) -> str:
         return tpl
 
 
-def send_register_code(db: Session, to_email: str, code: str) -> None:
-    settings = get_settings(db)
+def send_register_code(settings: dict[str, str], to_email: str, code: str) -> None:
     tpl = settings.get("mail_tpl_register", "您的注册验证码是：{code}")
     _send(to_email, "注册验证码", _render(tpl, code=code), settings)
 
 
-def send_exam_publish(db: Session, to_email: str, exam_name: str, end_at: str) -> None:
-    settings = get_settings(db)
+def send_exam_publish(settings: dict[str, str], to_email: str, exam_name: str, end_at: str) -> None:
     tpl = settings.get("mail_tpl_exam_publish", "新考试「{exam_name}」已发布，请在 {end_at} 前完成。")
     _send(to_email, "考试通知", _render(tpl, exam_name=exam_name, end_at=end_at), settings)
 
 
-def send_review_done(db: Session, to_email: str, exam_name: str, score: object) -> None:
-    settings = get_settings(db)
+def send_review_done(settings: dict[str, str], to_email: str, exam_name: str, score: object) -> None:
     tpl = settings.get("mail_tpl_review_done", "您的考试「{exam_name}」成绩已公布：{score} 分。")
     _send(to_email, "成绩公布", _render(tpl, exam_name=exam_name, score=score), settings)
 
@@ -45,8 +38,7 @@ def send_review_done(db: Session, to_email: str, exam_name: str, score: object) 
 def _send(to_email: str, subject: str, body: str, settings: dict[str, str]) -> None:
     host = settings.get("smtp_host", "")
     if not host:
-        # 开发期未配置 SMTP：回退日志
-        logger.info("[mail][fallback] to=%s subject=%s body=%s", to_email, subject, body)
+        logger.warning("[mail] SMTP 未配置，邮件未发送")
         return
     port = int(settings.get("smtp_port", "465"))
     username = settings.get("smtp_username", "")
@@ -64,9 +56,14 @@ def _send(to_email: str, subject: str, body: str, settings: dict[str, str]) -> N
             if username and password:
                 s.login(username, password)
             s.sendmail(sender, [to_email], msg.as_string())
-    else:
+    elif use_tls:
         with smtplib.SMTP(host, port, timeout=15) as s:
             s.starttls()
+            if username and password:
+                s.login(username, password)
+            s.sendmail(sender, [to_email], msg.as_string())
+    else:
+        with smtplib.SMTP(host, port, timeout=15) as s:
             if username and password:
                 s.login(username, password)
             s.sendmail(sender, [to_email], msg.as_string())

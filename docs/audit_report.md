@@ -285,3 +285,47 @@
 - PERF-P1-3/4/6/7、SEC-P1-7/8/10/11/12/13、各 P2 项
 
 修复记录见 `docs/fix_changelog.md`。
+
+---
+
+## 八、2026-08-28 第二轮全量复审
+
+复审方式：6 路并行子代理（安全/认证、考试并发、文件导入、服务与 SQL、模型与 schema、测试覆盖）+ 主线逐文件复核，逐项对照源码核实。
+
+### Critical（12 项，全部本轮修复）
+
+**A 类：dept_admin 数据范围越权**
+- A1 Excel 导入可创建 super_admin 且分组不受 scope 约束（垂直+水平越权）
+- A2 分组管理 API 无 scope 校验，dept_admin 可任意增删改分组、改 parent_id 篡改自身范围
+- A3 考试管理端（list/create/update/publish）全无 scope，可改/发其他部门考试、指派任意分组
+- A4 成绩列表 `list_results` 无用户过滤，可遍历 exam_id 拉取跨部门成绩
+- A5 复核 `list_pending`/`do_review`/`publish_results` 无 scope，可复核/公布任意部门成绩
+- A6 全局配置（mock-config/试卷模板/概览指标/审计日志）对 dept_admin 全量开放
+
+**B 类：计分/并发完整性**
+- B1 `grade("填空题",[],[])`/`grade("拖拽题",{},{})` 返回 True，空答案任意作答判满分
+- B2 复核 `verdict is not None` 读-判-写不原子，并发同题复核分数重复自增
+- B3 `_recover_stuck_scoring` 全局重置超时 scoring 会话，误重置含 ExamResult 的合法待复核会话
+- B4 `publish_results` 无条件重算 `passed`，超时考试经复核可被改判为及格
+- B5 `ExamQuestion` 无唯一约束，首次固化 check-then-insert 竞态产生重复行、重复计分
+- B6 `submit_answer` version 条件 UPDATE 未含 status，滞后作答可污染已结算会话 answers
+
+### Suggestion（未在本轮修复，列为后续）
+- 改密不失效旧 JWT（7 天有效、无登出/撤销）
+- SMTP `starttls()` 未传 SSL context（不校验证书）
+- Fallback 邮件把验证码明文写日志
+- `register-groups` 公开返回全量组织树
+- `parse_workbook` 无行数上限 + xlsx 解压无上限（资源耗尽/zip 炸弹）
+- `upload_allowed_ext` 设置定义但上传路由从不校验
+- `update_user` 接收未校验 `dict` payload
+- `exam_service.py` 770 行违反 SRP、`update_exam` 缺状态机守卫
+- 排行/复核待办/用户列表 N+1
+- `register_open` 设置定义但不校验
+
+### 测试套件缺口（未补全，列为后续）
+- 零 HTTP 路由测试（`require_admin`/`get_current_user`/限流/验证码集成/IDOR 未在路由层验证）
+- 10/16 service 零测试（auth/group/question/practice/stats/system/audit/mail/user_excel）
+- `test_captcha_verify_correct_consumes` 为 Liar 测试（从未验证正确答案路径）
+- grading 空值边界（本轮已补）、exam/review 错误路径未覆盖
+
+修复记录见 `docs/fix_changelog.md` 第二轮章节。

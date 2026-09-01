@@ -62,7 +62,7 @@ quizhub/
 cd frontend && pnpm install && pnpm build
 
 # 后端：安装依赖并初始化数据库
-cd backend && uv sync && uv run python scripts/init_db.py
+cd backend && uv sync && uv run python scripts/init_db.py && uv run python scripts/migrate_2026_08_28.py
 
 # 启动后端
 cd backend && uv run uvicorn app.main:app --host 0.0.0.0 --port 8000
@@ -74,7 +74,7 @@ cd backend && uv run uvicorn app.main:app --host 0.0.0.0 --port 8000
 cd frontend; pnpm install; pnpm build
 
 # 后端：安装依赖并初始化数据库
-cd backend; uv sync; uv run python scripts/init_db.py
+cd backend; uv sync; uv run python scripts/init_db.py; uv run python scripts/migrate_2026_08_28.py
 
 # 启动后端
 cd backend; uv run uvicorn app.main:app --host 0.0.0.0 --port 8000
@@ -98,16 +98,16 @@ Windows 注意点：
 
 ## 默认账号
 
-初始化后默认超级管理员（可通过环境变量覆盖）：
+初始化时需通过环境变量提供超级管理员密码；未提供时脚本会生成一次性随机密码并只在初始化输出一次：
 
 - 邮箱：`admin@example.com`
-- 密码：`admin12345`（环境变量 `TRAINING_SUPER_ADMIN_PASSWORD`）
+- 密码：环境变量 `TRAINING_SUPER_ADMIN_PASSWORD`
 
 > ⚠️ 生产环境务必通过环境变量注入：`TRAINING_SUPER_ADMIN_EMAIL` / `TRAINING_SUPER_ADMIN_PASSWORD`。
 
 ## 生产环境关键配置
 
-启动前通过环境变量注入（缺失时后端会打印安全警告并降级为进程级临时密钥 / 可逆编码）：
+启动前通过环境变量注入（缺失时 JWT 使用临时密钥，敏感设置写入会被拒绝）：
 
 | 环境变量 | 用途 |
 | --- | --- |

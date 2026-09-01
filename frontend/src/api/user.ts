@@ -22,21 +22,18 @@ export interface UserCreatePayload {
   email: string
   name?: string
   role?: 'user' | 'dept_admin' | 'super_admin'
-  password?: string
+  password: string
   status?: 'active' | 'pending' | 'disabled'
   group_ids?: number[]
 }
 
-export interface UserCreateResult extends UserItem {
-  password: string
-}
+export type UserCreateResult = UserItem
 
 export interface UserImportPreviewRow {
   row_index: number
   email: string
   name: string
   role: string
-  password: string
   status: string
   group_ids: number[]
   valid: boolean
@@ -55,7 +52,6 @@ export interface UserImportResult {
   success: number
   failed: number
   errors: { row: number; email: string; error: string }[]
-  created: { email: string; name: string; password: string }[]
 }
 
 export const userApi = {
@@ -65,8 +61,8 @@ export const userApi = {
   approve: (id: number) => api.post(`/admin/users/${id}/approve`),
   disable: (id: number) => api.post(`/admin/users/${id}/disable`),
   enable: (id: number) => api.post(`/admin/users/${id}/enable`),
-  // 传空对象作为 body：后端 ResetPasswordIn 为必填 body，无 body 会 422
-  resetPassword: (id: number) => api.post<{ new_password: string }>(`/admin/users/${id}/reset-password`, {}),
+  resetPassword: (id: number, new_password: string) =>
+    api.post<{ success: boolean }>(`/admin/users/${id}/reset-password`, { new_password }),
   assignGroups: (id: number, group_ids: number[]) =>
     api.post(`/admin/users/${id}/groups`, { group_ids }),
   // 批量导入用户

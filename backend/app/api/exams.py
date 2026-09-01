@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, status
+from fastapi import APIRouter, BackgroundTasks, Depends, Query, status
 from sqlalchemy.orm import Session
 
-from app.core.deps import get_current_user, require_admin
+from app.core.deps import dept_scope_ids, get_current_user, require_admin, require_super
 from app.database import get_db
 from app.models.user import User
 from app.schemas.exam import (
@@ -62,17 +62,17 @@ def session_detail(sid: int, db: Session = Depends(get_db), user: User = Depends
 
 # ---------- 管理端：试卷模板 ----------
 @router.get("/admin/exam-templates")
-def list_templates(db: Session = Depends(get_db), _user: User = Depends(require_admin)):
+def list_templates(db: Session = Depends(get_db), _user: User = Depends(require_super)):
     return exam_service.list_templates(db)
 
 
 @router.post("/admin/exam-templates/preview-paper")
-def preview_paper(payload: dict, db: Session = Depends(get_db), _user: User = Depends(require_admin)):
+def preview_paper(payload: dict, db: Session = Depends(get_db), _user: User = Depends(require_super)):
     return exam_service.preview_paper(db, payload)
 
 
 @router.post("/admin/exam-templates", status_code=status.HTTP_201_CREATED)
-def create_template(payload: PaperTemplateIn, db: Session = Depends(get_db), user: User = Depends(require_admin)):
+def create_template(payload: PaperTemplateIn, db: Session = Depends(get_db), user: User = Depends(require_super)):
     res = exam_service.create_template(db, payload, user)
     audit_log(db, user.id, "exam_template.create", "paper_template", res.get("id"), {"name": payload.name})
     return res
@@ -80,13 +80,13 @@ def create_template(payload: PaperTemplateIn, db: Session = Depends(get_db), use
 
 # ---------- 管理端：正式考试 ----------
 @router.get("/admin/exams")
-def list_exams(db: Session = Depends(get_db), _user: User = Depends(require_admin)):
-    return exam_service.list_exams(db)
+def list_exams(db: Session = Depends(get_db), user: User = Depends(require_admin)):
+    return exam_service.list_exams(db, dept_scope_ids(db, user))
 
 
 @router.post("/admin/exams", status_code=status.HTTP_201_CREATED)
 def create_exam(payload: ExamCreateIn, db: Session = Depends(get_db), user: User = Depends(require_admin)):
-    res = exam_service.create_exam(db, payload, user)
+    res = exam_service.create_exam(db, payload, user, dept_scope_ids(db, user))
     audit_log(db, user.id, "exam.create", "exam", res.get("id"), {"name": payload.name, "type": payload.type})
     return res
 
@@ -95,49 +95,68 @@ def create_exam(payload: ExamCreateIn, db: Session = Depends(get_db), user: User
 def update_exam(
     exam_id: int, payload: ExamUpdateIn, db: Session = Depends(get_db), user: User = Depends(require_admin)
 ):
-    res = exam_service.update_exam(db, exam_id, payload.model_dump(exclude_unset=True))
+    res = exam_service.update_exam(db, exam_id, payload.model_dump(exclude_unset=True), dept_scope_ids(db, user))
     audit_log(db, user.id, "exam.update", "exam", exam_id, payload.model_dump(exclude_unset=True))
     return res
 
 
 @router.post("/admin/exams/{exam_id}/publish")
-def publish_exam(exam_id: int, db: Session = Depends(get_db), user: User = Depends(require_admin)):
-    res = exam_service.publish_exam(db, exam_id)
+def publish_exam(
+    exam_id: int,
+    bg: BackgroundTasks,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_admin),
+):
+    res = exam_service.publish_exam(db, exam_id, dept_scope_ids(db, user), bg)
     audit_log(db, user.id, "exam.publish", "exam", exam_id)
     return res
 
 
 @router.get("/admin/exam-results")
-def list_results(exam_id: int | None = None, db: Session = Depends(get_db), _user: User = Depends(require_admin)):
-    return exam_service.list_results(db, exam_id)
+def list_results(
+    exam_id: int | None = None,
+    limit: int = Query(500, ge=1, le=1000),
+    db: Session = Depends(get_db),
+    user: User = Depends(require_admin),
+):
+    return exam_service.list_results(db, exam_id, dept_scope_ids(db, user), limit)
 
 
-# ---------- 管理端：模拟考试设置 ----------
+# ---------- 管理端：模拟考试设置（全局配置，仅超级管理员）----------
 @router.get("/admin/mock-config")
-def get_mock_config(db: Session = Depends(get_db), _user: User = Depends(require_admin)):
+def get_mock_config(db: Session = Depends(get_db), _user: User = Depends(require_super)):
     return exam_service.get_mock_config_full(db)
 
 
 @router.put("/admin/mock-config")
-def save_mock_config(payload: MockConfigIn, db: Session = Depends(get_db), _user: User = Depends(require_admin)):
+def save_mock_config(payload: MockConfigIn, db: Session = Depends(get_db), _user: User = Depends(require_super)):
     return exam_service.save_mock_config(db, payload.config)
 
 
 # ---------- 管理端：简答复核 ----------
 @router.get("/admin/review/pending")
-def list_pending_reviews(db: Session = Depends(get_db), _user: User = Depends(require_admin)):
-    return review_service.list_pending(db)
+def list_pending_reviews(
+    limit: int = Query(500, ge=1, le=1000),
+    db: Session = Depends(get_db),
+    user: User = Depends(require_admin),
+):
+    return review_service.list_pending(db, dept_scope_ids(db, user), limit)
 
 
 @router.post("/admin/review/{review_id}")
 def do_review(review_id: int, payload: ReviewIn, db: Session = Depends(get_db), user: User = Depends(require_admin)):
-    res = review_service.review(db, review_id, payload.verdict, payload.partial_score, user)
+    res = review_service.review(db, review_id, payload.verdict, payload.partial_score, user, dept_scope_ids(db, user))
     audit_log(db, user.id, "review.submit", "short_answer_review", review_id, {"verdict": payload.verdict})
     return res
 
 
 @router.post("/admin/exams/{exam_id}/publish-results")
-def publish_results(exam_id: int, db: Session = Depends(get_db), user: User = Depends(require_admin)):
-    res = review_service.publish_results(db, exam_id)
+def publish_results(
+    exam_id: int,
+    bg: BackgroundTasks,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_admin),
+):
+    res = review_service.publish_results(db, exam_id, dept_scope_ids(db, user), bg)
     audit_log(db, user.id, "review.publish_results", "exam", exam_id, {"published": res.get("published")})
     return res

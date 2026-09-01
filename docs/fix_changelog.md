@@ -139,3 +139,59 @@
 **部署提示**：图形验证码与限流同为单进程内存方案，多 worker 需切 Redis（见 deployment.md）。
 
 
+
+---
+
+## 2026-08-28 第二轮审计修复（越权 + 计分/并发完整性）
+
+### 背景
+全量复审后端 6 路并行审计（安全/认证、考试并发、文件导入、服务与 SQL、模型与 schema、测试覆盖），
+合并去重得 12 个 Critical，分两类：**部门数据范围越权（A1-A6）** 与 **计分/并发完整性（B1-B6）**。
+本轮已修复全部 12 项。
+
+### A 类：dept_admin 数据范围越权
+
+| 项 | 位置 | 修复 |
+|---|---|---|
+| A1 | `api/users.py` `/import` + `user_service.import_users` | 导入路由加"仅 super_admin 可导入管理员账号"守卫；service 接收 `scope`+`actor_role`，导入用户的 `group_ids` 必须落在调用者子树内（防垂直+水平越权） |
+| A2 | `api/groups.py` + `group_service` | `create/update/delete` 注入 `dept_scope_ids`：只能在自身子树内建/改/删分组，禁止挂到子树外父分组；`build_tree` 按 scope 裁剪，防组织结构泄露 |
+| A3 | `api/exams.py` + `exam_service` | `list_exams`/`create_exam`/`update_exam`/`publish_exam` 全部注入 scope：列表按 `group_ids∩scope` 过滤，操作前 `_check_exam_scope` 校验，创建/更新校验 `_validate_exam_group_ids` |
+| A4 | `exam_service.list_results` | 成绩列表 JOIN 后按 `users_in_scope(db, scope)` 过滤，dept_admin 看不到跨部门成绩 |
+| A5 | `review_service` `list_pending`/`publish_results` | 待复核列表按 `user_in_scope` 过滤；`publish_results` 校验考试指派分组在 scope 内 |
+| A6 | `api/exams.py`(模板/mock-config) + `api/panel.py` + `api/audit.py` | 试卷模板/mock-config 收为 `require_super`（全局配置）；`admin_overview` 注入 scope 按范围内用户/考试统计；`list_logs` 按 `users_in_scope` 过滤操作者；`refresh_stats` 收为 `require_super` |
+
+新增 `core/deps.users_in_scope(db, scope)`：返回范围内全部用户 id 集合（None=全量），供列表/概览做按用户维度过滤。
+
+### B 类：计分/并发完整性
+
+| 项 | 位置 | 修复 |
+|---|---|---|
+| B1 | `grading._grade_fill/_grade_drag` | 拒绝空答案：`correct_answer` 为空 list/dict 一律返回 `False`，杜绝空填空/空拖拽经空 zip/空 all 恒真被判满分 |
+| B2 | `review_service.review` | 复核判定改条件 UPDATE：`WHERE verdict IS NULL`，靠 `rowcount` 判定唯一持有者，并发同题复核只有一方加分，杜绝分数重复自增 |
+| B3 | `exam_service._recover_stuck_scoring` | 回收前校验"无 ExamResult"：含成绩记录的 scoring 会话是合法待复核状态，不可被回收重置为 in_progress |
+| B4 | `models/record.ExamResult` + `exam_service.submit_exam` + `review_service.publish_results` | `ExamResult` 新增 `overtime` 列；`submit_exam` 写入；`publish_results` 改 `passed = (not overtime) and (score>=pass)`，超时考试复核后仍判不及格；幂等返回回读 `overtime` |
+| B5 | `models/exam.ExamQuestion` + `exam_service._ensure_exam_questions`/`_persist_exam_questions` | 加 `UniqueConstraint(exam_definition_id, question_id)`；固化改"插入前复核 + `IntegrityError` 兜底 + `expire_all`"，防并发首次固化产生重复题目行/重复计分 |
+| B6 | `exam_service.submit_answer` | version 条件 UPDATE 增 `status=='in_progress'`：`submit_exam` 置 scoring 不 bump version 后，滞后的 `submit_answer` 仍按旧 version 写入会被拒（rowcount=0→409），不污染已结算会话 |
+
+### 模型/迁移变更
+- `ExamQuestion`：增 `UniqueConstraint("exam_definition_id", "question_id")`。
+- `ExamResult`：增 `overtime: Boolean NOT NULL DEFAULT False`。
+- 新增 `scripts/migrate_2026_08_28.py`：为既有 `training.db` 补 `overtime` 列（ALTER ADD COLUMN）与 `uq_exam_question` 唯一索引（重建表）；幂等、含重复行预检。
+- `scripts/init_db.py` + `config.py`：未注入 `TRAINING_SUPER_ADMIN_PASSWORD` 时生成一次性 16 位随机口令并打印，杜绝以 `admin12345` 默认弱口令初始化超管。
+
+### 测试
+- `test_grading.py`：补空填空/空拖拽/未知题型边界用例（B1 回归）。
+- `test_exam_review.py`：补 `test_recover_stuck_scoring_preserves_pending_review_session`（B3）、`test_review_concurrent_no_double_increment`（B2，线程并发模拟，断言仅一次加分 score=5）、`test_overtime_exam_stays_failed_after_publish`（B4，满分但超时→仍不及格）。
+- `test_scope_authz.py`（新增）：覆盖导入越权、考试列表/更新/创建/发布 scope 过滤、概览 scope 过滤（A 类回归）。
+- 全量 **72 测试通过**；ruff lint/format 全清。
+
+### 运维提示
+- **既有库必须运行** `uv run python scripts/migrate_2026_08_28.py`（新库经 init_db 已含，无需运行）。
+- 生产仍需注入 `TRAINING_SECRET_KEY`、`TRAINING_ENC_KEY`、`TRAINING_SUPER_ADMIN_PASSWORD`。
+
+### 2026-08-29 后续整改
+- 题库、考试、导入和注册流程补齐部门范围校验；注册分组改为显式允许列表。
+- 考试补充服务端时长、活动会话唯一索引、范围外题目阻断和通知任务；练习自评限制为已有简答记录。
+- 敏感设置缺少加密密钥时拒绝写入，SMTP fallback 不再记录邮箱/验证码；管理员密码改为必填且不在 HTTP 响应中返回。
+- Excel 增加解压体积、行数和单元格长度限制；审计日志补充时间过滤，用户/复核/成绩列表增加范围和返回上限。
+- 新增 HTTP 鉴权和安全回归测试；当前验证为 92 个后端测试通过、Ruff/mypy 通过、前端构建通过。

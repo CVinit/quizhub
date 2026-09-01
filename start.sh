@@ -19,6 +19,7 @@ echo "[2/3] 初始化后端依赖与数据库..."
 cd "$ROOT/backend"
 uv sync
 uv run python scripts/init_db.py
+uv run python scripts/migrate_2026_08_28.py
 
 echo "[3/3] 启动后端 (http://localhost:8000)..."
 uv run uvicorn app.main:app --host 0.0.0.0 --port 8000

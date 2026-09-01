@@ -308,6 +308,130 @@ def test_recover_stuck_scoring_resets_session():
         assert s.status == "in_progress"
 
 
+def test_recover_stuck_scoring_preserves_pending_review_session():
+    """含 ExamResult 的 scoring 会话是合法待复核状态，不可被回收（Critical B3 回归）。"""
+    init_db()
+    with db_session() as db:
+        user, e, q = _seed_exam(db, qtype="简答题", score=5.0, need_review=True)
+        sess = exam_service.start_exam(db, user, e.id)
+        sid = sess["session_id"]
+        exam_service.submit_answer(db, user, sid, q.id, "我的简答", sess["version"])
+        res = exam_service.submit_exam(db, user, sid)
+        assert res["need_review"] is True
+        # 此时 session 状态为 scoring，且有 ExamResult（合法待复核）
+        session = db.execute(select(ExamSession).where(ExamSession.id == sid)).scalar_one()
+        assert session.status == "scoring"
+        # 把 submitted_at 改到 40 分钟前，模拟超过回收阈值
+        session.submitted_at = (datetime.now(timezone.utc) - timedelta(minutes=40)).isoformat()
+        db.commit()
+        recovered = exam_service._recover_stuck_scoring(db)
+        assert recovered == 0  # 含 result 的会话不被回收
+        db.refresh(session)
+        assert session.status == "scoring"  # 仍保持待复核状态
+
+
+def test_review_concurrent_no_double_increment():
+    """并发对同一简答复核：条件 UPDATE 保证只有一方加分，杜绝分数重复自增（Critical B2 回归）。
+
+    用线程并发模拟：两位复核人对同一 review_id 同时提交 pass，各自独立 Session
+    （复刻真实请求：每请求一个 SessionLocal）。
+    """
+    import threading
+
+    from fastapi import HTTPException
+
+    from app.database import SessionLocal
+
+    init_db()
+    review_id = None
+    with SessionLocal() as db:
+        user, e, q = _seed_exam(db, qtype="简答题", score=5.0, need_review=True)
+        sess = exam_service.start_exam(db, user, e.id)
+        sid = sess["session_id"]
+        exam_service.submit_answer(db, user, sid, q.id, "我的简答", sess["version"])
+        exam_service.submit_exam(db, user, sid)
+        review = db.execute(select(ShortAnswerReview).where(ShortAnswerReview.exam_session_id == sid)).scalar_one()
+        reviewer = User(
+            email="rev@quizhub.com",
+            password_hash="x",
+            name="复核员",
+            role="super_admin",
+            status="active",
+            email_verified=True,
+        )
+        db.add(reviewer)
+        db.commit()
+        review_id = review.id
+
+    results = {"ok": 0, "conflict": 0}
+
+    def _do_review():
+        with SessionLocal() as db:
+            rev = db.execute(select(User).where(User.email == "rev@quizhub.com")).scalar_one()
+            try:
+                review_service.review(db, review_id, "pass", None, rev)
+                results["ok"] += 1
+            except HTTPException as exc:
+                if exc.status_code == 400:
+                    results["conflict"] += 1
+
+    threads = [threading.Thread(target=_do_review) for _ in range(2)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    # 恰好一次成功加分，另一次被拒
+    assert results["ok"] == 1, f"应只有 1 次成功复核，实际 {results['ok']}"
+    assert results["conflict"] == 1, f"应只有 1 次冲突，实际 {results['conflict']}"
+
+    review_session_id = review.exam_session_id
+    with SessionLocal() as db:
+        result = db.execute(select(ExamResult).where(ExamResult.exam_session_id == review_session_id)).scalar_one()
+        db.refresh(result)
+        # 5 分题 pass，仅加一次 → score=5，而非 10
+        assert result.score == 5.0, f"分数应只加一次=5，实际 {result.score}"
+
+
+def test_overtime_exam_stays_failed_after_publish():
+    """超时交卷的成绩，复核公布后仍判不及格（Critical B4 回归）。"""
+    init_db()
+    with db_session() as db:
+        future = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
+        user, e, q = _seed_exam(db, qtype="简答题", score=60.0, end_at=future, status="published", need_review=True)
+        sess = exam_service.start_exam(db, user, e.id)
+        sid = sess["session_id"]
+        exam_service.submit_answer(db, user, sid, q.id, "超时作答", sess["version"])
+        # 让交卷判定为超时
+        e.end_at = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+        db.commit()
+        res = exam_service.submit_exam(db, user, sid)
+        assert res["overtime"] is True
+        # result.overtime 应为 True
+        result = db.execute(select(ExamResult).where(ExamResult.exam_session_id == sid)).scalar_one()
+        db.refresh(result)
+        assert result.overtime is True
+        # 复核给满分后公布
+        reviewer = User(
+            email=f"rev{secrets.token_hex(4)}@quizhub.com",
+            password_hash="x",
+            name="复核员",
+            role="super_admin",
+            status="active",
+            email_verified=True,
+        )
+        db.add(reviewer)
+        db.commit()
+        review = db.execute(select(ShortAnswerReview).where(ShortAnswerReview.exam_session_id == sid)).scalar_one()
+        review_service.review(db, review.id, "pass", None, reviewer)
+        published = review_service.publish_results(db, e.id)
+        assert published["published"] >= 1
+        db.refresh(result)
+        # 满分但超时 → 仍不及格
+        assert result.score == 60.0
+        assert result.passed is False, "超时考试复核后不应判及格"
+
+
 def test_review_double_review_rejected():
     init_db()
     with db_session() as db:
@@ -335,3 +459,83 @@ def test_review_double_review_rejected():
             assert False, "重复复核应被拒"
         except HTTPException as exc:
             assert exc.status_code == 400
+
+
+def test_review_out_of_scope_rejected():
+    """dept_admin 不得经直接 POST /admin/review/{id} 复核其数据范围外的简答（IDOR 防护回归）。
+
+    list_pending 按 scope 过滤只能挡住"列表里看不到"，但 review_id 是自增整数可枚举；
+    review() 必须对归属考生做 user_in_scope 校验，否则 dept_admin 可给任意部门考生改分。
+    """
+    from app.core.deps import subtree_ids
+    from app.models.group import Group
+
+    init_db()
+    with db_session() as db:
+        user, e, q = _seed_exam(db, qtype="简答题", score=5.0, need_review=True)
+        sess = exam_service.start_exam(db, user, e.id)
+        sid = sess["session_id"]
+        exam_service.submit_answer(db, user, sid, q.id, "答", sess["version"])
+        exam_service.submit_exam(db, user, sid)
+        review = db.execute(select(ShortAnswerReview).where(ShortAnswerReview.exam_session_id == sid)).scalar_one()
+        reviewer = User(
+            email=f"rev{secrets.token_hex(4)}@quizhub.com",
+            password_hash="x",
+            name="复核员",
+            role="super_admin",
+            status="active",
+            email_verified=True,
+        )
+        db.add(reviewer)
+        db.commit()
+        # 构造一个不含考生的 scope：单独建一个分组，subtree_ids 只含它自身
+        other = Group(name="其他部门", type="部门")
+        db.add(other)
+        db.commit()
+        scope = subtree_ids(db, other.id)  # 仅含 other，不含考生任何分组
+        from fastapi import HTTPException
+
+        try:
+            review_service.review(db, review.id, "pass", None, reviewer, scope)
+            assert False, "范围外复核应被拒"
+        except HTTPException as exc:
+            assert exc.status_code == 403
+        # super_admin（scope=None）下应放行
+        review_service.review(db, review.id, "pass", None, reviewer, None)
+
+
+def test_submit_exam_uses_latest_committed_answers():
+    """submit_exam 必须以锁定时的 DB 当前 answers 判分，而非函数入口的内存快照。
+
+    复刻窗口：T0 交卷请求读到 answers={} 快照 → T1 滞后的 submit_answer 提交并 commit
+    （status 仍 in_progress，version 不变）→ T2 交卷请求锁定 scoring 成功。若用 T0
+    快照判分，T1 的作答会丢失（计 0 分）；修复后应读到 T1 的答案、判满分。
+    """
+    init_db()
+    with db_session() as db:
+        user, e, q = _seed_exam(db, score=10.0, status="published")
+        sid_obj = exam_service.start_exam(db, user, e.id)
+        sid, v0 = sid_obj["session_id"], sid_obj["version"]
+        uid, qid = user.id, q.id
+
+    from app.database import SessionLocal
+    from app.models.record import ExamSession
+
+    db_main = SessionLocal()
+    db_other = SessionLocal()
+    try:
+        u_main = db_main.get(User, uid)
+        u_other = db_other.get(User, uid)
+        # 主请求读到快照（空）
+        assert db_main.get(ExamSession, sid).answers == {}
+        # 滞后提交作答（正确答案 A）
+        exam_service.submit_answer(db_other, u_other, sid, qid, "A", v0)
+        db_other.commit()
+        # 主请求走交卷：应读到滞后提交的答案并判 10 分，而非用空快照判 0 分
+        res = exam_service.submit_exam(db_main, u_main, sid)
+    finally:
+        db_main.close()
+        db_other.close()
+    assert res["overtime"] is False
+    assert res["correct_count"] == 1
+    assert res["score"] == 10.0, "滞后提交的作答应被计入判分，而非丢失于过期快照"

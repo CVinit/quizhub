@@ -6,7 +6,7 @@ exam_definitions.rules：单场考试规则快照（含开放时段、限时、�
 
 from __future__ import annotations
 
-from sqlalchemy import Float, ForeignKey, Integer, String
+from sqlalchemy import Float, ForeignKey, Integer, String, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy.types import JSON
 
@@ -50,6 +50,8 @@ class ExamDefinition(PKMixin, TimestampMixin):
 
 class ExamQuestion(PKMixin):
     __tablename__ = "exam_questions"
+    # 唯一约束：防止首次固化题目的 check-then-insert 竞态产生重复行（同一考试同一题不重复计分）
+    __table_args__ = (UniqueConstraint("exam_definition_id", "question_id", name="uq_exam_question"),)
 
     exam_definition_id: Mapped[int] = mapped_column(
         Integer, ForeignKey("exam_definitions.id"), index=True, nullable=False

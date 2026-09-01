@@ -14,13 +14,18 @@ from app.config import ALGORITHM, SECRET_KEY, SETTINGS_ENC_KEY
 
 
 def hash_password(password: str) -> str:
-    pwd = password.encode("utf-8")[:72]
+    pwd = password.encode("utf-8")
+    if len(pwd) > 72:
+        raise ValueError("密码 UTF-8 编码后不能超过 72 字节")
     return bcrypt.hashpw(pwd, bcrypt.gensalt()).decode("utf-8")
 
 
 def verify_password(plain: str, hashed: str) -> bool:
     try:
-        return bcrypt.checkpw(plain.encode("utf-8")[:72], hashed.encode("utf-8"))
+        pwd = plain.encode("utf-8")
+        if len(pwd) > 72:
+            return False
+        return bcrypt.checkpw(pwd, hashed.encode("utf-8"))
     except (ValueError, TypeError):
         return False
 
@@ -53,12 +58,12 @@ def _fernet() -> Any | None:
 
 
 def encrypt_value(value: str) -> str:
-    """加密敏感设置值；未配置 ENC_KEY 时回退为 base64 占位（开发期）。"""
+    """加密敏感设置值；未配置密钥时拒绝保存非空值。"""
+    if not value:
+        return ""
     f = _fernet()
     if f is None:
-        import base64
-
-        return "plain:" + base64.b64encode(value.encode()).decode()
+        raise RuntimeError("TRAINING_ENC_KEY 未配置，无法保存敏感设置")
     return "enc:" + f.encrypt(value.encode()).decode()
 
 
@@ -68,10 +73,8 @@ def decrypt_value(value: str) -> str:
     if value.startswith("enc:"):
         f = _fernet()
         if f is None:
-            return ""
+            raise RuntimeError("TRAINING_ENC_KEY 未配置，无法读取敏感设置")
         return f.decrypt(value[4:].encode()).decode()
     if value.startswith("plain:"):
-        import base64
-
-        return base64.b64decode(value[6:].encode()).decode()
+        raise RuntimeError("检测到未加密的敏感设置，请配置 TRAINING_ENC_KEY 并迁移数据")
     return value

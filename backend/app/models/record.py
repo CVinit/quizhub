@@ -9,7 +9,7 @@ short_answer_reviews：简答人工复核。
 
 from __future__ import annotations
 
-from sqlalchemy import Boolean, Float, ForeignKey, Integer, String, Text, UniqueConstraint
+from sqlalchemy import Boolean, Float, ForeignKey, Index, Integer, String, Text, UniqueConstraint, text
 from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy.types import JSON
 
@@ -48,6 +48,15 @@ class QuestionState(PKMixin):
 
 class ExamSession(PKMixin, TimestampMixin):
     __tablename__ = "exam_sessions"
+    __table_args__ = (
+        Index(
+            "uq_active_exam_session",
+            "exam_definition_id",
+            "user_id",
+            unique=True,
+            sqlite_where=text("status IN ('in_progress', 'scoring')"),
+        ),
+    )
 
     exam_definition_id: Mapped[int] = mapped_column(
         Integer, ForeignKey("exam_definitions.id"), index=True, nullable=False
@@ -79,6 +88,9 @@ class ExamResult(PKMixin, TimestampMixin):
     objective_score: Mapped[float] = mapped_column(Float, default=0, nullable=False)
     need_review: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     published: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False, index=True)
+    # 是否超时交卷：submit_exam 写入；publish_results 据此保持"超时即不及格"语义，
+    # 避免复核给分后把超时考试误判为及格
+    overtime: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
 
 
 class ShortAnswerReview(PKMixin):

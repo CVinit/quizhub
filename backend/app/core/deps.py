@@ -24,9 +24,16 @@ def get_current_user(
     payload = decode_access_token(token)
     if not payload or "sub" not in payload:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "凭证无效或已过期")
-    user = db.get(User, int(payload["sub"]))
+    try:
+        subject = int(payload["sub"])
+        token_version = int(payload.get("ver", -1))
+    except (TypeError, ValueError):
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "凭证无效或已过期") from None
+    user = db.get(User, subject)
     if not user or user.status != "active":
         raise HTTPException(status.HTTP_403_FORBIDDEN, "用户不可用")
+    if token_version != user.token_version:
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "凭证已失效，请重新登录")
     return user
 
 
@@ -97,3 +104,17 @@ def user_in_scope(db: Session, user_id: int, scope: set[int] | None) -> bool:
     if target.dept_group_id and target.dept_group_id in scope:
         return True
     return bool(user_group_ids(db, user_id) & scope)
+
+
+def users_in_scope(db: Session, scope: set[int] | None) -> set[int] | None:
+    """返回落在数据范围内的全部用户 id 集合。
+
+    scope 为 None（super_admin）返回 None 表示全量，不做范围限制；
+    否则返回 dept_group_id ∈ scope 或经 user_groups 关联到 scope 的用户 id 集合。
+    供列表/概览查询做按用户维度的范围过滤。
+    """
+    if scope is None:
+        return None
+    by_dept = {r[0] for r in db.execute(select(User.id).where(User.dept_group_id.in_(scope))).all()}
+    by_group = {r[0] for r in db.execute(select(UserGroup.user_id).where(UserGroup.group_id.in_(scope))).all()}
+    return by_dept | by_group
