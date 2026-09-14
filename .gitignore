@@ -16,6 +16,8 @@ __pycache__/
 .eggs/
 # uv 本地产物
 .python-version
+# 内嵌 Python 运行时（本地下载 + 安装依赖，不入库；由 start-embed.ps1 使用）
+/python-3.12.10-embed-amd64/
 
 # ===== 前端 (Vue + Vite) =====
 node_modules/
@@ -50,6 +52,8 @@ backend/data/*.db-journal
 .env
 .env.*
 !.env.example
+# 一键启动脚本（start-embed.ps1）首次运行生成的本地开发密钥
+backend/data/.dev-secrets.env
 # 密钥 / 证书
 *.pem
 *.key
