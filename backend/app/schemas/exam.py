@@ -79,6 +79,30 @@ class PaperTemplateIn(BaseModel):
     group_ids: list[int] | None = None
 
 
+class PaperPreviewIn(BaseModel):
+    """组卷预览入参。
+
+    原实现直接接收裸 `dict`，绕过 `extra="forbid"` 与元素类型校验，
+    `bank_ids`/`group_ids`/`tags` 会被原样送入 SQL 的 IN 过滤。此处显式声明类型，
+    让非法元素在 422 阶段被拒绝，而不是进入服务层。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    type_quota: dict[str, int] = Field(default_factory=dict)
+    difficulty_dist: dict[str, float] = Field(default_factory=dict)
+    bank_ids: list[int] = Field(default_factory=list)
+    group_ids: list[int] = Field(default_factory=list)
+    tags: list[str] = Field(default_factory=list)
+    max_questions: int = Field(100, ge=1, le=1000)
+    seed: int | None = None
+    order_mode: str | None = Field(None, pattern="^(bank|random|grouped)$")
+
+    def to_config(self) -> dict:
+        """转为组卷服务所需的配置字典（仅包含显式提供的字段）。"""
+        return self.model_dump(exclude_none=True)
+
+
 class ReviewIn(BaseModel):
     model_config = ConfigDict(extra="forbid")
     verdict: str  # pass/fail/partial

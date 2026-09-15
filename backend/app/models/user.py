@@ -14,7 +14,9 @@ USER_STATUS = ("active", "pending", "disabled")
 class User(PKMixin, TimestampMixin):
     __tablename__ = "users"
 
-    email: Mapped[str] = mapped_column(String, unique=True, index=True, nullable=False)
+    # NOCASE：邮箱以 normalize_email() 归一后存储，此排序规则作为二次防线，
+    # 保证即使有历史大小写混写的旧数据，唯一约束与等值查询仍按不区分大小写生效。
+    email: Mapped[str] = mapped_column(String(collation="NOCASE"), unique=True, index=True, nullable=False)
     password_hash: Mapped[str] = mapped_column(String, nullable=False)
     name: Mapped[str] = mapped_column(String, nullable=False, default="")
     role: Mapped[str] = mapped_column(String, default="user", nullable=False)  # USER_ROLE
@@ -22,7 +24,7 @@ class User(PKMixin, TimestampMixin):
     email_verified: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     token_version: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     dept_group_id: Mapped[int | None] = mapped_column(
-        Integer, ForeignKey("groups.id", use_alter=True), nullable=True
+        Integer, ForeignKey("groups.id", ondelete="SET NULL", use_alter=True), nullable=True
     )  # 部门管理员的归属部门；普通用户主要分组见 user_groups
 
 

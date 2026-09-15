@@ -21,6 +21,8 @@ from app.schemas.question import UploadPreview, UploadPreviewRow
 SHEET_ORDER = ["单选题", "多选题", "判断题", "填空题", "简答题", "拖拽题"]
 PARSE_ROW_MAX = 10000
 MAX_WORKBOOK_UNCOMPRESSED = 100 * 1024 * 1024
+# 流式解压时的读取块大小：用于在解压过程中逐步计量，避免一次性展开
+_DECOMPRESS_CHUNK = 1 << 20
 MAX_CELL_CHARS = 10000
 TYPE_TO_SHEET = {
     "单选题": "单选题",
@@ -201,14 +203,42 @@ def parse_workbook(buf: BytesIO) -> UploadPreview:
 
 
 def validate_workbook_archive(content: bytes) -> None:
-    """限制 xlsx 解压体积，避免小压缩包展开耗尽内存。"""
+    """校验上传内容是真正的 xlsx，并限制实际解压体积。
+
+    修复要点：原实现仅累加 zip 中央目录里的 `file_size`，那是**可由攻击者伪造的
+    声明值**，与真实解压体积无关，zip bomb 可轻易绕过。这里改为流式真实解压并
+    累计字节数，超出上限立即中止——既不信任元数据，也不会把整个炸弹读进内存。
+
+    Args:
+        content: 上传文件的原始字节。
+
+    Raises:
+        ValueError: 不是合法 xlsx（含魔数校验失败）或解压后超过上限。
+    """
+    # 魔数校验：xlsx 是 zip，必须以 PK\\x03\\x04 开头。
+    # 仅凭文件名后缀判断会让任意文件进入 openpyxl。
+    if not content.startswith(b"PK\x03\x04"):
+        raise ValueError("上传文件不是有效的 xlsx 工作簿")
+
+    total = 0
     try:
         with ZipFile(BytesIO(content)) as archive:
-            total = sum(info.file_size for info in archive.infolist())
+            for info in archive.infolist():
+                # 目录项无需解压
+                if info.is_dir():
+                    continue
+                with archive.open(info) as fh:
+                    while chunk := fh.read(_DECOMPRESS_CHUNK):
+                        total += len(chunk)
+                        if total > MAX_WORKBOOK_UNCOMPRESSED:
+                            raise ValueError(
+                                f"工作簿解压后超过大小上限 {MAX_WORKBOOK_UNCOMPRESSED // (1024 * 1024)}MB，已拒绝"
+                            )
     except BadZipFile:
         raise ValueError("上传文件不是有效的 xlsx 工作簿") from None
-    if total > MAX_WORKBOOK_UNCOMPRESSED:
-        raise ValueError("工作簿解压后超过大小上限")
+    except OSError as exc:
+        # 损坏的压缩流（截断、CRC 不符）同样按非法上传处理
+        raise ValueError("上传文件已损坏，无法解析") from exc
 
 
 def _parse_row(sheet_name: str, row: tuple, r_idx: int) -> UploadPreviewRow:

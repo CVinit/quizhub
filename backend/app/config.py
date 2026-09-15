@@ -17,6 +17,10 @@ DATA_DIR = BASE_DIR / "data"
 DB_PATH = DATA_DIR / "training.db"
 FILES_DIR = DATA_DIR / "files"
 
+# 业务统计所用的本地时区（决定"今日"的归属边界）。
+# 原实现把 +8 硬编码在 Python 与 SQL 两处，非 CST 部署会整体错位，此处统一为配置项。
+BUSINESS_TZ = os.getenv("TRAINING_TZ", "Asia/Shanghai")
+
 
 def _secret_key() -> str:
     """JWT 签名密钥。

@@ -9,17 +9,31 @@ from __future__ import annotations
 
 import time
 import uuid
+from dataclasses import dataclass
 from io import BytesIO
 
 from sqlalchemy.orm import Session
 
+from app.core.preview_cache import BoundedTTLCache
 from app.models.question import Question, QuestionBank
 from app.schemas.question import UploadImportResult, UploadPreview, UploadPreviewRow
 from app.utils.excel import parse_workbook
 
-# 进程内暂存：confirm_token -> (rows, group_id, bank_id, bank_name, user_id, ts)
-# bank_id 优先；为空则导入时按 bank_name 自动建一个题库（即 question_bank）。
-_preview_cache: dict[str, tuple[list[UploadPreviewRow], int | None, int | None, str, int, float]] = {}
+
+@dataclass(frozen=True, slots=True)
+class _PreviewEntry:
+    """一次预览暂存的导入参数与解析结果。"""
+
+    rows: list[UploadPreviewRow]
+    group_id: int | None
+    bank_id: int | None
+    bank_name: str
+
+
+# 进程内暂存：confirm_token -> _PreviewEntry。
+# 有容量上限与 TTL（见 core/preview_cache.py），避免反复预览却不导入导致内存无界增长。
+# 行数上限 _IMPORT_ROW_MAX 限制单条体积，容量上限限制条目数，二者共同给出内存上界。
+_preview_cache: BoundedTTLCache[_PreviewEntry] = BoundedTTLCache(maxsize=32, ttl=30 * 60)
 # 预览条目有效期（秒），过期不可导入
 _PREVIEW_TTL = 30 * 60
 # 单次导入行数上限，防止恶意超大文件
@@ -50,9 +64,16 @@ def preview(
         truncated = True
 
     token = uuid.uuid4().hex
-    _preview_cache[token] = (valid_rows, group_id, bank_id, (bank_name or "").strip(), user_id, time.time())
-    # 顺手清理过期条目，避免内存泄漏
-    _gc_cache()
+    _preview_cache.put(
+        token,
+        _PreviewEntry(
+            rows=valid_rows,
+            group_id=group_id,
+            bank_id=bank_id,
+            bank_name=(bank_name or "").strip(),
+        ),
+        owner=float(user_id),
+    )
     return {
         "rows": preview_obj.rows,
         "total": preview_obj.total,
@@ -62,14 +83,6 @@ def preview(
         "confirm_token": token,
         "truncated": truncated,
     }
-
-
-def _gc_cache() -> None:
-    """清理过期预览条目。元组结构为 (rows, group_id, bank_id, bank_name, user_id, ts)，ts 在索引 5。"""
-    now = time.time()
-    expired = [k for k, v in _preview_cache.items() if now - v[5] > _PREVIEW_TTL]
-    for k in expired:
-        _preview_cache.pop(k, None)
 
 
 def _full_rows(preview: UploadPreview, buf: BytesIO) -> list[UploadPreviewRow]:
@@ -107,22 +120,25 @@ def do_import(db: Session, confirm_token: str, user_id: int = 0, scope: set[int]
 
     bank_id 优先；为空则按 bank_name 自动建一个题库（question_bank）作为本次导入归属。
     """
-    if confirm_token not in _preview_cache:
-        from fastapi import HTTPException, status
+    from fastapi import HTTPException, status
 
+    # 先做归属校验再消费：越权尝试不应使上传者本人的预览失效
+    owner_id = _preview_cache.peek_owner(confirm_token)
+    if owner_id is None:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "预览已过期，请重新上传")
-    rows, group_id, bank_id, bank_name, owner_id, ts = _preview_cache[confirm_token]
     # token 绑定用户校验（防 IDOR）：仅上传者本人可导入
     if user_id and owner_id and user_id != owner_id:
-        from fastapi import HTTPException, status
-
         raise HTTPException(status.HTTP_403_FORBIDDEN, "无权导入他人预览数据")
-    if time.time() - ts > _PREVIEW_TTL:
-        from fastapi import HTTPException, status
 
+    taken = _preview_cache.take(confirm_token)
+    if taken is None:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "预览已过期，请重新上传")
+    entry, _owner = taken
+    rows = entry.rows
+    group_id = entry.group_id
+    bank_id = entry.bank_id
+    bank_name = entry.bank_name
     _validate_scope(db, group_id, bank_id, scope)
-    _preview_cache.pop(confirm_token, None)
 
     # 没有指定既有题库时，按名称自动新建一个题库（同次上传即一个题库）
     if not bank_id:

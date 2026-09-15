@@ -24,7 +24,9 @@ class PaperTemplate(PKMixin, TimestampMixin):
     config: Mapped[dict] = mapped_column(JSON, nullable=False)  # 组卷规则
     group_ids: Mapped[list | None] = mapped_column(JSON, nullable=True)
     question_ids: Mapped[list | None] = mapped_column(JSON, nullable=True)  # 固化题目清单
-    created_by: Mapped[int | None] = mapped_column(Integer, ForeignKey("users.id"), nullable=True)
+    created_by: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
 
 
 class ExamDefinition(PKMixin, TimestampMixin):
@@ -32,7 +34,9 @@ class ExamDefinition(PKMixin, TimestampMixin):
 
     name: Mapped[str] = mapped_column(String, nullable=False)
     type: Mapped[str] = mapped_column(String, default="formal", nullable=False, index=True)  # EXAM_TYPE
-    paper_template_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("paper_templates.id"), nullable=True)
+    paper_template_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("paper_templates.id", ondelete="SET NULL"), nullable=True
+    )
     manual_questions: Mapped[list | None] = mapped_column(JSON, nullable=True)  # 手选题 id 列表
     rules: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
     group_ids: Mapped[list | None] = mapped_column(JSON, nullable=True)  # 指派分组
@@ -45,7 +49,9 @@ class ExamDefinition(PKMixin, TimestampMixin):
     show_analysis: Mapped[bool] = mapped_column(default=False, nullable=False)  # type: ignore[arg-type]
     need_review: Mapped[bool] = mapped_column(default=False, nullable=False)  # type: ignore[arg-type]
     status: Mapped[str] = mapped_column(String, default="draft", nullable=False, index=True)
-    created_by: Mapped[int | None] = mapped_column(Integer, ForeignKey("users.id"), nullable=True)
+    created_by: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
 
 
 class ExamQuestion(PKMixin):
@@ -54,9 +60,11 @@ class ExamQuestion(PKMixin):
     __table_args__ = (UniqueConstraint("exam_definition_id", "question_id", name="uq_exam_question"),)
 
     exam_definition_id: Mapped[int] = mapped_column(
-        Integer, ForeignKey("exam_definitions.id"), index=True, nullable=False
+        Integer, ForeignKey("exam_definitions.id", ondelete="CASCADE"), index=True, nullable=False
     )
-    question_id: Mapped[int] = mapped_column(Integer, ForeignKey("questions.id"), index=True, nullable=False)
+    question_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("questions.id", ondelete="CASCADE"), index=True, nullable=False
+    )
     seq: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     score: Mapped[float] = mapped_column(Float, default=2, nullable=False)
     shuffle_map: Mapped[dict | None] = mapped_column(JSON, nullable=True)  # 选项打乱映射

@@ -35,8 +35,19 @@ ORDER_MODES = ("bank", "random", "grouped")
 DEFAULT_ORDER_MODE = "bank"
 
 
-def generate_paper(db: Session, config: dict) -> dict:
-    """按规则生成试卷，返回 {question_ids:[...], scores:{qid:score}, total_score}."""
+def generate_paper(db: Session, config: dict, scope: set[int] | None = None) -> dict:
+    """按规则生成试卷，返回 {question_ids:[...], scores:{qid:score}, total_score}。
+
+    Args:
+        db: 数据库会话。
+        config: 组卷规则（题型配额、难度配比、来源筛选、顺序模式、随机种子等）。
+        scope: 调用者可访问的分组 id 集合；None 表示不限制（超级管理员）。
+            非 None 时作为硬上限与请求内的 group_ids 取交集，
+            防止部门管理员通过伪造 group_ids 抽到其他部门的题目。
+
+    Returns:
+        含 question_ids / scores / total_score 的字典。
+    """
     type_quota: dict[str, int] = config.get("type_quota") or {}
     difficulty_dist: dict[str, float] = config.get("difficulty_dist") or {}
     seed = config.get("seed")
@@ -75,6 +86,9 @@ def generate_paper(db: Session, config: dict) -> dict:
 
     # 候选题库（按来源筛选，只投影必要列，避免拉取 options/answer/analysis 等 JSON 大列）
     stmt = select(Question.id, Question.type, Question.difficulty, Question.score)
+    # 数据范围硬上限：先于请求内的筛选生效，且不可被请求参数放宽
+    if scope is not None:
+        stmt = stmt.where(Question.group_id.in_(scope))
     if bank_ids:
         stmt = stmt.where(Question.bank_id.in_(bank_ids))
     if group_ids:

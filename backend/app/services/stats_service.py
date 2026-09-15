@@ -10,15 +10,23 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
 
+from app.config import BUSINESS_TZ
 from app.models.group import Group, UserGroup
 from app.models.question import Question
 from app.models.record import ExamResult, PracticeRecord, QuestionState
 from app.models.stats import StatsUserDaily
 from app.models.user import User
+
+# 业务时区：决定"今日"的日期归属边界。未知时区名回退 UTC，避免启动即崩溃。
+try:
+    _TZ = ZoneInfo(BUSINESS_TZ)
+except Exception:  # noqa: BLE001  时区库缺失或名称非法时降级
+    _TZ = timezone.utc
 
 
 def _utcnow() -> datetime:
@@ -26,39 +34,57 @@ def _utcnow() -> datetime:
 
 
 def _date_str(dt: datetime) -> str:
-    """按本地日期 YYYY-MM-DD 取（UTC 偏移 +8 近似）。"""
-    return (dt + timedelta(hours=8)).strftime("%Y-%m-%d")
+    """把某个时刻换算到业务时区后的本地日期 YYYY-MM-DD。"""
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(_TZ).strftime("%Y-%m-%d")
+
+
+def _day_bounds_utc(date_str: str) -> tuple[str, str]:
+    """把业务时区的某一天换算成 UTC 的 [起, 止) ISO 字符串区间。
+
+    返回的边界用于对存储为 UTC ISO 字符串的列做**范围比较**，
+    而不是在 SQL 里调用 datetime()/date() 解析字符串：
+    SQLite 的 datetime() 对无法识别的格式（如带 Z 后缀、空格分隔）返回 NULL，
+    会让整个 WHERE 恒假、统计静默归零，且函数包裹列会使索引失效。
+    范围比较既健壮又能命中 answered_at / created_at 上的索引。
+
+    ISO-8601 在统一使用 `+00:00` 偏移且位数固定的前提下，字典序等价于时间序。
+    """
+    local_start = datetime.strptime(date_str, "%Y-%m-%d").replace(tzinfo=_TZ)
+    start_utc = local_start.astimezone(timezone.utc)
+    end_utc = (local_start + timedelta(days=1)).astimezone(timezone.utc)
+    return start_utc.isoformat(), end_utc.isoformat()
 
 
 def refresh_daily(db: Session, date_str: str) -> int:
     """重算某日 stats_user_daily，返回写入条数。
 
-    时区处理：PracticeRecord.answered_at / ExamResult.created_at 以 UTC ISO 存储，
-    此处按本地(CST +8)日期归属——用 SQL date() 把 UTC 时间偏移 +8 小时后取日期，
-    避免原实现 LIKE '{date_str}%' 把 UTC 与本地日期前缀错配。
+    时区处理：PracticeRecord.answered_at / ExamResult.created_at 均以 UTC ISO 字符串存储；
+    归属日期按业务时区（config.BUSINESS_TZ）计算，先换算成 UTC 区间再比较，
+    避免时区错配与 SQLite datetime() 的解析陷阱。
     """
-    from sqlalchemy import text
+    day_start, day_end = _day_bounds_utc(date_str)
 
-    # 该日练习记录（UTC + 8h 后取日期 = 本地日期）
     practice_rows = db.execute(
-        text(
-            "SELECT user_id, COUNT(*) AS cnt, SUM(is_correct) AS ok "
-            "FROM practice_records "
-            "WHERE date(datetime(answered_at, '+8 hours')) = :d "
-            "GROUP BY user_id"
-        ),
-        {"d": date_str},
+        select(
+            PracticeRecord.user_id,
+            func.count().label("cnt"),
+            func.sum(PracticeRecord.is_correct).label("ok"),
+        )
+        .where(PracticeRecord.answered_at >= day_start, PracticeRecord.answered_at < day_end)
+        .group_by(PracticeRecord.user_id)
     ).all()
 
-    # 该日已交卷成绩（按 created_at 本地日期归属）
     exam_rows = db.execute(
-        text(
-            "SELECT user_id, COUNT(*) AS cnt, SUM(score) AS score, SUM(passed) AS pass_cnt "
-            "FROM exam_results "
-            "WHERE date(datetime(created_at, '+8 hours')) = :d "
-            "GROUP BY user_id"
-        ),
-        {"d": date_str},
+        select(
+            ExamResult.user_id,
+            func.count().label("cnt"),
+            func.sum(ExamResult.score).label("score"),
+            func.sum(ExamResult.passed).label("pass_cnt"),
+        )
+        .where(ExamResult.created_at >= day_start, ExamResult.created_at < day_end)
+        .group_by(ExamResult.user_id)
     ).all()
 
     practice_map = {r.user_id: r for r in practice_rows}

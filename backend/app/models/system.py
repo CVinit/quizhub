@@ -22,7 +22,10 @@ class Setting(PKMixin):
 class AuditLog(PKMixin, TimestampMixin):
     __tablename__ = "audit_logs"
 
-    actor: Mapped[int | None] = mapped_column(Integer, ForeignKey("users.id"), nullable=True, index=True)
+    # 审计日志需长期留存以追溯：删除操作者时置空而非级联删除（保留操作痕迹）
+    actor: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
+    )
     action: Mapped[str] = mapped_column(String, nullable=False, index=True)
     target_type: Mapped[str] = mapped_column(String, default="", nullable=False)
     target_id: Mapped[str] = mapped_column(String, default="", nullable=False)
@@ -34,7 +37,9 @@ class Draft(PKMixin):
     __tablename__ = "drafts"
     __table_args__ = (UniqueConstraint("user_id", "form_key", name="uq_user_draft"),)
 
-    user_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id"), nullable=False)
+    user_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
     form_key: Mapped[str] = mapped_column(String, nullable=False)
     payload: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
     updated_at: Mapped[str] = mapped_column(String, nullable=False)

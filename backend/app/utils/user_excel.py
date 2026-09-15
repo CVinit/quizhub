@@ -7,7 +7,6 @@ confirm_token 绑定上传用户 id，确认时校验调用者一致，防 IDOR�
 
 from __future__ import annotations
 
-import time
 import uuid
 from io import BytesIO
 from typing import Any
@@ -17,6 +16,8 @@ from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
 from sqlalchemy.orm import Session
 
+from app.core.preview_cache import BoundedTTLCache
+from app.core.security import hash_password
 from app.services.user_service import ROLES, STATUSES
 from app.utils.excel import MAX_CELL_CHARS, validate_workbook_archive
 
@@ -44,8 +45,10 @@ STATUS_CN = {
 HEADER_FILL = PatternFill("solid", fgColor="E60012")
 HEADER_FONT = Font(color="FFFFFF", bold=True)
 
-# 进程内暂存：confirm_token -> (rows, user_id, ts)
-_preview_cache: dict[str, tuple[list[dict], int, float]] = {}
+# 进程内暂存：confirm_token -> (rows, user_id, ts)。
+# 有容量上限与 TTL，避免反复预览却不导入时无界增长（详见 core/preview_cache.py）。
+# 注意：存的是 **password_hash** 而非明文口令，模块级缓存中不留可用的初始凭据。
+_preview_cache: BoundedTTLCache[list[dict]] = BoundedTTLCache(maxsize=32, ttl=30 * 60)
 _PREVIEW_TTL = 30 * 60
 _IMPORT_ROW_MAX = 5000  # 单次导入用户数上限
 
@@ -189,9 +192,13 @@ def preview(db: Session, content: bytes, user_id: int = 0) -> dict:
         wb.close()
 
     valid_rows = [r for r in rows if r["valid"]]
+    # 立即把明文口令换成 bcrypt 哈希再暂存：确认导入阶段不再需要明文，
+    # 这样即便缓存被读取（堆转储、调试）也不会泄露可用的初始凭据。
+    cached_rows = [
+        {**row, "password_hash": hash_password(str(row["password"])), "password": ""} for row in valid_rows
+    ]
     token = uuid.uuid4().hex
-    _preview_cache[token] = (valid_rows, user_id, time.time())
-    _gc_cache()
+    _preview_cache.put(token, cached_rows, owner=float(user_id))
     preview_rows = [{key: value for key, value in row.items() if key != "password"} for row in rows[:50]]
     return {
         "rows": preview_rows,  # 仅返回前 50 条用于预览，避免回传初始密码
@@ -207,19 +214,19 @@ def consume_preview(confirm_token: str, user_id: int) -> list[dict]:
     from fastapi import HTTPException
     from fastapi import status as http_status
 
-    if confirm_token not in _preview_cache:
+    owner = _preview_cache.peek_owner(confirm_token)
+    if owner is None:
         raise HTTPException(http_status.HTTP_400_BAD_REQUEST, "预览已过期，请重新上传")
-    rows, owner_id, created_at = _preview_cache[confirm_token]
-    if user_id and owner_id and user_id != owner_id:
+    if user_id and owner and user_id != owner:
+        # 不消费他人条目：越权尝试不应使受害者的预览失效
         raise HTTPException(http_status.HTTP_403_FORBIDDEN, "无权导入他人预览数据")
-    if time.time() - created_at > _PREVIEW_TTL:
+    taken = _preview_cache.take(confirm_token)
+    if taken is None:
         raise HTTPException(http_status.HTTP_400_BAD_REQUEST, "预览已过期，请重新上传")
-    _preview_cache.pop(confirm_token, None)
+    rows, _owner = taken
     return rows
 
 
 def _gc_cache() -> None:
-    now = time.time()
-    expired = [k for k, v in _preview_cache.items() if now - v[2] > _PREVIEW_TTL]
-    for k in expired:
-        _preview_cache.pop(k, None)
+    """兼容旧调用点：过期清理由 BoundedTTLCache 在读/写时自动完成，此处无需操作。"""
+    return None

@@ -21,7 +21,9 @@ class QuestionBank(PKMixin, TimestampMixin):
     __tablename__ = "question_banks"
 
     name: Mapped[str] = mapped_column(String, nullable=False)
-    group_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("groups.id"), nullable=True, index=True)
+    group_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("groups.id", ondelete="SET NULL"), nullable=True, index=True
+    )
     # 是否允许用户练习该题库。默认开启；关闭后用户练习入口不再出现该题库，
     # 且「全部题库」范围也会排除它。既有练习记录/错题本不受影响。
     practice_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="1")
@@ -36,7 +38,10 @@ class QuestionTag(PKMixin):
 class Question(PKMixin, TimestampMixin):
     __tablename__ = "questions"
 
-    bank_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("question_banks.id"), nullable=True, index=True)
+    # 题库删除时置空（题目本身保留），避免级联删除题目导致历史成绩失去题目引用
+    bank_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("question_banks.id", ondelete="SET NULL"), nullable=True, index=True
+    )
     type: Mapped[str] = mapped_column(String, nullable=False, index=True)  # QUESTION_TYPE
     question: Mapped[str] = mapped_column(Text, nullable=False)
     options: Mapped[list | None] = mapped_column(JSON, nullable=True)  # 选项 / 空位
@@ -48,5 +53,5 @@ class Question(PKMixin, TimestampMixin):
     tags: Mapped[list | None] = mapped_column(JSON, nullable=True)  # ["甲","乙"]
     score: Mapped[float] = mapped_column(Float, default=2, nullable=False)
     group_id: Mapped[int | None] = mapped_column(
-        Integer, ForeignKey("groups.id"), nullable=True, index=True
+        Integer, ForeignKey("groups.id", ondelete="SET NULL"), nullable=True, index=True
     )  # 所属分组，用于授权筛选

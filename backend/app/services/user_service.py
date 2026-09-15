@@ -9,14 +9,16 @@ from fastapi import HTTPException, status
 from sqlalchemy import delete, func, or_, select, update
 from sqlalchemy.orm import Session
 
+from app.core.email import normalize_email
 from app.core.security import hash_password
 from app.models.group import Group, UserGroup
-from app.models.user import User
+from app.models.user import USER_ROLE, USER_STATUS, User
 from app.services.audit_service import log as audit_log
 
-# 角色与状态白名单：管理员新增/导入用户时校验，防伪造非法角色
-ROLES = ("user", "dept_admin", "super_admin")
-STATUSES = ("active", "pending", "disabled")
+# 角色与状态白名单：管理员新增/导入用户时校验，防伪造非法角色。
+# 直接复用模型层常量，避免同一枚举在多处漂移（历史上曾有三份副本）。
+ROLES = USER_ROLE
+STATUSES = USER_STATUS
 
 
 def list_users(
@@ -195,7 +197,7 @@ def update_user(
         u.name = name
         changes["name"] = name
     if role is not None:
-        if role not in ("user", "dept_admin", "super_admin"):
+        if role not in ROLES:
             raise HTTPException(status.HTTP_400_BAD_REQUEST, "角色非法")
         if u.role != role:
             # 角色变更需超级管理员权限（由调用方在路由层校验），此处仅记录
@@ -270,7 +272,7 @@ def create_user(
     - 跳过邮箱验证流程（email_verified=True），管理员新增即视为可信账号。
     返回 (user, "")。
     """
-    email = (email or "").strip().lower()
+    email = normalize_email(email)
     if not email or "@" not in email:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "邮箱格式不正确")
     if role not in ROLES:
@@ -334,7 +336,7 @@ def import_users(
     pending_users: list[User] = []
     seen_emails: set[str] = set()
     for idx, r in enumerate(rows, start=1):
-        email = str(r.get("email") or "").strip().lower()
+        email = normalize_email(str(r.get("email") or ""))
         try:
             if not email or "@" not in email:
                 raise ValueError("邮箱格式不正确")
@@ -353,11 +355,16 @@ def import_users(
             st = str(r.get("status") or "active").strip() or "active"
             if st not in STATUSES:
                 raise ValueError(f"状态非法: {st}")
-            pwd = str(r.get("password") or "").strip()
-            if not pwd:
-                raise ValueError("初始密码不能为空")
-            if len(pwd) < 6:
-                raise ValueError("密码至少 6 位")
+            # 预览阶段已算好 bcrypt 哈希（明文不进入进程内缓存）。
+            # 兼容直接调用本函数且只给明文的场景（如测试、脚本）。
+            pwd_hash = str(r.get("password_hash") or "").strip()
+            if not pwd_hash:
+                pwd = str(r.get("password") or "").strip()
+                if not pwd:
+                    raise ValueError("初始密码不能为空")
+                if len(pwd) < 6:
+                    raise ValueError("密码至少 6 位")
+                pwd_hash = hash_password(pwd)
             name = str(r.get("name") or "").strip() or email.split("@")[0]
             gids = _normalize_group_ids(db, r.get("group_ids"))
             # 部门管理员只能把导入用户分配到本部门子树内的分组（水平越权防护）
@@ -367,7 +374,7 @@ def import_users(
                         raise ValueError("无权分配该分组")
             u = User(
                 email=email,
-                password_hash=hash_password(pwd),
+                password_hash=pwd_hash,
                 name=name,
                 role=role,
                 status=st,

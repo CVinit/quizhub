@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
 
+from app.core.email import normalize_email
+
 
 def _validate_password_bytes(value: str) -> str:
     if len(value.encode("utf-8")) > 72:
@@ -16,6 +18,8 @@ class SendCodeIn(BaseModel):
     captcha_id: str = Field(min_length=4)
     captcha_code: str = Field(min_length=1, max_length=10)
 
+    _norm_email = field_validator("email")(normalize_email)
+
 
 class RegisterIn(BaseModel):
     email: EmailStr
@@ -24,6 +28,7 @@ class RegisterIn(BaseModel):
     code: str = Field(min_length=4, max_length=10)
     group_ids: list[int] = Field(default_factory=list)  # 注册时选择的分组（可空，视设置是否必选）
 
+    _norm_email = field_validator("email")(normalize_email)
     _password_bytes = field_validator("password")(_validate_password_bytes)
 
 
@@ -31,10 +36,14 @@ class VerifyIn(BaseModel):
     email: EmailStr
     code: str = Field(min_length=4, max_length=10)
 
+    _norm_email = field_validator("email")(normalize_email)
+
 
 class LoginIn(BaseModel):
     username: EmailStr
     password: str
+
+    _norm_email = field_validator("username")(normalize_email)
 
 
 class TokenOut(BaseModel):
@@ -56,6 +65,8 @@ class UserOut(BaseModel):
 
 class ResendIn(BaseModel):
     email: EmailStr
+
+    _norm_email = field_validator("email")(normalize_email)
 
 
 class ChangePasswordIn(BaseModel):

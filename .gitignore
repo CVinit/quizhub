@@ -48,6 +48,9 @@ backend/data/*.db
 backend/data/*.db-wal
 backend/data/*.db-shm
 backend/data/*.db-journal
+# 迁移脚本自动生成的数据库备份（含真实用户数据，绝不入库）
+backend/data/*.db.bak-*
+backend/data/*.bak
 # 用户上传文件目录（运行时生成，保留空目录结构）
 !backend/data/files/
 

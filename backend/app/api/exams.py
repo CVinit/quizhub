@@ -15,6 +15,7 @@ from app.schemas.exam import (
     ExamCreateIn,
     ExamUpdateIn,
     MockConfigIn,
+    PaperPreviewIn,
     PaperTemplateIn,
     ReviewIn,
 )
@@ -69,13 +70,17 @@ def list_templates(db: Session = Depends(get_db), _user: User = Depends(require_
 
 
 @router.post("/admin/exam-templates/preview-paper")
-def preview_paper(payload: dict, db: Session = Depends(get_db), _user: User = Depends(require_super)):
-    return exam_service.preview_paper(db, payload)
+def preview_paper(
+    payload: PaperPreviewIn,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_super),
+):
+    return exam_service.preview_paper(db, payload.to_config(), dept_scope_ids(db, user))
 
 
 @router.post("/admin/exam-templates", status_code=status.HTTP_201_CREATED)
 def create_template(payload: PaperTemplateIn, db: Session = Depends(get_db), user: User = Depends(require_super)):
-    res = exam_service.create_template(db, payload, user)
+    res = exam_service.create_template(db, payload, user, dept_scope_ids(db, user))
     audit_log(db, user.id, "exam_template.create", "paper_template", res.get("id"), {"name": payload.name})
     return res
 

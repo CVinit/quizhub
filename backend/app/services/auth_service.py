@@ -13,6 +13,7 @@ from sqlalchemy import case, select, update
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.orm import Session
 
+from app.core.email import normalize_email
 from app.core.security import create_access_token, gen_verify_code, hash_password, verify_password
 from app.models.user import EmailVerification, User
 from app.services import mail_service
@@ -53,7 +54,7 @@ def check_email_suffix(db: Session, email: str) -> None:
     suffixes = _allowed_suffixes(db)
     if not suffixes:
         return
-    low = email.lower()
+    low = normalize_email(email)
     if not any(low.endswith(suf) for suf in suffixes):
         raise HTTPException(
             status.HTTP_400_BAD_REQUEST,
@@ -63,6 +64,7 @@ def check_email_suffix(db: Session, email: str) -> None:
 
 def send_code(db: Session, email: str, bg: BackgroundTasks) -> None:
     """发送注册验证码：先校验后缀与未注册，再生成验证码并入队邮件。"""
+    email = normalize_email(email)
     _ensure_registration_open(db)
     check_email_suffix(db, email)
     existing = db.execute(select(User).where(User.email == email)).scalar_one_or_none()
@@ -96,6 +98,7 @@ def register(
     group_ids：注册时选择的分组；若设置开启 register_group_required 则至少需要一个。
     分组校验在消费验证码之前完成，避免表单错误烧掉验证码。
     """
+    email = normalize_email(email)
     _ensure_registration_open(db)
     check_email_suffix(db, email)
     settings = get_settings(db, "register")
@@ -207,6 +210,7 @@ def _latest_unused(db: Session, email: str) -> EmailVerification | None:
 
 # ---------- 旧版邮箱激活流程（保留向后兼容，前端已切换到新流程）----------
 def verify_email(db: Session, email: str, code: str) -> None:
+    email = normalize_email(email)
     ev = _latest_unused(db, email)
     if not ev:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "验证码不存在或已使用")
@@ -230,6 +234,7 @@ def verify_email(db: Session, email: str, code: str) -> None:
 
 def resend(db: Session, email: str, bg: BackgroundTasks) -> None:
     """旧版：给已注册但未验证用户重发验证码（兼容旧 verify 页面）。"""
+    email = normalize_email(email)
     user = db.execute(select(User).where(User.email == email)).scalar_one_or_none()
     if not user:
         return
@@ -249,6 +254,7 @@ def resend(db: Session, email: str, bg: BackgroundTasks) -> None:
 
 
 def login(db: Session, email: str, password: str) -> dict:
+    email = normalize_email(email)
     user = db.execute(select(User).where(User.email == email)).scalar_one_or_none()
     if not user or not verify_password(password, user.password_hash):
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "邮箱或密码错误")

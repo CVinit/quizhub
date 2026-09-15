@@ -126,12 +126,20 @@ def review(
     if claimed.rowcount == 0:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "该题已复核")
 
-    # 原子自增成绩，避免并发复核读-改-写丢失更新
-
-    if verdict == "pass":
-        db.execute(update(ExamResult).where(ExamResult.id == result.id).values(score=ExamResult.score + eqs))
-    elif verdict == "partial":
-        db.execute(update(ExamResult).where(ExamResult.id == result.id).values(score=ExamResult.score + partial_score))
+    # 原子自增成绩，避免并发复核读-改-写丢失更新。
+    # 必须同时满足两点，否则成绩会失真：
+    # 1) 以 total_score 封顶：多次复核不同题目累加可能超过满分（如 108/100）；
+    # 2) 同步 objective_score：该列是 score 的组成部分，只加 score 会让
+    #    任何按 objective_score 重算的报告与 score 永久不一致。
+    delta = eqs if verdict == "pass" else partial_score
+    db.execute(
+        update(ExamResult)
+        .where(ExamResult.id == result.id)
+        .values(
+            score=func.min(ExamResult.total_score, ExamResult.score + delta),
+            objective_score=ExamResult.objective_score + delta,
+        )
+    )
     db.commit()
     return {"success": True, "verdict": verdict}
 

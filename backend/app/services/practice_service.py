@@ -80,8 +80,14 @@ def list_modes(db: Session, user_id: int, bank_id: int | None = None) -> dict:
     from app.models.question import QuestionBank
 
     enabled = _enabled_bank_ids(db)
-    # 没有任何开放题库时，范围限定为空集（返回 0 题），而非"不过滤"
-    scope_bank_ids = [bank_id] if bank_id else enabled
+    # bank_id 由客户端传入，必须与 start_practice 一样校验该题库已开放练习，
+    # 否则关闭的题库仍会通过统计接口泄露题量与题型分布。
+    if bank_id:
+        _assert_bank_practice_enabled(db, bank_id)
+        scope_bank_ids: list[int] = [bank_id]
+    else:
+        # 没有任何开放题库时，范围限定为空集（返回 0 题），而非"不过滤"
+        scope_bank_ids = enabled
 
     # 题量与题型分布：按范围过滤（None 表示全部开放题库）
     q_stmt = select(func.count(Question.id)).where(Question.bank_id.in_(scope_bank_ids))

@@ -214,7 +214,7 @@ def start_exam(db: Session, user: User, exam_id: int) -> dict:
         if ongoing.status == "scoring":
             has_result = db.execute(select(ExamResult.id).where(ExamResult.exam_session_id == ongoing.id)).first()
             if not has_result:
-                _recover_stuck_scoring(db)
+                _recover_stuck_scoring(db, user_id=user.id)
                 ongoing.status = "in_progress"
                 db.commit()
                 db.refresh(ongoing)
@@ -422,30 +422,50 @@ def submit_answer(db: Session, user: User, session_id: int, qid: int, answer, ve
 _SCORING_TIMEOUT_SEC = 30 * 60
 
 
-def _recover_stuck_scoring(db: Session) -> int:
+def _recover_stuck_scoring(db: Session, user_id: int | None = None) -> int:
     """回收超时的 scoring 会话：将其重置回 in_progress，释放被卡死的尝试次数。
 
     仅重置「无 ExamResult 且超时」的会话：含 ExamResult 的 scoring 会话是合法
     等待简答复核状态（submit_exam 已写 result 但会话保持 scoring），绝不可被回收，
     否则会让考生重新作答、改答案，污染复核流程。仅在单进程串行写的前提下安全（SQLite WAL）。
-    """
-    from datetime import datetime, timezone
 
+    Args:
+        db: 数据库会话。
+        user_id: 仅回收该用户的会话；None 表示全量回收（仅限启动维护路径调用，
+            用户可达的开考路径必须传入本人 id，避免一个用户改写他人的会话状态）。
+
+    Returns:
+        被回收的会话数量。
+    """
     from app.models.record import ExamResult
 
-    cutoff_iso = datetime.now(timezone.utc).timestamp() - _SCORING_TIMEOUT_SEC
-    rows = db.execute(select(ExamSession).where(ExamSession.status == "scoring")).scalars().all()
+    # 用 aware datetime 比较：旧实现把 ISO 字符串在本地时区下取 timestamp()，
+    # 无时区后缀的历史数据会被整体前移（UTC+8 下偏移 8 小时），
+    # 使已结束的会话被误判为超时并复活，考生可重新作答绕过 max_attempts。
+    cutoff = datetime.now(timezone.utc) - timedelta(seconds=_SCORING_TIMEOUT_SEC)
+    stmt = select(ExamSession).where(ExamSession.status == "scoring")
+    if user_id is not None:
+        stmt = stmt.where(ExamSession.user_id == user_id)
+    rows = db.execute(stmt).scalars().all()
+    if not rows:
+        return 0
+
+    # 一次查出所有 session 是否已有成绩，消除逐行查询（N+1）
+    with_result = {
+        r[0]
+        for r in db.execute(
+            select(ExamResult.exam_session_id).where(ExamResult.exam_session_id.in_([s.id for s in rows]))
+        ).all()
+    }
+
     recovered = 0
     for s in rows:
         try:
-            ts = datetime.fromisoformat(s.submitted_at or s.started_at).timestamp()
-        except (ValueError, TypeError):
+            submitted = _parse_time(s.submitted_at or s.started_at)
+        except HTTPException:
+            # 时间字段无法解析：保守跳过，交由人工核查，绝不复活会话
             continue
-        if ts < cutoff_iso:
-            # 已有成绩记录 → 合法待复核会话，跳过
-            has_result = db.execute(select(ExamResult.id).where(ExamResult.exam_session_id == s.id)).first()
-            if has_result:
-                continue
+        if submitted < cutoff and s.id not in with_result:
             s.status = "in_progress"
             recovered += 1
     if recovered:
@@ -686,12 +706,15 @@ def start_mock_exam(db: Session, user: User) -> dict:
     )
     config = _restrict_mock_config_to_enabled_banks(db, config)
     settings = get_settings(db, "exam")
-    # 复用当前用户进行中的 mock 考试；无则新建
+    # 复用当前用户进行中的 mock 考试；无则新建。
+    # 必须按 created_by 收敛到本人：mock 定义为全局可见，若不过滤，
+    # 首个开考用户创建的定义会被之后所有用户复用，导致所有人共用同一套已固化试题。
     existing = (
         db.execute(
             select(ExamDefinition).where(
                 ExamDefinition.type == "mock",
                 ExamDefinition.status == "ongoing",
+                ExamDefinition.created_by == user.id,
             )
         )
         .scalars()
@@ -742,9 +765,15 @@ def list_templates(db: Session) -> list[dict]:
     ]
 
 
-def preview_paper(db: Session, config: dict) -> dict:
-    """预览规则组卷结果（不落库）。"""
-    paper = generate_paper(db, config)
+def preview_paper(db: Session, config: dict, scope: set[int] | None = None) -> dict:
+    """预览规则组卷结果（不落库）。
+
+    Args:
+        db: 数据库会话。
+        config: 组卷规则。
+        scope: 调用者数据范围分组 id；None 表示不限制（超级管理员）。
+    """
+    paper = generate_paper(db, config, scope)
     qids = paper["question_ids"]
     questions = []
     question_map = {q.id: q for q in db.execute(select(Question).where(Question.id.in_(qids))).scalars().all()}
@@ -768,8 +797,8 @@ def preview_paper(db: Session, config: dict) -> dict:
     }
 
 
-def create_template(db: Session, payload, user: User) -> dict:
-    paper = generate_paper(db, payload.config)
+def create_template(db: Session, payload, user: User, scope: set[int] | None = None) -> dict:
+    paper = generate_paper(db, payload.config, scope)
     tpl = PaperTemplate(
         name=payload.name,
         mode=payload.mode,
