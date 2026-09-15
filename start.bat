@@ -35,8 +35,12 @@ uv sync
 if errorlevel 1 ( echo [错误] uv sync 失败 & pause & exit /b 1 )
 uv run python scripts\init_db.py
 if errorlevel 1 ( echo [错误] 数据库初始化失败 & pause & exit /b 1 )
-uv run python scripts\migrate_2026_08_28.py
-if errorlevel 1 ( echo [错误] 数据库迁移失败 & pause & exit /b 1 )
+REM 按文件名顺序执行全部迁移（幂等）；避免新增迁移脚本被遗漏导致缺列
+for /f "delims=" %%f in ('dir /b /on scripts\migrate_*.py') do (
+    echo         执行 %%f ...
+    uv run python "scripts\%%f"
+    if errorlevel 1 ( echo [错误] 数据库迁移失败：%%f & pause & exit /b 1 )
+)
 
 echo [3/3] 启动后端 (http://localhost:8000)...
 uv run uvicorn app.main:app --host 0.0.0.0 --port 8000

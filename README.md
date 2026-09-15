@@ -67,7 +67,7 @@ quizhub/
 cd frontend && pnpm install && pnpm build
 
 # 后端：安装依赖并初始化数据库
-cd backend && uv sync && uv run python scripts/init_db.py && uv run python scripts/migrate_2026_08_28.py
+cd backend && uv sync && uv run python scripts/init_db.py && for m in $(ls scripts/migrate_*.py | sort); do uv run python "$m"; done
 
 # 启动后端
 cd backend && uv run uvicorn app.main:app --host 0.0.0.0 --port 8000
@@ -79,7 +79,7 @@ cd backend && uv run uvicorn app.main:app --host 0.0.0.0 --port 8000
 cd frontend; pnpm install; pnpm build
 
 # 后端：安装依赖并初始化数据库
-cd backend; uv sync; uv run python scripts/init_db.py; uv run python scripts/migrate_2026_08_28.py
+cd backend; uv sync; uv run python scripts/init_db.py; Get-ChildItem scripts/migrate_*.py | Sort-Object Name | ForEach-Object { uv run python $_.FullName }
 
 # 启动后端
 cd backend; uv run uvicorn app.main:app --host 0.0.0.0 --port 8000

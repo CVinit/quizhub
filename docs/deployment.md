@@ -50,7 +50,8 @@ training-platform/
 cd backend
 uv sync                                  # 安装依赖到 .venv
 uv run python scripts/init_db.py         # 初始化数据库
-uv run python scripts/migrate_2026_08_28.py # 既有库迁移
+# 既有库迁移：按文件名顺序执行全部迁移脚本（幂等，可重复运行）
+for m in $(ls scripts/migrate_*.py | sort); do uv run python "$m"; done
 uv run uvicorn app.main:app --host 0.0.0.0 --port 8000
 ```
 

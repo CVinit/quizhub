@@ -36,8 +36,12 @@ uv sync
 if ($LASTEXITCODE -ne 0) { Write-Host "[错误] uv sync 失败" -ForegroundColor Red; Read-Host "按回车退出"; exit 1 }
 uv run python scripts/init_db.py
 if ($LASTEXITCODE -ne 0) { Write-Host "[错误] 数据库初始化失败" -ForegroundColor Red; Read-Host "按回车退出"; exit 1 }
-uv run python scripts/migrate_2026_08_28.py
-if ($LASTEXITCODE -ne 0) { Write-Host "[错误] 数据库迁移失败" -ForegroundColor Red; Read-Host "按回车退出"; exit 1 }
+# 按文件名顺序执行全部迁移（幂等）；避免新增迁移脚本被遗漏导致缺列
+Get-ChildItem -Path "scripts" -Filter "migrate_*.py" -File | Sort-Object Name | ForEach-Object {
+    Write-Host "        执行 $($_.Name) ..."
+    uv run python "scripts/$($_.Name)"
+    if ($LASTEXITCODE -ne 0) { Write-Host "[错误] 数据库迁移失败：$($_.Name)" -ForegroundColor Red; Read-Host "按回车退出"; exit 1 }
+}
 
 Write-Host "[3/3] 启动后端 (http://localhost:8000)..."
 uv run uvicorn app.main:app --host 0.0.0.0 --port 8000

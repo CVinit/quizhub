@@ -19,7 +19,11 @@ echo "[2/3] 初始化后端依赖与数据库..."
 cd "$ROOT/backend"
 uv sync
 uv run python scripts/init_db.py
-uv run python scripts/migrate_2026_08_28.py
+# 按文件名顺序执行全部迁移（幂等）；避免新增迁移脚本被遗漏导致缺列
+for m in $(ls scripts/migrate_*.py | sort); do
+  echo "        执行 $(basename "$m") ..."
+  uv run python "$m"
+done
 
 echo "[3/3] 启动后端 (http://localhost:8000)..."
 uv run uvicorn app.main:app --host 0.0.0.0 --port 8000

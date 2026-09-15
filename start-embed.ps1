@@ -1,4 +1,4 @@
-﻿# 培训考试平台 一键启动（使用项目内嵌 Python，无需 uv / 系统 Python / 虚拟环境）
+# 培训考试平台 一键启动（使用项目内嵌 Python，无需 uv / 系统 Python / 虚拟环境）
 #
 # 用法：
 #   PowerShell：  ./start-embed.ps1
@@ -48,23 +48,57 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 Write-Host "[2/4] 准备前端静态资源..."
-if ($Rebuild -or -not (Test-Path -LiteralPath (Join-Path $dist "index.html"))) {
+
+# 判断 dist 是否需要重建：只要 src/ 下的源码、或构建配置比 dist/index.html 新，
+# 就重建。原实现只看「dist/index.html 是否存在」，导致改完前端不重建就一直是旧界面。
+function Test-FrontendNeedsBuild {
+    $indexHtml = Join-Path $dist "index.html"
+    if (-not (Test-Path -LiteralPath $indexHtml)) { return $true }
+    $builtAt = (Get-Item -LiteralPath $indexHtml).LastWriteTimeUtc
+
+    # 参与构建的输入：源码、静态资源、构建配置与依赖清单
+    $watched = @()
+    foreach ($dir in @("src", "public")) {
+        $p = Join-Path $frontend $dir
+        if (Test-Path -LiteralPath $p) {
+            $watched += Get-ChildItem -LiteralPath $p -Recurse -File -ErrorAction SilentlyContinue
+        }
+    }
+    foreach ($f in @("index.html", "package.json", "vite.config.ts", "tsconfig.json")) {
+        $p = Join-Path $frontend $f
+        if (Test-Path -LiteralPath $p) { $watched += Get-Item -LiteralPath $p }
+    }
+    # node_modules 缺失时也必须重建（依赖未安装时 dist 不可信）
+    if (-not (Test-Path -LiteralPath (Join-Path $frontend "node_modules"))) { return $true }
+
+    return ($watched | Where-Object { $_.LastWriteTimeUtc -gt $builtAt } | Select-Object -First 1) -ne $null
+}
+
+$needBuild = $Rebuild -or (Test-FrontendNeedsBuild)
+if ($needBuild) {
+    if ($Rebuild) {
+        Write-Host "        -Rebuild 指定，强制重建"
+    } else {
+        Write-Host "        检测到前端源码/配置有更新，重新构建"
+    }
     Push-Location $frontend
     try {
         if (Get-Command pnpm -ErrorAction SilentlyContinue) {
             pnpm install; if ($LASTEXITCODE -eq 0) { pnpm build }
+            if ($LASTEXITCODE -ne 0) { Write-Host "[错误] 前端构建失败" -ForegroundColor Red; exit 1 }
         } elseif (Get-Command npm -ErrorAction SilentlyContinue) {
             npm install; if ($LASTEXITCODE -eq 0) { npm run build }
+            if ($LASTEXITCODE -ne 0) { Write-Host "[错误] 前端构建失败" -ForegroundColor Red; exit 1 }
         } else {
+            # 无构建工具时跳过（不再检查 $LASTEXITCODE：它可能残留上一条命令的非零值，
+            # 会误报"构建失败"）
             Write-Host "[警告] 未检测到 pnpm/npm，跳过前端构建，仅提供 API" -ForegroundColor Yellow
-            $LASTEXITCODE = 0
         }
-        if ($LASTEXITCODE -ne 0) { Write-Host "[错误] 前端构建失败" -ForegroundColor Red; exit 1 }
     } finally {
         Pop-Location
     }
 } else {
-    Write-Host "        dist 已存在，跳过构建（-Rebuild 可强制重建）"
+    Write-Host "        dist 已是最新，跳过构建（-Rebuild 可强制重建）"
 }
 
 Write-Host "[3/4] 初始化数据库..."
@@ -72,8 +106,14 @@ Push-Location $backend
 try {
     & $py "scripts\init_db.py"
     if ($LASTEXITCODE -ne 0) { Write-Host "[错误] 数据库初始化失败" -ForegroundColor Red; exit 1 }
-    & $py "scripts\migrate_2026_08_28.py"
-    if ($LASTEXITCODE -ne 0) { Write-Host "[错误] 数据库迁移失败" -ForegroundColor Red; exit 1 }
+    # 按文件名顺序跑全部迁移脚本：原来只硬编码 08_28，新增的 09_14 从未被执行，
+    # 导致既有库缺少 practice_enabled 列。迁移脚本均为幂等，可重复运行。
+    $migrations = Get-ChildItem -LiteralPath "scripts" -Filter "migrate_*.py" -File | Sort-Object Name
+    foreach ($m in $migrations) {
+        Write-Host "        执行 $($m.Name) ..."
+        & $py "scripts\$($m.Name)"
+        if ($LASTEXITCODE -ne 0) { Write-Host "[错误] 数据库迁移失败：$($m.Name)" -ForegroundColor Red; exit 1 }
+    }
 
     Write-Host "[4/4] 启动后端 → http://127.0.0.1:$Port  (Ctrl+C 停止)"
     if (-not $NoBrowser) { Start-Process "http://127.0.0.1:$Port" }
