@@ -195,3 +195,52 @@
 - 敏感设置缺少加密密钥时拒绝写入，SMTP fallback 不再记录邮箱/验证码；管理员密码改为必填且不在 HTTP 响应中返回。
 - Excel 增加解压体积、行数和单元格长度限制；审计日志补充时间过滤，用户/复核/成绩列表增加范围和返回上限。
 - 新增 HTTP 鉴权和安全回归测试；当前验证为 92 个后端测试通过、Ruff/mypy 通过、前端构建通过。
+
+### 2026-09-16 全面代码审核整改
+
+本轮基于四路并行审核（服务层 / 考试引擎 / 路由层 / 模型与工具层）逐一修复，
+所有结论均以可复现的代码执行验证，而非仅静态阅读。
+
+#### 严重问题（安全 / 数据完整性）
+
+| 编号 | 位置 | 问题与修复 |
+|---|---|---|
+| C1 | `core/email.py` + `schemas/auth.py` + `models/user.py` | **邮箱大小写不一致**：`EmailStr` 只小写域名，而 DB 查询大小写敏感，导致 `Admin@x.com` 无法用 `admin@x.com` 登录，且两者可作为两个账号共存。统一 `normalize_email()` 于 schema 边界归一，`users.email` 加 `COLLATE NOCASE` 兜底 |
+| C2 | `practice_service.list_modes` | **授权绕过**：`bank_id` 未校验 `practice_enabled`，关闭练习的题库仍通过统计接口泄露题量与题型分布。补 `_assert_bank_practice_enabled`，与 `start_practice` 口径一致 |
+| C3 | `exam_service.start_mock_exam` | **跨用户试卷泄露**：mock 定义查询未按 `created_by` 收敛，首个开考用户创建的已固化试卷被所有后续用户复用。补 `created_by == user.id` 过滤 |
+| C4 | `review_service.review` | **成绩失真**：复核加分未封顶 `total_score` 且未同步 `objective_score`，可产生 `108/100` 并使派生列永久不一致。改为 `min(total_score, ...)` 并同步累加 `objective_score` |
+| C5 | 全部 `models/*.py` | **删除即 500**：全表外键无 `ON DELETE` 规则，删除有练习/成绩记录的用户或题目抛 `IntegrityError`。按关系语义补齐 CASCADE / SET NULL，并为 `practice_records.bank_id`、`short_answer_reviews.exam_session_id` 补上原先缺失的外键 |
+| C6 | `stats_service.refresh_daily` | **统计静默归零**：用 SQLite `datetime(col,'+8 hours')` 解析文本时间戳，遇 `Z` 后缀等格式返回 NULL 使 WHERE 恒假；且 `+8` 硬编码于 Python 与 SQL 两处。改为业务时区（`TRAINING_TZ`，默认 Asia/Shanghai）换算 UTC 区间后做范围比较，兼容多种格式并可命中索引 |
+| C7 | 全仓库 | **格式化未执行**：`ruff check`/`mypy` 通过掩盖了 `ruff format` 从未运行。全量执行（16 个文件） |
+| C8 | `exam_service._recover_stuck_scoring` | **越权写入 + 会话复活**：该函数无 `user_id` 过滤却由用户可达的开考路径调用；且用本地时区解析无时区字符串，UTC+8 下偏移 8 小时会把已结束会话误判超时并复活，使考生可重答并绕过 `max_attempts`。改为按本人作用域 + aware datetime 比较 + 批量查询消除 N+1 |
+| C9 | `utils/excel.validate_workbook_archive` | **zip 炸弹可绕过**：原实现累加 zip 中央目录的 `file_size`，那是可伪造的声明值。改为魔数校验 + 流式真实解压限量 |
+| C10 | `paper_service.generate_paper` | **组卷无数据范围**：函数无 `scope` 参数，是唯一无法在结构上强制数据边界的服务。补 `scope` 硬上限并接入 `dept_scope_ids`；`preview_paper` 的裸 `dict` 入参改为 `PaperPreviewIn` schema |
+
+#### 建议项
+
+- `question_service.update_question` 改字段白名单写入，不依赖 schema 兜底，杜绝后续字段演进引入批量赋值。
+- `practice_service.recent_practice`、`audit_service.list_logs`、`stats_service` 批量取数，消除 N+1。
+- `group_service` 删除重复的 `subtree_ids`，统一复用 `core.deps`（授权规则与成环检测不再各持一份）。
+- `group_service.build_tree` 的 scope 过滤下推 SQL；`exam_service.list_exams` 增加 `limit` 上限。
+- `mail_service`：显式 `ssl.create_default_context()`、拒绝在未加密通道发送凭据、邮件头 CRLF 过滤、模板占位符错误改为告警 + 默认文案。
+- `audit_service.list_logs` 转义 LIKE 通配符（`%`/`_` 不再被当通配符）。
+- `user_service.reset_password` 不再回传明文；`system_service` 校验 `smtp_host` 与邮件头字段；`MASKED_SECRET` 收敛为单一常量，避免掩码被写回库。
+- `stats_service._streak` 真正使用 `since` 限定回看范围。
+
+#### 其他
+
+- 填空答案要求每个空位至少一个等价答案（原实现会静默产出永远判错的不可作答题目）。
+- 新增 `safe_cell()` 公式转义工具，供后续「导出题目/用户」类功能防公式注入（当前导出仅为静态模板，尚不可达）。
+- 删除 `excel.py` 死赋值与 `exam_service` 未使用的 `SESSION_STATUS` 常量。
+
+#### 模型 / 迁移变更
+
+- 新增 `scripts/migrate_2026_09_16.py`：邮箱归一（含冲突改名保留）、`users.email` 重建为 NOCASE、10 张表重建以补齐 `ON DELETE`、清理历史悬空引用，并自动备份 + `PRAGMA foreign_key_check` 自检；幂等。
+- 既有库由启动脚本按文件名顺序自动执行；新库经 `init_db` 已含全部定义。
+- 新增配置项 `TRAINING_TZ`（默认 `Asia/Shanghai`），用于统计日期归属。
+
+#### 测试
+
+- 新增 `tests/test_review_remediation.py`（18 项）：邮箱大小写登录、重复账号拦截、关闭题库统计拒绝、mock 按用户隔离、复核封顶与 objective_score 同步、四类外键级联与 SET NULL、时间戳多格式归属、时区换算、`_recover_stuck_scoring` 的作用域/脏数据/合法待复核三种保护。
+- 更新 `tests/test_authz.py` 两处断言：原断言依赖 `reset_password` 回传明文，改为校验落库哈希与 `token_version`。
+- 全量 **154 测试通过**；`ruff check` / `ruff format --check` / `mypy` 全部通过。

@@ -18,6 +18,8 @@ services:
       TRAINING_SUPER_ADMIN_PASSWORD: ${TRAINING_SUPER_ADMIN_PASSWORD:-}
       # 反向代理后设为 true：从 X-Forwarded-For 取真实客户端 IP（限流/审计依赖）
       TRAINING_TRUST_PROXY: ${TRAINING_TRUST_PROXY:-false}
+      # 业务时区：决定统计「今日」归属边界与排行日期口径（默认 Asia/Shanghai）
+      TRAINING_TZ: ${TRAINING_TZ:-Asia/Shanghai}
       # 前后端同源部署无需配置；需要跨域时改为允许的来源列表（逗号分隔）
       TRAINING_CORS_ORIGINS: ${TRAINING_CORS_ORIGINS:-*}
     volumes:
