@@ -127,12 +127,15 @@ def test_dept_admin_can_reset_in_scope_user():
     with db_session() as db:
         dept_admin, in_user, out_user, super_admin = _setup_org(db)
         scope = dept_scope_ids(db, dept_admin)
-        # 范围内用户可重置
-        new_pwd = user_service.reset_password(db, dept_admin.id, in_user.id, "newpass123", scope)
-        assert new_pwd == "newpass123"
-        # 验证密码确实被改
+        old_hash = in_user.password_hash
+        # 范围内用户可重置（服务不再回传明文，改为校验落库的哈希与 token 版本）
+        result = user_service.reset_password(db, dept_admin.id, in_user.id, "newpass123", scope)
+        assert result is None, "服务层不应回传明文口令"
         db.refresh(in_user)
-        assert in_user.password_hash != "x"
+        assert in_user.password_hash != old_hash
+        from app.core.security import verify_password
+
+        assert verify_password("newpass123", in_user.password_hash)
 
 
 def test_dept_admin_cannot_disable_out_of_scope_user():
@@ -154,11 +157,16 @@ def test_super_admin_can_reset_anyone():
     with db_session() as db:
         dept_admin, in_user, out_user, super_admin = _setup_org(db)
         scope = dept_scope_ids(db, super_admin)  # None
+        from app.core.security import verify_password
+
         # 超管可重置任意人
-        new_pwd = user_service.reset_password(db, super_admin.id, out_user.id, "newpass123", scope)
-        assert new_pwd == "newpass123"
-        new_pwd2 = user_service.reset_password(db, super_admin.id, super_admin.id, "another456", scope)
-        assert new_pwd2 == "another456"
+        assert user_service.reset_password(db, super_admin.id, out_user.id, "newpass123", scope) is None
+        db.refresh(out_user)
+        assert verify_password("newpass123", out_user.password_hash)
+
+        assert user_service.reset_password(db, super_admin.id, super_admin.id, "another456", scope) is None
+        db.refresh(super_admin)
+        assert verify_password("another456", super_admin.password_hash)
 
 
 def test_dept_admin_list_users_filters_to_scope():

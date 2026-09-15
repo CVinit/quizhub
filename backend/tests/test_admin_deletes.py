@@ -155,8 +155,17 @@ def test_delete_draft_exam_removes_questions():
         bank = QuestionBank(name="库")
         db.add(bank)
         db.flush()
-        q = Question(bank_id=bank.id, type="单选题", question="q", options=["A"], answer="A",
-                     analysis="", difficulty=1, tags=[], score=2)
+        q = Question(
+            bank_id=bank.id,
+            type="单选题",
+            question="q",
+            options=["A"],
+            answer="A",
+            analysis="",
+            difficulty=1,
+            tags=[],
+            score=2,
+        )
         db.add(q)
         db.flush()
         db.add(ExamQuestion(exam_definition_id=e.id, question_id=q.id, seq=0, score=2, shuffle_map=None))
@@ -195,8 +204,16 @@ def test_delete_exam_with_sessions_conflict():
         e = _mk_exam(super_admin.id, status="draft")
         db.add(e)
         db.flush()
-        db.add(ExamSession(exam_definition_id=e.id, user_id=stu.id, answers={}, version=1,
-                           started_at="2026-01-01T00:00:00", status="in_progress"))
+        db.add(
+            ExamSession(
+                exam_definition_id=e.id,
+                user_id=stu.id,
+                answers={},
+                version=1,
+                started_at="2026-01-01T00:00:00",
+                status="in_progress",
+            )
+        )
         db.commit()
         with pytest.raises(HTTPException) as exc:
             exam_service.delete_exam(db, e.id, None)
@@ -267,13 +284,27 @@ def test_delete_user_cascades_but_keeps_exam_and_audit():
         e = _mk_exam(stu.id)  # 学生创建的考试
         db.add(e)
         db.flush()
-        sess = ExamSession(exam_definition_id=e.id, user_id=stu.id, answers={}, version=1,
-                           started_at="2026-01-01T00:00:00", status="submitted",
-                           submitted_at="2026-01-01T01:00:00")
+        sess = ExamSession(
+            exam_definition_id=e.id,
+            user_id=stu.id,
+            answers={},
+            version=1,
+            started_at="2026-01-01T00:00:00",
+            status="submitted",
+            submitted_at="2026-01-01T01:00:00",
+        )
         db.add(sess)
         db.flush()
-        db.add(ExamResult(exam_definition_id=e.id, user_id=stu.id, exam_session_id=sess.id,
-                          score=80, total_score=100, published=True))
+        db.add(
+            ExamResult(
+                exam_definition_id=e.id,
+                user_id=stu.id,
+                exam_session_id=sess.id,
+                score=80,
+                total_score=100,
+                published=True,
+            )
+        )
         db.commit()
         exam_id = e.id
 
@@ -299,12 +330,23 @@ def test_type_stats_filters_by_bank():
         b2 = QuestionBank(name="库2")
         db.add_all([b1, b2])
         db.flush()
+
         def q(bank, qtype, n):
             for i in range(n):
-                db.add(Question(bank_id=bank.id, type=qtype, question=f"{qtype}{i}",
-                                options=["A", "B"] if "选" in qtype else None,
-                                answer="A" if "选" in qtype or qtype == "判断题" else ("对" if False else "A"),
-                                analysis="", difficulty=1, tags=[], score=2))
+                db.add(
+                    Question(
+                        bank_id=bank.id,
+                        type=qtype,
+                        question=f"{qtype}{i}",
+                        options=["A", "B"] if "选" in qtype else None,
+                        answer="A" if "选" in qtype or qtype == "判断题" else ("对" if False else "A"),
+                        analysis="",
+                        difficulty=1,
+                        tags=[],
+                        score=2,
+                    )
+                )
+
         q(b1, "单选题", 3)
         q(b1, "多选题", 2)
         q(b2, "单选题", 5)

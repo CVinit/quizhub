@@ -26,8 +26,6 @@ from app.services.grading import grade
 from app.services.paper_service import generate_paper
 from app.services.system_service import get_settings
 
-SESSION_STATUS = ("in_progress", "submitted", "scoring", "scored", "reviewed")
-
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -828,19 +826,21 @@ def delete_template(db: Session, template_id: int) -> None:
 
 
 # ---------- 管理端：正式考试 ----------
-def list_exams(
-    db: Session, scope: set[int] | None = None, status_: str | None = None
-) -> list[dict]:
+def list_exams(db: Session, scope: set[int] | None = None, status_: str | None = None, limit: int = 500) -> list[dict]:
     """管理端正式考试列表。scope 非 None（部门管理员）时仅返回指派分组落在
     其子树内、或无指派（全量）的考试由 super_admin 可见——这里按 group_ids 与 scope 取交集过滤，
     无指派的考试仅 super_admin 可见（避免 dept_admin 看到未指派给其部门的考试）。
 
     status_ 为 None 时返回全部状态（含已归档）；显式传入时按状态筛选。
+    limit 给出返回条数上限，避免数据增长后一次性载入整表。
     """
     stmt = select(ExamDefinition).where(ExamDefinition.type == "formal")
     if status_:
         stmt = stmt.where(ExamDefinition.status == status_)
-    rows = db.execute(stmt.order_by(ExamDefinition.id.desc())).scalars().all()
+    # 注意：部门管理员的 group_ids 过滤在 Python 侧完成（JSON 列无法可靠下推），
+    # 因此这里取 limit 的若干倍作为候选，避免过滤后结果过少。
+    fetch = limit if scope is None else limit * 4
+    rows = db.execute(stmt.order_by(ExamDefinition.id.desc()).limit(fetch)).scalars().all()
     out = []
     for e in rows:
         if scope is not None:
@@ -849,6 +849,8 @@ def list_exams(
                 # 无指派考试默认全员可见，但部门管理员不应看到此类全局考试
                 continue
         out.append(_exam_admin_brief(e))
+        if len(out) >= limit:
+            break
     return out
 
 

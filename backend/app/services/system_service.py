@@ -12,7 +12,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.core.security import decrypt_value, encrypt_value
+from app.core.security import MASKED_SECRET, decrypt_value, encrypt_value
 from app.models.system import Setting
 
 logger = logging.getLogger("quizhub")
@@ -112,7 +112,7 @@ def update_settings(db: Session, category: str, updates: dict[str, Any]) -> None
         _, cat, enc = DEFAULT_SETTINGS[key]
         if cat != category:
             raise ValueError(f"设置项不属于分类 {category}: {key}")
-        if enc and str(val) == "******":
+        if enc and str(val) == MASKED_SECRET:
             # 设置列表接口返回的掩码只用于展示，不能覆盖数据库中的真实密文。
             continue
         row = db.execute(select(Setting).where(Setting.setting_key == key)).scalar_one_or_none()
@@ -149,3 +149,12 @@ def _validate_value(key: str, value: str) -> None:
         extensions = [ext.strip().lower() for ext in value.replace("，", ",").split(",") if ext.strip()]
         if not extensions or any(not ext.startswith(".") or ext != ".xlsx" for ext in extensions):
             raise ValueError("当前仅支持 .xlsx 上传")
+    elif key == "smtp_host":
+        # 主机名会进入 socket.getaddrinfo：拒绝空白与控制字符，
+        # 避免配置项被用于注入或指向异常目标。
+        host = value.strip()
+        if not host or any(c in value for c in "\r\n\t ") or "/" in value or ":" in value:
+            raise ValueError("SMTP 服务器必须是合法主机名（不含协议、端口、空格）")
+    elif key in {"smtp_sender", "smtp_username", "site_name", "smtp_password"} and any(c in value for c in "\r\n"):
+        # 这些值会进入邮件头或 SMTP 认证；CR/LF 会导致邮件头注入（伪造 Bcc/From）
+        raise ValueError(f"{key} 不能包含换行符")

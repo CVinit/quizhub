@@ -45,9 +45,7 @@ class QuestionState(PKMixin):
     __tablename__ = "question_states"
     __table_args__ = (UniqueConstraint("user_id", "question_id", name="uq_user_question_state"),)
 
-    user_id: Mapped[int] = mapped_column(
-        Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False
-    )
+    user_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
     question_id: Mapped[int] = mapped_column(
         Integer, ForeignKey("questions.id", ondelete="CASCADE"), index=True, nullable=False
     )
@@ -120,14 +118,10 @@ class ShortAnswerReview(PKMixin):
     user_id: Mapped[int] = mapped_column(
         Integer, ForeignKey("users.id", ondelete="CASCADE"), index=True, nullable=False
     )
-    question_id: Mapped[int] = mapped_column(
-        Integer, ForeignKey("questions.id", ondelete="CASCADE"), nullable=False
-    )
+    question_id: Mapped[int] = mapped_column(Integer, ForeignKey("questions.id", ondelete="CASCADE"), nullable=False)
     user_answer: Mapped[str] = mapped_column(Text, default="", nullable=False)
     reference_answer: Mapped[str] = mapped_column(Text, default="", nullable=False)
     verdict: Mapped[str | None] = mapped_column(String, nullable=True)  # REVIEW_VERDICT
     partial_score: Mapped[float | None] = mapped_column(Float, nullable=True)
-    reviewer: Mapped[int | None] = mapped_column(
-        Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True
-    )
+    reviewer: Mapped[int | None] = mapped_column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
     reviewed_at: Mapped[str | None] = mapped_column(String, nullable=True)

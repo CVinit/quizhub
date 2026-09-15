@@ -260,7 +260,7 @@ def rebuild_table_with_ondelete(conn: sqlite3.Connection, table: str, ddl: str, 
     cols = [r[1] for r in conn.execute(f"PRAGMA table_info({table})").fetchall()]
     shared = [c for c in cols if c in {r[1] for r in conn.execute(f"PRAGMA table_info({tmp})").fetchall()}]
     collist = ", ".join(f'"{c}"' for c in shared)
-    conn.execute(f'INSERT INTO {tmp} ({collist}) SELECT {collist} FROM {table}')
+    conn.execute(f"INSERT INTO {tmp} ({collist}) SELECT {collist} FROM {table}")
     conn.execute(f"DROP TABLE {table}")
     conn.execute(f"ALTER TABLE {tmp} RENAME TO {table}")
 
@@ -340,7 +340,9 @@ def purge_orphans(conn: sqlite3.Connection, dry_run: bool) -> int:
         if n:
             logger.warning("[migrate] %s.%s 有 %d 行指向不存在的 %s，将置空（保留记录）", table, col, n, parent)
             if not dry_run:
-                conn.execute(f"UPDATE {table} SET {col}=NULL WHERE {col} IS NOT NULL AND {col} NOT IN (SELECT id FROM {parent})")
+                conn.execute(
+                    f"UPDATE {table} SET {col}=NULL WHERE {col} IS NOT NULL AND {col} NOT IN (SELECT id FROM {parent})"
+                )
             cleaned += n
 
     if not dry_run and cleaned:

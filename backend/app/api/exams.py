@@ -96,11 +96,15 @@ def delete_template(template_id: int, db: Session = Depends(get_db), user: User 
 @router.get("/admin/exams")
 def list_exams(
     status_filter: str | None = Query(None, alias="status"),
+    limit: int = Query(500, ge=1, le=2000),
     db: Session = Depends(get_db),
     user: User = Depends(require_admin),
 ):
-    """考试列表。status 省略时返回全部状态（含已归档）。"""
-    return exam_service.list_exams(db, dept_scope_ids(db, user), status_filter)
+    """考试列表。status 省略时返回全部状态（含已归档）。
+
+    limit 设上限，避免数据量增长后一次性把整表载入内存。
+    """
+    return exam_service.list_exams(db, dept_scope_ids(db, user), status_filter, limit)
 
 
 @router.post("/admin/exams", status_code=status.HTTP_201_CREATED)

@@ -137,9 +137,7 @@ def delete_user(db: Session, actor: int, actor_role: str, user_id: int, scope: s
     # 本人考试会话 → 成绩 → 简答复核，按外键依赖顺序清理
     session_ids = [r[0] for r in db.execute(select(ExamSession.id).where(ExamSession.user_id == user_id)).all()]
     if session_ids:
-        result_ids = (
-            select(ExamResult.id).where(ExamResult.exam_session_id.in_(session_ids)).scalar_subquery()
-        )
+        result_ids = select(ExamResult.id).where(ExamResult.exam_session_id.in_(session_ids)).scalar_subquery()
         db.execute(delete(ShortAnswerReview).where(ShortAnswerReview.exam_result_id.in_(result_ids)))
         db.execute(delete(ExamResult).where(ExamResult.exam_session_id.in_(session_ids)))
         db.execute(delete(ExamSession).where(ExamSession.id.in_(session_ids)))
@@ -167,8 +165,12 @@ def reset_password(
     user_id: int,
     new_password: str,
     scope: set[int] | None = None,
-) -> str:
-    """重置密码。新密码由管理员通过安全渠道提供，不在响应中返回。"""
+) -> None:
+    """重置密码。新密码由管理员经安全渠道提供，本函数不回传明文。
+
+    返回 None 而非明文：避免调用方不慎把口令透传到响应体（明文由调用方持有，
+    本就无需回传）。
+    """
     _check_scope(db, user_id, scope)
     u = _get(db, user_id)
     if len(new_password) < 6:
@@ -177,7 +179,6 @@ def reset_password(
     u.token_version += 1
     db.commit()
     audit_log(db, actor, "user.reset_password", "user", user_id)
-    return new_password
 
 
 def update_user(

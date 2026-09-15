@@ -32,10 +32,7 @@ def enabled_bank_ids(db: Session) -> list[int]:
     """
     from app.models.question import QuestionBank
 
-    return [
-        r[0]
-        for r in db.execute(select(QuestionBank.id).where(QuestionBank.practice_enabled.is_(True))).all()
-    ]
+    return [r[0] for r in db.execute(select(QuestionBank.id).where(QuestionBank.practice_enabled.is_(True))).all()]
 
 
 # 内部沿用的旧名（避免大规模改名）
@@ -294,9 +291,16 @@ def recent_practice(db: Session, user_id: int, limit: int = 10) -> list[dict]:
         .scalars()
         .all()
     )
+    # 一次批量取回题目，避免逐行 db.get 造成 N+1（limit 由调用方控制）
+    question_ids = {r.question_id for r in rows}
+    question_map = (
+        {q.id: q for q in db.execute(select(Question).where(Question.id.in_(question_ids))).scalars().all()}
+        if question_ids
+        else {}
+    )
     out = []
     for r in rows:
-        q = db.get(Question, r.question_id)
+        q = question_map.get(r.question_id)
         out.append(
             {
                 "id": r.id,

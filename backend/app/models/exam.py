@@ -24,9 +24,7 @@ class PaperTemplate(PKMixin, TimestampMixin):
     config: Mapped[dict] = mapped_column(JSON, nullable=False)  # 组卷规则
     group_ids: Mapped[list | None] = mapped_column(JSON, nullable=True)
     question_ids: Mapped[list | None] = mapped_column(JSON, nullable=True)  # 固化题目清单
-    created_by: Mapped[int | None] = mapped_column(
-        Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True
-    )
+    created_by: Mapped[int | None] = mapped_column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
 
 
 class ExamDefinition(PKMixin, TimestampMixin):
@@ -49,9 +47,7 @@ class ExamDefinition(PKMixin, TimestampMixin):
     show_analysis: Mapped[bool] = mapped_column(default=False, nullable=False)  # type: ignore[arg-type]
     need_review: Mapped[bool] = mapped_column(default=False, nullable=False)  # type: ignore[arg-type]
     status: Mapped[str] = mapped_column(String, default="draft", nullable=False, index=True)
-    created_by: Mapped[int | None] = mapped_column(
-        Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True
-    )
+    created_by: Mapped[int | None] = mapped_column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
 
 
 class ExamQuestion(PKMixin):

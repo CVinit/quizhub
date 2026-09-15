@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 
 from app.config import FILES_DIR
 from app.core.deps import require_super
+from app.core.security import MASKED_SECRET
 from app.database import get_db
 from app.models.user import User
 from app.schemas.system import SettingsUpdateIn, SmtpTestIn
@@ -160,11 +161,11 @@ def list_settings(category: str | None = None, db: Session = Depends(get_db), _u
         enc = DEFAULT_SETTINGS.get(k, ("", "", False))[2]
         if category:
             # 敏感（加密）字段在列表 API 仅返回占位符，绝不回传明文，避免凭据泄露
-            value = "******" if enc else v
+            value = MASKED_SECRET if enc else v
             out.append({"key": k, "value": value, "encrypted": enc})
         else:
             _, cat, e = DEFAULT_SETTINGS.get(k, ("", "general", False))
-            value = "******" if e else v
+            value = MASKED_SECRET if e else v
             out.append({"key": k, "value": value, "category": cat, "encrypted": e})
     return out
 

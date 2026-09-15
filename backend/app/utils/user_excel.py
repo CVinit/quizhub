@@ -194,9 +194,7 @@ def preview(db: Session, content: bytes, user_id: int = 0) -> dict:
     valid_rows = [r for r in rows if r["valid"]]
     # 立即把明文口令换成 bcrypt 哈希再暂存：确认导入阶段不再需要明文，
     # 这样即便缓存被读取（堆转储、调试）也不会泄露可用的初始凭据。
-    cached_rows = [
-        {**row, "password_hash": hash_password(str(row["password"])), "password": ""} for row in valid_rows
-    ]
+    cached_rows = [{**row, "password_hash": hash_password(str(row["password"])), "password": ""} for row in valid_rows]
     token = uuid.uuid4().hex
     _preview_cache.put(token, cached_rows, owner=float(user_id))
     preview_rows = [{key: value for key, value in row.items() if key != "password"} for row in rows[:50]]

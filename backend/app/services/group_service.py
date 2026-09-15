@@ -6,10 +6,21 @@ from fastapi import HTTPException, status
 from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
+# subtree_ids 统一由 core.deps 提供，避免「授权数据范围」与「成环检测」各持一份实现而漂移：
+# 两份副本一旦不一致，可能导致越权可见或环检测失效。
+from app.core.deps import subtree_ids
 from app.models.group import Group, UserGroup
 from app.schemas.group import GroupCreate, GroupUpdate
 
 GROUP_TYPES = ("部门", "专业", "班级", "自定义")
+
+__all__ = [
+    "build_tree",
+    "create_group",
+    "delete_group",
+    "subtree_ids",
+    "update_group",
+]
 
 
 def build_tree(db: Session, scope: set[int] | None = None) -> list[dict]:
@@ -18,9 +29,11 @@ def build_tree(db: Session, scope: set[int] | None = None) -> list[dict]:
     scope 非 None（部门管理员）时仅返回其子树内的分组，并按子树根重建树形，
     防止向部门管理员泄露其他部门的组织结构。
     """
-    rows = db.execute(select(Group).order_by(Group.sort, Group.id)).scalars().all()
+    # scope 过滤下推到 SQL：部门管理员无需把整棵组织树载入内存再丢弃
+    stmt = select(Group).order_by(Group.sort, Group.id)
     if scope is not None:
-        rows = [r for r in rows if r.id in scope]
+        stmt = stmt.where(Group.id.in_(scope))
+    rows = db.execute(stmt).scalars().all()
     nodes: dict[int, dict] = {}
     for r in rows:
         nodes[r.id] = {
@@ -93,20 +106,6 @@ def delete_group(db: Session, group_id: int) -> None:
     db.execute(delete(UserGroup).where(UserGroup.group_id == group_id))
     db.delete(g)
     db.commit()
-
-
-def subtree_ids(db: Session, group_id: int) -> set[int]:
-    """返回某分组及其全部后代 id。"""
-    ids: set[int] = {group_id}
-    stack = [group_id]
-    while stack:
-        parent = stack.pop()
-        children = db.execute(select(Group.id).where(Group.parent_id == parent)).scalars().all()
-        for cid in children:
-            if cid not in ids:
-                ids.add(cid)
-                stack.append(cid)
-    return ids
 
 
 def _would_cycle(db: Session, new_parent: int, group_id: int) -> bool:

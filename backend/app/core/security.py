@@ -12,6 +12,11 @@ from jose import JWTError, jwt
 
 from app.config import ALGORITHM, SECRET_KEY, SETTINGS_ENC_KEY
 
+# 敏感设置（如 SMTP 密码）在读取接口中的展示掩码。
+# 生产端（API 读取）与消费端（update_settings 跳过写回）必须共用同一常量：
+# 若两处字面量不一致，掩码会被当作真实密文写库，永久破坏已保存的凭据。
+MASKED_SECRET = "******"
+
 
 def hash_password(password: str) -> str:
     pwd = password.encode("utf-8")

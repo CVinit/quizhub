@@ -56,6 +56,29 @@ ANSWER_COL = {
 HEADER_FILL = PatternFill("solid", fgColor="E60012")
 HEADER_FONT = Font(color="FFFFFF", bold=True)
 
+# Excel/Calc 会把以这些字符开头的单元格当作公式执行。
+_FORMULA_PREFIXES = ("=", "+", "-", "@", "\t", "\r")
+
+
+def safe_cell(value: object) -> object:
+    """转义可能被 Excel 解释为公式的文本，防止公式注入。
+
+    当前导出接口只产出静态模板，尚未写回用户数据；本函数供后续「导出题目/用户」
+    类功能使用：题库题干、选项、解析、标签都来自导入的任意文本，若原样写回
+    xlsx，攻击者可植入 `=HYPERLINK(...)` 或 DDE 载荷，管理员打开即触发。
+
+    做法是在危险文本前加单引号（Excel 视为纯文本），非字符串原样返回。
+
+    Args:
+        value: 待写入单元格的值。
+
+    Returns:
+        转义后的值；非字符串类型不变。
+    """
+    if isinstance(value, str) and value.startswith(_FORMULA_PREFIXES):
+        return "'" + value
+    return value
+
 
 def build_template() -> BytesIO:
     """生成模板 xlsx（含说明 Sheet）。"""
@@ -290,8 +313,10 @@ def _parse_row(sheet_name: str, row: tuple, r_idx: int) -> UploadPreviewRow:
         else:
             # 按空位 | 分隔，每空 / 分隔等价答案
             blanks = [b.strip() for b in ans.split("|") if b.strip()]
-            answer = blanks  # list[list[str]] or list[str]
             answer = [[x.strip() for x in b.split("/") if x.strip()] for b in blanks]
+            # 每个空位都必须至少有一个可选答案，否则该空永远判错（题目实际不可作答）
+            if any(not alternatives for alternatives in answer):
+                error = "填空答案格式错误：每个空位至少需要一个可选答案（用 / 分隔等价答案）"
 
     elif not error and qtype == "简答题":
         ans = str(answer_raw or "").strip()

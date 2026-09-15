@@ -17,6 +17,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 from fastapi import HTTPException
 from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 
 from app.core.email import normalize_email
 from app.core.security import hash_password
@@ -95,7 +96,7 @@ def test_case_variant_does_not_create_duplicate_account():
 
         # 数据库层兜底：即便直接写入也必须被唯一约束拒绝
         db.add(User(email="ADMIN@EXAMPLE.COM", password_hash="x", name="dup", role="user", status="active"))
-        with pytest.raises(Exception):  # IntegrityError
+        with pytest.raises(IntegrityError):
             db.commit()
         db.rollback()
 
@@ -270,9 +271,7 @@ def _seed_full_graph(db):
     exam = ExamDefinition(name="E", type="formal", rules={}, status="published")
     db.add(exam)
     db.flush()
-    session = ExamSession(
-        exam_definition_id=exam.id, user_id=user.id, status="scored", started_at=now, answers={}
-    )
+    session = ExamSession(exam_definition_id=exam.id, user_id=user.id, status="scored", started_at=now, answers={})
     db.add(session)
     db.flush()
     result = ExamResult(
@@ -428,12 +427,20 @@ def test_recover_stuck_scoring_does_not_touch_other_users():
 
         stale = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat()
         mine = ExamSession(
-            exam_definition_id=exam.id, user_id=me.id, status="scoring", started_at=stale,
-            submitted_at=stale, answers={},
+            exam_definition_id=exam.id,
+            user_id=me.id,
+            status="scoring",
+            started_at=stale,
+            submitted_at=stale,
+            answers={},
         )
         theirs = ExamSession(
-            exam_definition_id=exam.id, user_id=other.id, status="scoring", started_at=stale,
-            submitted_at=stale, answers={},
+            exam_definition_id=exam.id,
+            user_id=other.id,
+            status="scoring",
+            started_at=stale,
+            submitted_at=stale,
+            answers={},
         )
         db.add_all([mine, theirs])
         db.commit()
@@ -485,8 +492,12 @@ def test_recover_stuck_scoring_keeps_session_with_result():
         db.flush()
         stale = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat()
         session = ExamSession(
-            exam_definition_id=exam.id, user_id=user.id, status="scoring",
-            started_at=stale, submitted_at=stale, answers={},
+            exam_definition_id=exam.id,
+            user_id=user.id,
+            status="scoring",
+            started_at=stale,
+            submitted_at=stale,
+            answers={},
         )
         db.add(session)
         db.flush()

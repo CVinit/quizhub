@@ -20,6 +20,26 @@ from app.schemas.question import (
 
 QUESTION_TYPES = ("单选题", "多选题", "判断题", "填空题", "简答题", "拖拽题")
 
+# update_question 允许客户端修改的字段白名单。
+# 与 QuestionUpdate schema 的字段保持一致，但作为服务层的独立防线：
+# 任何未列入此处的键都会被拒绝，避免 schema 演进时出现静默的批量赋值漏洞。
+QUESTION_UPDATABLE_FIELDS = frozenset(
+    {
+        "type",
+        "question",
+        "options",
+        "left_items",
+        "right_items",
+        "answer",
+        "analysis",
+        "difficulty",
+        "tags",
+        "score",
+        "group_id",
+        "bank_id",
+    }
+)
+
 
 def _validate_group(db: Session, group_id: int | None, scope: set[int] | None) -> None:
     if group_id is not None and not db.get(Group, group_id):
@@ -70,9 +90,7 @@ def _validate_answer_shape(qtype: str, answer: object) -> None:
 
 
 # ---------- 题库来源 ----------
-def list_banks(
-    db: Session, scope: set[int] | None = None, practice_enabled: bool | None = None
-) -> list[dict]:
+def list_banks(db: Session, scope: set[int] | None = None, practice_enabled: bool | None = None) -> list[dict]:
     """返回题库，并附带各题库题目数（一次 GROUP BY 聚合，避免逐套 COUNT）。
 
     practice_enabled 为 None 时返回全部题库（管理端默认：需看到并管理已关闭的题库）；
@@ -255,8 +273,13 @@ def update_question(db: Session, qid: int, payload: QuestionUpdate, scope: set[i
         _validate_answer_shape(effective_type, data["answer"])
     if data.get("tags"):
         _ensure_tags(db, data["tags"])
-    for k, v in data.items():
-        setattr(q, k, v)
+    # 白名单写入：不依赖 Pydantic schema 的字段列表兜底。
+    # 否则日后给 QuestionUpdate 增加任何字段（例如 id/bank_id 之类）都会
+    # 直接变成客户端可写，且改动发生在另一层、评审时不易察觉。
+    for key, value in data.items():
+        if key not in QUESTION_UPDATABLE_FIELDS:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, f"不允许修改字段: {key}")
+        setattr(q, key, value)
     db.commit()
     db.refresh(q)
     return q

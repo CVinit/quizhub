@@ -55,7 +55,10 @@ def _mk_exam(creator_id: int, name: str, status: str) -> ExamDefinition:
 def test_bank_list_status_filter():
     init_db()
     with db_session() as db:
-        b1, b2 = QuestionBank(name="开放库", practice_enabled=True), QuestionBank(name="仅考试库", practice_enabled=False)
+        b1, b2 = (
+            QuestionBank(name="开放库", practice_enabled=True),
+            QuestionBank(name="仅考试库", practice_enabled=False),
+        )
         db.add_all([b1, b2])
         db.commit()
 
@@ -131,16 +134,31 @@ def test_exam_results_outcome_filter():
         db.add_all(
             [
                 ExamResult(
-                    exam_definition_id=exam.id, user_id=student.id, score=90, total_score=100,
-                    passed=True, published=True, need_review=False,
+                    exam_definition_id=exam.id,
+                    user_id=student.id,
+                    score=90,
+                    total_score=100,
+                    passed=True,
+                    published=True,
+                    need_review=False,
                 ),
                 ExamResult(
-                    exam_definition_id=exam.id, user_id=student.id, score=30, total_score=100,
-                    passed=False, published=True, need_review=False,
+                    exam_definition_id=exam.id,
+                    user_id=student.id,
+                    score=30,
+                    total_score=100,
+                    passed=False,
+                    published=True,
+                    need_review=False,
                 ),
                 ExamResult(
-                    exam_definition_id=exam.id, user_id=student.id, score=0, total_score=100,
-                    passed=False, published=False, need_review=True,
+                    exam_definition_id=exam.id,
+                    user_id=student.id,
+                    score=0,
+                    total_score=100,
+                    passed=False,
+                    published=False,
+                    need_review=True,
                 ),
             ]
         )
@@ -181,8 +199,15 @@ def test_review_list_verdict_filter():
         db.add(bank)
         db.flush()
         q = Question(
-            bank_id=bank.id, type="简答题", question="简答", options=None, answer="参考答案",
-            analysis="", difficulty=1, tags=[], score=2,
+            bank_id=bank.id,
+            type="简答题",
+            question="简答",
+            options=None,
+            answer="参考答案",
+            analysis="",
+            difficulty=1,
+            tags=[],
+            score=2,
         )
         db.add(q)
         db.flush()
@@ -190,8 +215,13 @@ def test_review_list_verdict_filter():
         db.add(exam)
         db.flush()
         result = ExamResult(
-            exam_definition_id=exam.id, user_id=student.id, score=0, total_score=100,
-            passed=False, published=False, need_review=True,
+            exam_definition_id=exam.id,
+            user_id=student.id,
+            score=0,
+            total_score=100,
+            passed=False,
+            published=False,
+            need_review=True,
         )
         db.add(result)
         db.flush()
@@ -224,8 +254,15 @@ def test_review_still_rejects_double_review():
         db.add(bank)
         db.flush()
         q = Question(
-            bank_id=bank.id, type="简答题", question="简答", options=None, answer="参考",
-            analysis="", difficulty=1, tags=[], score=2,
+            bank_id=bank.id,
+            type="简答题",
+            question="简答",
+            options=None,
+            answer="参考",
+            analysis="",
+            difficulty=1,
+            tags=[],
+            score=2,
         )
         db.add(q)
         db.flush()
@@ -233,8 +270,13 @@ def test_review_still_rejects_double_review():
         db.add(exam)
         db.flush()
         result = ExamResult(
-            exam_definition_id=exam.id, user_id=student.id, score=0, total_score=100,
-            passed=False, published=False, need_review=True,
+            exam_definition_id=exam.id,
+            user_id=student.id,
+            score=0,
+            total_score=100,
+            passed=False,
+            published=False,
+            need_review=True,
         )
         db.add(result)
         db.flush()
@@ -260,8 +302,15 @@ def test_review_list_verdict_unknown_value_returns_empty():
         db.add(bank)
         db.flush()
         q = Question(
-            bank_id=bank.id, type="简答题", question="简答", options=None, answer="参考",
-            analysis="", difficulty=1, tags=[], score=2,
+            bank_id=bank.id,
+            type="简答题",
+            question="简答",
+            options=None,
+            answer="参考",
+            analysis="",
+            difficulty=1,
+            tags=[],
+            score=2,
         )
         db.add(q)
         db.flush()
@@ -269,8 +318,13 @@ def test_review_list_verdict_unknown_value_returns_empty():
         db.add(exam)
         db.flush()
         result = ExamResult(
-            exam_definition_id=exam.id, user_id=student.id, score=0, total_score=100,
-            passed=False, published=False, need_review=True,
+            exam_definition_id=exam.id,
+            user_id=student.id,
+            score=0,
+            total_score=100,
+            passed=False,
+            published=False,
+            need_review=True,
         )
         db.add(result)
         db.flush()

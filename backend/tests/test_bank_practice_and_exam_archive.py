@@ -395,9 +395,18 @@ def test_bank_delete_blocked_when_questions_used_by_exam():
         db.add(q)
         db.flush()
         e = ExamDefinition(
-            name="引用考试", type="formal", rules={}, group_ids=None, duration_min=60,
-            pass_score=60, max_attempts=0, show_score_immediately=True, show_analysis=False,
-            need_review=False, status="draft", created_by=creator.id,
+            name="引用考试",
+            type="formal",
+            rules={},
+            group_ids=None,
+            duration_min=60,
+            pass_score=60,
+            max_attempts=0,
+            show_score_immediately=True,
+            show_analysis=False,
+            need_review=False,
+            status="draft",
+            created_by=creator.id,
         )
         db.add(e)
         db.flush()
@@ -420,16 +429,30 @@ def test_archive_exam_hides_from_users_but_keeps_records():
         db.add_all([admin, stu])
         db.flush()
         e = ExamDefinition(
-            name="测试考试", type="formal", rules={}, group_ids=None, duration_min=60,
-            pass_score=60, max_attempts=0, show_score_immediately=True, show_analysis=False,
-            need_review=False, status="published", created_by=admin.id,
+            name="测试考试",
+            type="formal",
+            rules={},
+            group_ids=None,
+            duration_min=60,
+            pass_score=60,
+            max_attempts=0,
+            show_score_immediately=True,
+            show_analysis=False,
+            need_review=False,
+            status="published",
+            created_by=admin.id,
         )
         db.add(e)
         db.flush()
         db.add(
             ExamSession(
-                exam_definition_id=e.id, user_id=stu.id, answers={}, version=1,
-                started_at="2026-01-01T00:00:00", status="submitted", submitted_at="2026-01-01T01:00:00",
+                exam_definition_id=e.id,
+                user_id=stu.id,
+                answers={},
+                version=1,
+                started_at="2026-01-01T00:00:00",
+                status="submitted",
+                submitted_at="2026-01-01T01:00:00",
             )
         )
         db.commit()
@@ -458,9 +481,18 @@ def test_unarchive_restores_visibility():
         db.add_all([admin, stu])
         db.flush()
         e = ExamDefinition(
-            name="归档考试", type="formal", rules={}, group_ids=None, duration_min=60,
-            pass_score=60, max_attempts=0, show_score_immediately=True, show_analysis=False,
-            need_review=False, status="archived", created_by=admin.id,
+            name="归档考试",
+            type="formal",
+            rules={},
+            group_ids=None,
+            duration_min=60,
+            pass_score=60,
+            max_attempts=0,
+            show_score_immediately=True,
+            show_analysis=False,
+            need_review=False,
+            status="archived",
+            created_by=admin.id,
         )
         db.add(e)
         db.commit()
@@ -478,9 +510,18 @@ def test_published_exam_without_sessions_can_be_deleted():
         db.add(admin)
         db.flush()
         e = ExamDefinition(
-            name="无人作答", type="formal", rules={}, group_ids=None, duration_min=60,
-            pass_score=60, max_attempts=0, show_score_immediately=True, show_analysis=False,
-            need_review=False, status="published", created_by=admin.id,
+            name="无人作答",
+            type="formal",
+            rules={},
+            group_ids=None,
+            duration_min=60,
+            pass_score=60,
+            max_attempts=0,
+            show_score_immediately=True,
+            show_analysis=False,
+            need_review=False,
+            status="published",
+            created_by=admin.id,
         )
         db.add(e)
         db.commit()
@@ -506,9 +547,18 @@ def test_dept_admin_cannot_archive_foreign_exam():
         db.add(admin)
         db.flush()
         e = ExamDefinition(
-            name="市场部考试", type="formal", rules={}, group_ids=[mk.id], duration_min=60,
-            pass_score=60, max_attempts=0, show_score_immediately=True, show_analysis=False,
-            need_review=False, status="published", created_by=admin.id,
+            name="市场部考试",
+            type="formal",
+            rules={},
+            group_ids=[mk.id],
+            duration_min=60,
+            pass_score=60,
+            max_attempts=0,
+            show_score_immediately=True,
+            show_analysis=False,
+            need_review=False,
+            status="published",
+            created_by=admin.id,
         )
         db.add(e)
         db.commit()

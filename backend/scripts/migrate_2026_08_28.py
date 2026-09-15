@@ -138,9 +138,7 @@ def migrate_legacy_plain_settings(conn: sqlite3.Connection) -> None:
     一律清空其值并置 encrypted=0：(key, value, encrypted) -> (key, '', 0)。
     密码等敏感项被清空后需管理员重新填写，这是安全的默认行为。
     """
-    rows = conn.execute(
-        "SELECT key, value FROM settings WHERE value LIKE 'plain:%'"
-    ).fetchall()
+    rows = conn.execute("SELECT key, value FROM settings WHERE value LIKE 'plain:%'").fetchall()
     if not rows:
         logger.info("[migrate] 未发现遗留 plain: 敏感设置，跳过")
         return

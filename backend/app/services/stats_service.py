@@ -8,7 +8,8 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+import logging
+from datetime import datetime, timedelta, timezone, tzinfo
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -22,10 +23,13 @@ from app.models.record import ExamResult, PracticeRecord, QuestionState
 from app.models.stats import StatsUserDaily
 from app.models.user import User
 
+logger = logging.getLogger("quizhub")
+
 # 业务时区：决定"今日"的日期归属边界。未知时区名回退 UTC，避免启动即崩溃。
 try:
-    _TZ = ZoneInfo(BUSINESS_TZ)
+    _TZ: tzinfo = ZoneInfo(BUSINESS_TZ)
 except Exception:  # noqa: BLE001  时区库缺失或名称非法时降级
+    logger.warning("[stats] 无法加载时区 %s，已回退 UTC", BUSINESS_TZ)
     _TZ = timezone.utc
 
 
@@ -152,9 +156,7 @@ def user_panel(db: Session, user: User) -> dict:
     from app.services.practice_service import enabled_bank_ids
 
     enabled = enabled_bank_ids(db)
-    total_q = (
-        db.execute(select(func.count(Question.id)).where(Question.bank_id.in_(enabled))).scalar() or 0
-    )
+    total_q = db.execute(select(func.count(Question.id)).where(Question.bank_id.in_(enabled))).scalar() or 0
     # 用 SQL 聚合替代全量载入 QuestionState 后 Python 计数。
     # JOIN Question 并限定同一批开放题库：QuestionState 无 bank_id，
     # 不过滤会让 practiced/wrong/marked 把已关闭题库的题算进来，
@@ -409,12 +411,20 @@ def rank(db: Session, dimension: str, scope: str, range_: str, current_user_id: 
 
 
 def _streak(db: Session, user_id: int, since: str) -> int:
-    """连续答题天数（从今日往前数）。今日未答但昨日已答，也算昨日起的连胜。"""
+    """连续答题天数（从今日往前数）。今日未答但昨日已答，也算昨日起的连胜。
+
+    since 用于限定回看范围：连胜不可能早于查询窗口起点，
+    因此只取窗口内记录，避免全量扫描用户历史（大表上是 O(用户数 × 历史长度)）。
+    """
     dates = [
         r[0]
         for r in db.execute(
             select(StatsUserDaily.date)
-            .where(StatsUserDaily.user_id == user_id, StatsUserDaily.answer_count > 0)
+            .where(
+                StatsUserDaily.user_id == user_id,
+                StatsUserDaily.answer_count > 0,
+                StatsUserDaily.date >= since,
+            )
             .order_by(StatsUserDaily.date.desc())
         ).all()
     ]

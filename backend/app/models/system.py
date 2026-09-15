@@ -37,9 +37,7 @@ class Draft(PKMixin):
     __tablename__ = "drafts"
     __table_args__ = (UniqueConstraint("user_id", "form_key", name="uq_user_draft"),)
 
-    user_id: Mapped[int] = mapped_column(
-        Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False
-    )
+    user_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
     form_key: Mapped[str] = mapped_column(String, nullable=False)
     payload: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
     updated_at: Mapped[str] = mapped_column(String, nullable=False)
