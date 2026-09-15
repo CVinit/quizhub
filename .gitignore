@@ -27,6 +27,9 @@ dist-ssr/
 # Vite / 构建缓存
 .vite/
 .vite-cache/
+# unplugin 自动生成的类型声明（由 vite.config.ts 的 AutoImport/Components 插件产出）
+frontend/auto-imports.d.ts
+frontend/components.d.ts
 # 编辑器
 .vscode/*
 !.vscode/extensions.json
@@ -72,6 +75,12 @@ desktop.ini
 # 仓库内 compose 部署时生成的运行时数据（docker-compose.yml 卷挂载 ./data）
 /data/
 
-# ===== 顶层非项目资料（与代码无关的复习文档）=====
+# ===== 顶层非项目资料（与代码无关的复习文档 / 题库源文件）=====
 /基础班知识总结与复习资料.docx
 /基础班知识总结与复习资料.xlsx
+/kaoshitemplate.xlsx
+/kaoshitemplate_导入模板.xlsx
+
+# ===== 临时产物 =====
+# GUI 回归测试截图（本地验证用，体积大且非交付物）
+/gui-test-screenshots/

@@ -56,13 +56,9 @@ const modeList = ref([
   { key: 'mark', title: '我的标记', desc: '查看标记的题目', icon: Collection, count: undefined as number | undefined },
 ])
 
-// 全部题库的总题量（范围选择器"全部题库(N 题)"标签用）
-const totalCount = computed(() => {
-  if (selectedBank.value == null) {
-    return counts.value.total
-  }
-  return counts.value.total
-})
+// 全部题库的总题量（范围选择器"全部题库(N 题)"标签用，不随单个题库范围变化）
+const allTotal = ref(0)
+const totalCount = computed(() => allTotal.value)
 
 const load = async () => {
   loading.value = true
@@ -72,6 +68,7 @@ const load = async () => {
     counts.value = { total: d.total, practiced: d.practiced, wrong: d.wrong, marked: d.marked }
     typeDist.value = d.type_dist
     banks.value = d.banks || []
+    if (selectedBank.value == null) allTotal.value = d.total
     modeList.value[0].count = d.total
     modeList.value[1].count = d.total
     modeList.value[2].count = d.total

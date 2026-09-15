@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Literal
+
 from fastapi import APIRouter, BackgroundTasks, Depends, Query, status
 from sqlalchemy.orm import Session
 
@@ -78,10 +80,22 @@ def create_template(payload: PaperTemplateIn, db: Session = Depends(get_db), use
     return res
 
 
+@router.delete("/admin/exam-templates/{template_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_template(template_id: int, db: Session = Depends(get_db), user: User = Depends(require_super)):
+    exam_service.delete_template(db, template_id)
+    audit_log(db, user.id, "exam_template.delete", "paper_template", template_id, None)
+    return None
+
+
 # ---------- 管理端：正式考试 ----------
 @router.get("/admin/exams")
-def list_exams(db: Session = Depends(get_db), user: User = Depends(require_admin)):
-    return exam_service.list_exams(db, dept_scope_ids(db, user))
+def list_exams(
+    status_filter: str | None = Query(None, alias="status"),
+    db: Session = Depends(get_db),
+    user: User = Depends(require_admin),
+):
+    """考试列表。status 省略时返回全部状态（含已归档）。"""
+    return exam_service.list_exams(db, dept_scope_ids(db, user), status_filter)
 
 
 @router.post("/admin/exams", status_code=status.HTTP_201_CREATED)
@@ -97,6 +111,30 @@ def update_exam(
 ):
     res = exam_service.update_exam(db, exam_id, payload.model_dump(exclude_unset=True), dept_scope_ids(db, user))
     audit_log(db, user.id, "exam.update", "exam", exam_id, payload.model_dump(exclude_unset=True))
+    return res
+
+
+@router.delete("/admin/exams/{exam_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_exam(exam_id: int, db: Session = Depends(get_db), user: User = Depends(require_admin)):
+    """删除考试（需无作答记录；有记录请改用归档）。"""
+    exam_service.delete_exam(db, exam_id, dept_scope_ids(db, user))
+    audit_log(db, user.id, "exam.delete", "exam", exam_id, None)
+    return None
+
+
+@router.post("/admin/exams/{exam_id}/archive")
+def archive_exam(exam_id: int, db: Session = Depends(get_db), user: User = Depends(require_admin)):
+    """归档考试：对用户隐藏，保留定义与成绩（用于已有作答记录的测试考试）。"""
+    res = exam_service.archive_exam(db, exam_id, dept_scope_ids(db, user))
+    audit_log(db, user.id, "exam.archive", "exam", exam_id, None)
+    return res
+
+
+@router.post("/admin/exams/{exam_id}/unarchive")
+def unarchive_exam(exam_id: int, db: Session = Depends(get_db), user: User = Depends(require_admin)):
+    """取消归档：恢复为已发布。"""
+    res = exam_service.unarchive_exam(db, exam_id, dept_scope_ids(db, user))
+    audit_log(db, user.id, "exam.unarchive", "exam", exam_id, None)
     return res
 
 
@@ -116,10 +154,12 @@ def publish_exam(
 def list_results(
     exam_id: int | None = None,
     limit: int = Query(500, ge=1, le=1000),
+    outcome: Literal["passed", "failed", "pending", "published"] | None = Query(None),
     db: Session = Depends(get_db),
     user: User = Depends(require_admin),
 ):
-    return exam_service.list_results(db, exam_id, dept_scope_ids(db, user), limit)
+    """成绩列表。outcome 省略时返回全部（及格/不及格/待复核/已公布）。"""
+    return exam_service.list_results(db, exam_id, dept_scope_ids(db, user), limit, outcome)
 
 
 # ---------- 管理端：模拟考试设置（全局配置，仅超级管理员）----------
@@ -137,10 +177,12 @@ def save_mock_config(payload: MockConfigIn, db: Session = Depends(get_db), _user
 @router.get("/admin/review/pending")
 def list_pending_reviews(
     limit: int = Query(500, ge=1, le=1000),
+    verdict: Literal["pending", "done", "pass", "fail", "partial"] | None = Query(None),
     db: Session = Depends(get_db),
     user: User = Depends(require_admin),
 ):
-    return review_service.list_pending(db, dept_scope_ids(db, user), limit)
+    """简答复核列表。verdict 省略时默认只看待复核。"""
+    return review_service.list_pending(db, dept_scope_ids(db, user), limit, verdict)
 
 
 @router.post("/admin/review/{review_id}")

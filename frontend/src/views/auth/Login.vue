@@ -5,10 +5,10 @@
       <h2 class="title">登录 {{ site.site_name }}</h2>
       <el-form ref="formRef" :model="form" :rules="rules" label-position="top" @submit.prevent="onSubmit">
         <el-form-item label="邮箱" prop="email">
-          <el-input v-model="form.email" placeholder="请输入邮箱" />
+          <el-input v-model="form.email" placeholder="请输入邮箱" autocomplete="email" />
         </el-form-item>
         <el-form-item label="密码" prop="password">
-          <el-input v-model="form.password" type="password" show-password placeholder="请输入密码" />
+          <el-input v-model="form.password" type="password" show-password placeholder="请输入密码" autocomplete="current-password" />
         </el-form-item>
         <el-button type="primary" :loading="loading" style="width: 100%" @click="onSubmit">登录</el-button>
         <div class="links">

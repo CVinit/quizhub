@@ -22,7 +22,7 @@
           <el-button text @click="$router.push('/admin')" class="admin-link">管理后台</el-button>
         </template>
         <el-dropdown @command="onCmd">
-          <span class="user-name">{{ auth.user?.name || auth.user?.email }} ▾</span>
+          <span class="user-name">{{ auth.user?.name || auth.user?.email }}<el-icon class="caret"><ArrowDown /></el-icon></span>
           <template #dropdown>
             <el-dropdown-menu>
               <el-dropdown-item command="profile">个人信息</el-dropdown-item>
@@ -73,7 +73,7 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { Menu, HomeFilled, Document, Files, Warning, User } from '@element-plus/icons-vue'
+import { Menu, HomeFilled, Document, Files, Warning, User, ArrowDown } from '@element-plus/icons-vue'
 import { useAuthStore } from '@/stores/auth'
 import { useSiteStore } from '@/stores/site'
 import LogoMark from '@/components/LogoMark.vue'
@@ -120,7 +120,8 @@ const onCmd = (cmd: string) => {
 /* 激活菜单项：红字 + 底部红条（随主题色生效） */
 .header :deep(.el-menu--horizontal > .el-menu-item.is-active) { border-bottom-color: var(--brand-primary); color: var(--brand-primary); }
 .user { display: flex; align-items: center; gap: 12px; flex-shrink: 0; }
-.user-name { cursor: pointer; color: #606266; }
+.user-name { cursor: pointer; color: #606266; display: inline-flex; align-items: center; }
+.user-name .caret { margin-left: 3px; font-size: 12px; color: #909399; }
 .menu-trigger { display: none; }
 .main { padding: 24px; max-width: 1200px; margin: 0 auto; width: 100%; flex: 1; }
 .footer {
@@ -128,11 +129,13 @@ const onCmd = (cmd: string) => {
   color: #909399; font-size: 12px;
   border-top: 1px solid #e6e8eb; background: #fff;
 }
-/* 底部导航栏：仅手机端显示 */
+/* 底部导航栏：仅手机端显示（适配 iPhone 底部安全区） */
 .bottom-nav {
   display: none;
   position: fixed; bottom: 0; left: 0; right: 0;
-  height: 56px; background: #fff; border-top: 1px solid #e6e8eb;
+  height: 56px;
+  padding-bottom: env(safe-area-inset-bottom);
+  background: #fff; border-top: 1px solid #e6e8eb;
   z-index: 20;
   justify-content: space-around; align-items: center;
 }
@@ -140,15 +143,15 @@ const onCmd = (cmd: string) => {
 .bn-item.active { color: var(--brand-primary); }
 .bn-icon { font-size: 20px; }
 .bn-label { font-size: 11px; }
-/* 手机端：隐藏水平菜单，显示底部导航 */
+/* 手机端：隐藏水平菜单，显示底部导航；页脚信息折叠成一条薄边（内容与顶栏重复，省出屏内空间） */
 @media (max-width: 767px) {
   .header { padding: 0 12px; gap: 12px; }
   .site-name { font-size: 16px; }
   .desktop-menu { display: none; }
   .admin-link { display: none; }
   .user-name { max-width: 110px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .main { padding: 12px 12px 72px; } /* 底部留出导航栏高度 */
-  .footer { padding: 12px; }
+  .main { padding: 12px 12px 76px; } /* 底部留出导航栏高度（含安全区） */
+  .footer { display: none; }
   .bottom-nav { display: flex; }
 }
 </style>

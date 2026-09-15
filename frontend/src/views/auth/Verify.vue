@@ -4,11 +4,11 @@
       <h2 class="title">邮箱验证</h2>
       <el-form ref="formRef" :model="form" :rules="rules" label-position="top" @submit.prevent="onSubmit">
         <el-form-item label="邮箱" prop="email">
-          <el-input v-model="form.email" placeholder="请输入邮箱" />
+          <el-input v-model="form.email" placeholder="请输入邮箱" autocomplete="email" />
         </el-form-item>
         <el-form-item label="验证码" prop="code">
           <div class="code-row">
-            <el-input v-model="form.code" placeholder="6 位验证码" />
+            <el-input v-model="form.code" placeholder="6 位验证码" autocomplete="one-time-code" />
             <el-button :loading="resending" :disabled="cd > 0" @click="onResend">
               {{ cd > 0 ? `${cd}s` : '重新发送' }}
             </el-button>

@@ -3,14 +3,17 @@
 from __future__ import annotations
 
 from fastapi import HTTPException, status
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from app.models.exam import ExamQuestion
 from app.models.group import Group
 from app.models.question import Question, QuestionBank, QuestionTag
+from app.models.record import PracticeRecord, QuestionState
 from app.schemas.question import (
     QuestionBankCreate,
+    QuestionBankUpdate,
     QuestionCreate,
     QuestionUpdate,
 )
@@ -67,13 +70,21 @@ def _validate_answer_shape(qtype: str, answer: object) -> None:
 
 
 # ---------- 题库来源 ----------
-def list_banks(db: Session, scope: set[int] | None = None) -> list[dict]:
-    """返回全部题库，并附带各题库题目数（一次 GROUP BY 聚合，避免逐套 COUNT）。"""
+def list_banks(
+    db: Session, scope: set[int] | None = None, practice_enabled: bool | None = None
+) -> list[dict]:
+    """返回题库，并附带各题库题目数（一次 GROUP BY 聚合，避免逐套 COUNT）。
+
+    practice_enabled 为 None 时返回全部题库（管理端默认：需看到并管理已关闭的题库）；
+    显式传 True/False 时按「开放练习 / 仅考试使用」筛选。
+    """
     from sqlalchemy import func
 
     stmt = select(QuestionBank)
     if scope is not None:
         stmt = stmt.where(QuestionBank.group_id.in_(scope))
+    if practice_enabled is not None:
+        stmt = stmt.where(QuestionBank.practice_enabled.is_(practice_enabled))
     rows = db.execute(stmt.order_by(QuestionBank.id.desc())).scalars().all()
     if not rows:
         return []
@@ -84,16 +95,66 @@ def list_banks(db: Session, scope: set[int] | None = None) -> list[dict]:
         .group_by(Question.bank_id)
     ).all()
     cnt_map = {r[0]: r[1] for r in cnt_rows}
-    return [{"id": b.id, "name": b.name, "group_id": b.group_id, "question_count": cnt_map.get(b.id, 0)} for b in rows]
+    return [
+        {
+            "id": b.id,
+            "name": b.name,
+            "group_id": b.group_id,
+            "question_count": cnt_map.get(b.id, 0),
+            "practice_enabled": bool(b.practice_enabled),
+        }
+        for b in rows
+    ]
 
 
 def create_bank(db: Session, payload: QuestionBankCreate, scope: set[int] | None = None) -> QuestionBank:
     _validate_group(db, payload.group_id, scope)
-    b = QuestionBank(name=payload.name, group_id=payload.group_id)
+    b = QuestionBank(name=payload.name, group_id=payload.group_id, practice_enabled=payload.practice_enabled)
     db.add(b)
     db.commit()
     db.refresh(b)
     return b
+
+
+def update_bank(db: Session, bank_id: int, payload: QuestionBankUpdate, scope: set[int] | None = None) -> QuestionBank:
+    """更新题库（改名 / 练习开关）。练习开关只影响后续练习入口，历史记录保留。"""
+    b = _get_allowed_bank(db, bank_id, scope)
+    if b is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "题库不存在")
+    if payload.name is not None:
+        b.name = payload.name
+    if payload.practice_enabled is not None:
+        b.practice_enabled = payload.practice_enabled
+    db.commit()
+    db.refresh(b)
+    return b
+
+
+def delete_bank(db: Session, bank_id: int, scope: set[int] | None = None) -> None:
+    """删除题库及其题目。
+
+    若其中任一题目已被考试引用（exam_questions），拒绝删除以保持历史考试可追溯；
+    此时管理员可改用「关闭练习」。
+    """
+    b = _get_allowed_bank(db, bank_id, scope)
+    if b is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "题库不存在")
+    qids = [r[0] for r in db.execute(select(Question.id).where(Question.bank_id == bank_id)).all()]
+    if qids:
+        used = db.execute(
+            select(func.count()).select_from(ExamQuestion).where(ExamQuestion.question_id.in_(qids))
+        ).scalar_one()
+        if used:
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                f"该题库有 {used} 道题被考试引用，无法删除；可改为关闭练习",
+            )
+        # 先清理引用这些题目的练习状态，避免留下孤儿数据
+        db.execute(delete(PracticeRecord).where(PracticeRecord.question_id.in_(qids)))
+        db.execute(delete(QuestionState).where(QuestionState.question_id.in_(qids)))
+        db.execute(delete(Question).where(Question.id.in_(qids)))
+    db.delete(b)
+    db.commit()
 
 
 # ---------- 题目 CRUD ----------
@@ -208,3 +269,34 @@ def delete_question(db: Session, qid: int, scope: set[int] | None = None) -> Non
     _validate_group(db, q.group_id, scope)
     db.delete(q)
     db.commit()
+
+
+def type_stats(
+    db: Session,
+    bank_ids: list[int] | None = None,
+    group_ids: list[int] | None = None,
+    tags: list[str] | None = None,
+    scope: set[int] | None = None,
+) -> dict:
+    """按组卷来源条件统计各题型可用题量（与 paper_service 的候选筛选口径一致）。
+
+    用于题型配比编辑时提示“每个题型还剩多少题可选”，配额超过可用量时前端可即时预警。
+    """
+    stmt = select(Question.id, Question.type, Question.tags)
+    if scope is not None:
+        stmt = stmt.where(Question.group_id.in_(scope))
+    if bank_ids:
+        stmt = stmt.where(Question.bank_id.in_(bank_ids))
+    if group_ids:
+        stmt = stmt.where(Question.group_id.in_(group_ids))
+    if tags:
+        stmt = stmt.where(Question.tags.contains(tags))  # JSON 包含，近似
+    rows = db.execute(stmt).all()
+    # tags 用 Python 端精确过滤兜底（SQLite JSON 查询能力有限），与组卷逻辑保持一致
+    if tags:
+        rows = [r for r in rows if r[2] and any(t in r[2] for t in tags)]
+    counts = {t: 0 for t in QUESTION_TYPES}
+    for r in rows:
+        if r[1] in counts:
+            counts[r[1]] += 1
+    return counts

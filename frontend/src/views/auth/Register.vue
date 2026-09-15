@@ -5,10 +5,10 @@
       <h2 class="title">注册账号</h2>
       <el-form ref="formRef" :model="form" :rules="rules" label-position="top" @submit.prevent="onSubmit">
         <el-form-item label="邮箱" prop="email">
-          <el-input v-model="form.email" placeholder="请输入企业/机构邮箱" />
+          <el-input v-model="form.email" placeholder="请输入企业/机构邮箱" autocomplete="email" />
         </el-form-item>
         <el-form-item label="姓名" prop="name">
-          <el-input v-model="form.name" placeholder="选填，默认取邮箱前缀" />
+          <el-input v-model="form.name" placeholder="选填，默认取邮箱前缀" autocomplete="name" />
         </el-form-item>
         <el-form-item label="所属分组" prop="group_ids">
           <el-tree-select
@@ -26,14 +26,14 @@
         </el-form-item>
         <el-form-item label="邮箱验证码" prop="code">
           <div class="code-row">
-            <el-input v-model="form.code" placeholder="6 位验证码" maxlength="10" />
+            <el-input v-model="form.code" placeholder="6 位验证码" maxlength="10" autocomplete="one-time-code" />
             <el-button :loading="sending" :disabled="cd > 0 || !captchaOk" @click="onSendCode">
               {{ cd > 0 ? `${cd}s` : '发送验证码' }}
             </el-button>
           </div>
         </el-form-item>
         <el-form-item label="密码" prop="password">
-          <el-input v-model="form.password" type="password" show-password placeholder="至少 6 位" />
+          <el-input v-model="form.password" type="password" show-password placeholder="至少 6 位" autocomplete="new-password" />
         </el-form-item>
         <el-button type="primary" :loading="loading" style="width: 100%" @click="onSubmit">注册</el-button>
         <div class="links"><router-link to="/login">已有账号？去登录</router-link></div>

@@ -3,11 +3,14 @@
     <div class="toolbar">
       <span class="title">题目列表</span>
       <div class="filters">
-        <el-input v-model="filters.keyword" placeholder="题干关键词" clearable style="width: 160px" @keyup.enter="load" />
-        <el-select v-model="filters.type" placeholder="题型" clearable style="width: 120px" @change="load">
+        <el-input v-model="filters.keyword" placeholder="题干关键词" clearable style="width: 160px" @keyup.enter="onFilterChange" />
+        <el-select v-model="filters.bank_id" placeholder="题库" clearable filterable style="width: 220px" @change="onFilterChange">
+          <el-option v-for="b in banks" :key="b.id" :label="bankLabel(b)" :value="b.id" />
+        </el-select>
+        <el-select v-model="filters.type" placeholder="题型" clearable style="width: 120px" @change="onFilterChange">
           <el-option v-for="t in types" :key="t" :label="t" :value="t" />
         </el-select>
-        <el-select v-model="filters.difficulty" placeholder="难度" clearable style="width: 100px" @change="load">
+        <el-select v-model="filters.difficulty" placeholder="难度" clearable style="width: 100px" @change="onFilterChange">
           <el-option label="易" :value="1" />
           <el-option label="中" :value="2" />
           <el-option label="难" :value="3" />
@@ -150,11 +153,13 @@
 
 <script setup lang="ts">
 import { onMounted, reactive, ref } from 'vue'
+import { useRoute } from 'vue-router'
 import { ElMessage, ElMessageBox, type FormInstance } from 'element-plus'
 import { questionApi, uploadApi, type QuestionBank, type QuestionItem } from '@/api/question'
 import { groupApi, type GroupNode } from '@/api/group'
 import { useResponsive } from '@/composables/useResponsive'
 
+const route = useRoute()
 const { isMobile } = useResponsive()
 
 const types = ['单选题', '多选题', '判断题', '填空题', '简答题', '拖拽题']
@@ -163,7 +168,7 @@ const loading = ref(false)
 const page = ref(1)
 const pageSize = 20
 const total = ref(0)
-const filters = reactive({ keyword: '', type: '', difficulty: undefined as number | undefined })
+const filters = reactive({ keyword: '', type: '', bank_id: undefined as number | undefined, difficulty: undefined as number | undefined })
 const banks = ref<QuestionBank[]>([])
 const groupTree = ref<GroupNode[]>([])
 
@@ -186,6 +191,7 @@ const load = async () => {
   try {
     const params: Record<string, any> = { page: page.value, page_size: pageSize }
     if (filters.keyword) params.keyword = filters.keyword
+    if (filters.bank_id) params.bank_id = filters.bank_id
     if (filters.type) params.type = filters.type
     if (filters.difficulty) params.difficulty = filters.difficulty
     const data = await questionApi.list(params)
@@ -196,7 +202,19 @@ const load = async () => {
   }
 }
 
+/**
+ * 筛选条件变化：先回到第 1 页再查询。
+ * 否则在第 N 页切换题库/题型时，新结果集不足 N 页会显示空列表，看起来像“筛选无效”。
+ */
+const onFilterChange = () => {
+  page.value = 1
+  return load()
+}
+
 const diffLabel = (d: number) => ({ 1: '易', 2: '中', 3: '难' }[d] || '中')
+// 题库选项附带题量，便于筛选前判断该库规模（question_count 后端可能不返回）
+const bankLabel = (b: QuestionBank) =>
+  typeof b.question_count === 'number' ? `${b.name}（${b.question_count} 题）` : b.name
 
 const onAdd = () => {
   editingId.value = null
@@ -286,10 +304,21 @@ const onDelete = async (row: QuestionItem) => {
   await load()
 }
 
+// 题库/分组选项与首批数据并行加载：题库下拉必须在用户可操作前就绪，
+// 否则筛选框一度无可选项，表现为“无法按题库筛选”。
 onMounted(async () => {
-  await load()
-  banks.value = await questionApi.listBanks()
-  groupTree.value = await groupApi.tree()
+  // 支持从「题库管理」页带 ?bank=ID 跳转过来，直接按该题库筛选
+  const bankFromQuery = Number(route.query.bank)
+  if (Number.isFinite(bankFromQuery) && bankFromQuery > 0) {
+    filters.bank_id = bankFromQuery
+  }
+  const [banksRes, treeRes] = await Promise.all([
+    questionApi.listBanks(),
+    groupApi.tree(),
+    load(),
+  ])
+  banks.value = banksRes
+  groupTree.value = treeRes
 })
 </script>
 

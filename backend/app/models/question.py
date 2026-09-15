@@ -8,7 +8,7 @@ options：单选/多选/判断为 string[]；填空/简答为 []；拖拽用 lef
 
 from __future__ import annotations
 
-from sqlalchemy import Float, ForeignKey, Integer, String, Text
+from sqlalchemy import Boolean, Float, ForeignKey, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy.types import JSON
 
@@ -22,6 +22,9 @@ class QuestionBank(PKMixin, TimestampMixin):
 
     name: Mapped[str] = mapped_column(String, nullable=False)
     group_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("groups.id"), nullable=True, index=True)
+    # 是否允许用户练习该题库。默认开启；关闭后用户练习入口不再出现该题库，
+    # 且「全部题库」范围也会排除它。既有练习记录/错题本不受影响。
+    practice_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="1")
 
 
 class QuestionTag(PKMixin):

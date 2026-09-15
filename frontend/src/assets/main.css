@@ -36,10 +36,7 @@ a { text-decoration: none; }
   --el-button-active-border-color: var(--brand-primary-dark);
 }
 
-/* 主题色覆盖：Element Plus 主色由 CSS 变量驱动 */
-:root {
-  --el-color-primary: var(--brand-primary);
-}
+/* 主题色覆盖：Element Plus 主色由 CSS 变量驱动（与上方 :root 合并声明） */
 
 /* ========== 响应式断点：mobile <768 / tablet 768-1199 / desktop >=1200 ========== */
 
@@ -118,6 +115,24 @@ a { text-decoration: none; }
   .mobile-card-list .mc-label { color: #909399; flex-shrink: 0; }
   .mobile-card-list .mc-actions { margin-top: 10px; display: flex; gap: 8px; flex-wrap: wrap; }
   .mobile-card-list .mc-title { font-weight: 600; font-size: 14px; margin-bottom: 8px; word-break: break-all; }
+
+  /* 弹窗表单：固定 label 宽度（90~120px）在 320~390px 宽度下挤压输入区，改为上置标签 */
+  .el-dialog .el-form--label-right .el-form-item__label,
+  .el-dialog .el-form--label-left .el-form-item__label {
+    display: block; text-align: left; width: 100% !important; padding-bottom: 4px;
+  }
+  .el-dialog .el-form-item { display: block; }
+  .el-dialog .el-form-item__content { margin-left: 0 !important; }
+
+  /* 表单控件自适应弹窗宽度（弹窗本身已 92%），消除固定 px 溢出 */
+  .el-dialog .el-select,
+  .el-dialog .el-input-number,
+  .el-dialog .el-cascader,
+  .el-dialog .el-date-editor { width: 100% !important; }
+
+  /* 弹窗在窄屏下去掉两侧留白，footer 按钮全宽排列更易触控 */
+  .el-dialog { --el-dialog-padding-primary: 14px; }
+  .el-dialog .el-dialog__footer .el-button { min-width: 96px; }
 }
 
 /* 工具栏：手机端换行堆叠 */
@@ -125,4 +140,6 @@ a { text-decoration: none; }
   .toolbar { flex-wrap: wrap; gap: 8px; }
   .toolbar .filters { flex-wrap: wrap; gap: 8px; }
   .toolbar .title { width: 100%; }
+  /* 筛选控件两列自适应：消除固定 px 宽度导致的挤压/溢出，同时放大触控目标 */
+  .toolbar .filters > * { flex: 1 1 40%; min-width: 0; }
 }

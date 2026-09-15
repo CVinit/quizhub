@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field, FiniteFloat
+from pydantic import BaseModel, ConfigDict, Field, FiniteFloat, ValidationInfo, field_validator
 
 
 class ExamAnswerIn(BaseModel):
@@ -32,6 +32,13 @@ class ExamCreateIn(BaseModel):
 
 
 class ExamUpdateIn(BaseModel):
+    """考试更新入参（PATCH 语义：未传字段不修改）。
+
+    注意区分“未传”与“显式传 null”：`exclude_unset=True` 会跳过未传字段，但显式 null
+    会被 setattr 写入模型。duration_min / pass_score / max_attempts 在数据库中是 NOT NULL，
+    写入 null 会抛出 IntegrityError（500）。这里用 `_reject_explicit_null` 将其拦成 422。
+    """
+
     model_config = ConfigDict(extra="forbid")
     name: str | None = Field(None, min_length=1, max_length=200)
     rules: dict | None = None
@@ -46,6 +53,22 @@ class ExamUpdateIn(BaseModel):
     need_review: bool | None = None
     manual_questions: list[int] | None = None
     paper_template_id: int | None = None
+
+    @field_validator("duration_min", "pass_score", "max_attempts", mode="before")
+    @classmethod
+    def _reject_explicit_null(cls, v: Any, info: ValidationInfo) -> Any:
+        """这些字段对应 NOT NULL 列，拒绝显式 null，避免落库时 500。"""
+        if v is None:
+            raise ValueError(f"{info.field_name} 不能为 null；如需保持不变请不要提交该字段")
+        return v
+
+    @field_validator("rules", mode="before")
+    @classmethod
+    def _rules_must_be_object(cls, v: Any) -> Any:
+        """rules 必须是对象（组卷配置）；拒绝 null/数组等非对象值。"""
+        if v is None or not isinstance(v, dict):
+            raise ValueError("rules 必须是对象")
+        return v
 
 
 class PaperTemplateIn(BaseModel):

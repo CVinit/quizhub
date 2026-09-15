@@ -13,6 +13,14 @@ export interface ExamBrief {
   attempts: number
   max_attempts: number
   total_questions: number
+  // 以下字段仅管理端列表返回（供编辑弹窗回填），用户端 /exams/available 不含
+  rules?: { type_quota?: Record<string, number>; bank_ids?: number[]; group_ids?: number[]; tags?: string[] }
+  paper_template_id?: number | null
+  manual_questions?: number[] | null
+  group_ids?: number[]
+  need_review?: boolean
+  show_score_immediately?: boolean
+  show_analysis?: boolean
 }
 
 export interface ExamSession {
@@ -50,15 +58,26 @@ export const examApi = {
   listTemplates: () => api.get('/admin/exam-templates'),
   previewPaper: (config: any) => api.post('/admin/exam-templates/preview-paper', config),
   createTemplate: (data: any) => api.post('/admin/exam-templates', data),
-  listExams: () => api.get<ExamBrief[]>('/admin/exams'),
-  listResults: (exam_id?: number) => api.get('/admin/exam-results', { params: { exam_id } }),
+  deleteTemplate: (id: number) => api.delete(`/admin/exam-templates/${id}`),
+  // status 省略时返回全部状态（含已归档）
+  listExams: (status?: string) =>
+    api.get<ExamBrief[]>('/admin/exams', { params: status ? { status } : {} }),
+  // outcome: passed/failed/pending/published，省略为全部
+  listResults: (exam_id?: number, outcome?: string) =>
+    api.get('/admin/exam-results', { params: { exam_id, ...(outcome ? { outcome } : {}) } }),
   createExam: (data: any) => api.post('/admin/exams', data),
   updateExam: (id: number, data: any) => api.put(`/admin/exams/${id}`, data),
+  deleteExam: (id: number) => api.delete(`/admin/exams/${id}`),
+  // 归档：对用户隐藏但保留成绩（用于已有作答记录的测试考试）
+  archiveExam: (id: number) => api.post(`/admin/exams/${id}/archive`),
+  unarchiveExam: (id: number) => api.post(`/admin/exams/${id}/unarchive`),
   publishExam: (id: number) => api.post(`/admin/exams/${id}/publish`),
   getMockConfig: () => api.get('/admin/mock-config'),
   saveMockConfig: (config: any) => api.put('/admin/mock-config', { config }),
   // review
-  listPendingReviews: () => api.get('/admin/review/pending'),
+  // verdict 省略时默认只返回待复核；done=全部已复核
+  listPendingReviews: (verdict?: string) =>
+    api.get('/admin/review/pending', { params: verdict ? { verdict } : {} }),
   doReview: (id: number, verdict: string, partial_score?: number) =>
     api.post(`/admin/review/${id}`, { verdict, partial_score }),
   publishResults: (examId: number) => api.post(`/admin/exams/${examId}/publish-results`),

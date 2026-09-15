@@ -20,6 +20,16 @@ class QuestionBankCreate(BaseModel):
 
     name: str = Field(max_length=100)
     group_id: int | None = None
+    practice_enabled: bool = True
+
+
+class QuestionBankUpdate(BaseModel):
+    """题库更新：仅允许改名与练习开关（PATCH 语义，未传字段不变）。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str | None = Field(None, min_length=1, max_length=100)
+    practice_enabled: bool | None = None
 
 
 class QuestionOut(BaseModel):

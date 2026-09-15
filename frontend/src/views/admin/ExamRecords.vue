@@ -7,6 +7,13 @@
           <el-option v-for="e in exams" :key="e.id" :label="e.name" :value="e.id" />
         </el-select>
         <el-input v-model="filters.keyword" placeholder="考生邮箱/姓名" clearable style="width: 180px" @keyup.enter="load" />
+        <!-- 结果状态筛选：及格/不及格/待复核/已公布 -->
+        <el-select v-model="filters.outcome" placeholder="结果状态" clearable style="width: 140px" @change="load">
+          <el-option label="及格" value="passed" />
+          <el-option label="不及格" value="failed" />
+          <el-option label="待复核" value="pending" />
+          <el-option label="已公布" value="published" />
+        </el-select>
         <el-button type="primary" @click="load">查询</el-button>
       </div>
     </div>
@@ -61,7 +68,7 @@ const route = useRoute()
 const loading = ref(false)
 const exams = ref<any[]>([])
 const rows = ref<any[]>([])
-const filters = reactive({ examId: '' as any, keyword: '' })
+const filters = reactive({ examId: '' as any, keyword: '', outcome: '' })
 
 const filtered = computed(() => {
   if (!filters.keyword) return rows.value
@@ -73,7 +80,8 @@ const load = async () => {
   try {
     exams.value = await examApi.listExams()
     if (route.query.exam && !filters.examId) filters.examId = Number(route.query.exam)
-    rows.value = await examApi.listResults(filters.examId || undefined)
+    // outcome 状态筛选下推到后端；关键词仍在前端本地过滤
+    rows.value = await examApi.listResults(filters.examId || undefined, filters.outcome || undefined)
   } catch (e) {
     rows.value = []
   } finally {
@@ -87,4 +95,10 @@ onMounted(load)
 .toolbar { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; }
 .title { font-size: 18px; font-weight: 600; }
 .filters { display: flex; gap: 8px; }
+@media (max-width: 767px) {
+  .toolbar { flex-direction: column; align-items: stretch; gap: 12px; }
+  .filters { flex-wrap: wrap; }
+  .filters > * { flex: 1 1 40%; min-width: 0; }
+  .filters .el-button { flex: 1 1 40%; }
+}
 </style>

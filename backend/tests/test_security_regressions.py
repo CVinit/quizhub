@@ -13,7 +13,7 @@ from sqlalchemy.exc import IntegrityError
 
 from app.api import questions as questions_api
 from app.models.group import Group
-from app.models.question import Question
+from app.models.question import Question, QuestionBank
 from app.models.record import ExamSession, QuestionState
 from app.models.system import Setting
 from app.models.user import User
@@ -131,7 +131,13 @@ def test_short_eval_requires_an_existing_short_answer_record():
         user = _user("student@quizhub.test")
         db.add(user)
         db.flush()
+        # 题库开放练习：本题只验证「非简答题不能自评」，
+        # 需先通过练习题库校验，避免断言落到 403 而不是 400
+        bank = QuestionBank(name="回归题库", practice_enabled=True)
+        db.add(bank)
+        db.flush()
         question = Question(
+            bank_id=bank.id,
             type="单选题",
             question="客观题",
             options=["A", "B"],

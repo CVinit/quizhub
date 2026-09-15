@@ -5,6 +5,8 @@ export interface QuestionBank {
   name: string
   group_id: number | null
   question_count?: number
+  /** 是否开放给用户练习（题库管理开关） */
+  practice_enabled?: boolean
 }
 
 export interface QuestionItem {
@@ -24,14 +26,31 @@ export interface QuestionItem {
 }
 
 export const questionApi = {
-  listBanks: () => api.get<QuestionBank[]>('/admin/question-banks'),
+  // practice_enabled 省略时返回全部题库（其他管理页选题库用，需包含已关闭的）
+  listBanks: (practice_enabled?: boolean) =>
+    api.get<QuestionBank[]>('/admin/question-banks', {
+      params: practice_enabled === undefined ? {} : { practice_enabled },
+    }),
   createBank: (name: string, group_id?: number | null) =>
     api.post('/admin/question-banks', { name, group_id }),
+  // 更新题库：改名 / 练习开关（practice_enabled）
+  updateBank: (id: number, data: { name?: string; practice_enabled?: boolean }) =>
+    api.put(`/admin/question-banks/${id}`, data),
+  deleteBank: (id: number) => api.delete(`/admin/question-banks/${id}`),
   list: (params: Record<string, any>) =>
     api.get<{ total: number; page: number; page_size: number; items: QuestionItem[] }>('/admin/questions', { params }),
   create: (data: Partial<QuestionItem>) => api.post('/admin/questions', data),
   update: (id: number, data: Partial<QuestionItem>) => api.put(`/admin/questions/${id}`, data),
   remove: (id: number) => api.delete(`/admin/questions/${id}`),
+  // 按组卷来源条件统计各题型可用题量（供题型配比编辑提示）
+  typeStats: (sources: { bank_ids?: number[]; group_ids?: number[]; tags?: string[] }) =>
+    api.get<Record<string, number>>('/admin/question-type-stats', {
+      params: {
+        bank_ids: (sources.bank_ids || []).join(','),
+        group_ids: (sources.group_ids || []).join(','),
+        tags: (sources.tags || []).join(','),
+      },
+    }),
 }
 
 export const uploadApi = {

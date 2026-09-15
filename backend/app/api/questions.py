@@ -11,6 +11,7 @@ from app.database import get_db
 from app.models.user import User
 from app.schemas.question import (
     QuestionBankCreate,
+    QuestionBankUpdate,
     QuestionCreate,
     QuestionUpdate,
 )
@@ -24,8 +25,13 @@ router = APIRouter(prefix="/admin", tags=["questions"])
 
 # ---------- 题库来源 ----------
 @router.get("/question-banks")
-def list_banks(db: Session = Depends(get_db), user: User = Depends(require_admin)):
-    return question_service.list_banks(db, dept_scope_ids(db, user))
+def list_banks(
+    practice_enabled: bool | None = None,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_admin),
+):
+    """题库列表。practice_enabled 省略时返回全部（管理端需管理已关闭的题库）。"""
+    return question_service.list_banks(db, dept_scope_ids(db, user), practice_enabled)
 
 
 @router.post("/question-banks", status_code=status.HTTP_201_CREATED)
@@ -33,6 +39,34 @@ def create_bank(payload: QuestionBankCreate, db: Session = Depends(get_db), user
     b = question_service.create_bank(db, payload, dept_scope_ids(db, user))
     audit_log(db, user.id, "question_bank.create", "question_bank", b.id, {"name": b.name})
     return b
+
+
+@router.put("/question-banks/{bank_id}")
+def update_bank(
+    bank_id: int,
+    payload: QuestionBankUpdate,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_admin),
+):
+    """更新题库：改名 / 练习开关（practice_enabled）。"""
+    b = question_service.update_bank(db, bank_id, payload, dept_scope_ids(db, user))
+    audit_log(
+        db,
+        user.id,
+        "question_bank.update",
+        "question_bank",
+        bank_id,
+        payload.model_dump(exclude_unset=True),
+    )
+    return {"id": b.id, "name": b.name, "practice_enabled": bool(b.practice_enabled)}
+
+
+@router.delete("/question-banks/{bank_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_bank(bank_id: int, db: Session = Depends(get_db), user: User = Depends(require_admin)):
+    """删除题库及其题目；题目被考试引用时拒绝（409）。"""
+    question_service.delete_bank(db, bank_id, dept_scope_ids(db, user))
+    audit_log(db, user.id, "question_bank.delete", "question_bank", bank_id, None)
+    return None
 
 
 # ---------- 题目 CRUD ----------
@@ -60,6 +94,26 @@ def list_questions(
         dept_scope_ids(db, user),
     )
     return {"total": total, "page": page, "page_size": page_size, "items": rows}
+
+
+@router.get("/question-type-stats")
+def question_type_stats(
+    bank_ids: str = "",
+    group_ids: str = "",
+    tags: str = "",
+    db: Session = Depends(get_db),
+    user: User = Depends(require_admin),
+):
+    """各题型可用题量统计（组卷来源筛选），供题型配比编辑时提示可用余量。"""
+    split_ids = lambda s: [int(x) for x in s.split(",") if x.strip().isdigit()]  # noqa: E731
+    split_tags = lambda s: [x.strip() for x in s.split(",") if x.strip()]  # noqa: E731
+    return question_service.type_stats(
+        db,
+        split_ids(bank_ids),
+        split_ids(group_ids),
+        split_tags(tags),
+        dept_scope_ids(db, user),
+    )
 
 
 @router.post("/questions", status_code=status.HTTP_201_CREATED)

@@ -121,15 +121,27 @@ def startup_refresh(db: Session) -> None:
 
 # ---------- 用户面板 ----------
 def user_panel(db: Session, user: User) -> dict:
-    total_q = db.execute(select(func.count(Question.id))).scalar() or 0
-    # 用 SQL 聚合替代全量载入 QuestionState 后 Python 计数
+    # 总题数只统计「开放练习」的题库：与练习入口口径一致。
+    # 否则关闭某题库练习后，首页仍显示包含它的总数，用户进入练习却发现题量对不上。
+    from app.services.practice_service import enabled_bank_ids
+
+    enabled = enabled_bank_ids(db)
+    total_q = (
+        db.execute(select(func.count(Question.id)).where(Question.bank_id.in_(enabled))).scalar() or 0
+    )
+    # 用 SQL 聚合替代全量载入 QuestionState 后 Python 计数。
+    # JOIN Question 并限定同一批开放题库：QuestionState 无 bank_id，
+    # 不过滤会让 practiced/wrong/marked 把已关闭题库的题算进来，
+    # 与 total 口径不一致（首页出现「已练 8 / 总题数 4」这类矛盾数字）。
     row = db.execute(
         select(
             func.sum(func.iif(QuestionState.status != "unanswered", 1, 0)).label("practiced"),
             func.sum(func.iif(QuestionState.status.in_(("correct", "mastered")), 1, 0)).label("correct"),
             func.sum(func.iif(QuestionState.status == "wrong", 1, 0)).label("wrong"),
             func.sum(func.iif(QuestionState.marked == True, 1, 0)).label("marked"),  # noqa: E712
-        ).where(QuestionState.user_id == user.id)
+        )
+        .join(Question, Question.id == QuestionState.question_id)
+        .where(QuestionState.user_id == user.id, Question.bank_id.in_(enabled))
     ).one()
     practiced = int(row.practiced or 0)
     correct = int(row.correct or 0)

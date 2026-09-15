@@ -3,21 +3,23 @@
     <h2>排行榜</h2>
 
     <div class="toolbar">
-      <el-radio-group v-model="dimension" @change="load">
-        <el-radio-button label="accuracy">正确率</el-radio-button>
-        <el-radio-button label="count">答题数</el-radio-button>
-        <el-radio-button label="score">考试均分</el-radio-button>
-        <el-radio-button label="streak">连续天数</el-radio-button>
-      </el-radio-group>
+      <div class="toolbar-row">
+        <el-radio-group v-model="dimension" @change="load">
+          <el-radio-button value="accuracy">正确率</el-radio-button>
+          <el-radio-button value="count">答题数</el-radio-button>
+          <el-radio-button value="score">考试均分</el-radio-button>
+          <el-radio-button value="streak">连续天数</el-radio-button>
+        </el-radio-group>
+        <el-select v-model="range" style="width: 120px" @change="load">
+          <el-option label="近 7 天" value="7d" />
+          <el-option label="近 30 天" value="30d" />
+          <el-option label="全部" value="all" />
+        </el-select>
+      </div>
       <el-radio-group v-model="scope" @change="load">
-        <el-radio-button label="self">个人</el-radio-button>
-        <el-radio-button label="group">分组</el-radio-button>
+        <el-radio-button value="self">个人</el-radio-button>
+        <el-radio-button value="group">分组</el-radio-button>
       </el-radio-group>
-      <el-select v-model="range" style="width: 120px" @change="load">
-        <el-option label="近 7 天" value="7d" />
-        <el-option label="近 30 天" value="30d" />
-        <el-option label="全部" value="all" />
-      </el-select>
     </div>
 
     <el-empty v-if="!loading && rows.length === 0" description="暂无排行数据" :image-size="120" />
@@ -71,7 +73,8 @@ onMounted(load)
 <style scoped>
 .rank-page { max-width: 800px; }
 .rank-page h2 { margin-bottom: 20px; }
-.toolbar { display: flex; gap: 16px; margin-bottom: 24px; flex-wrap: wrap; }
+.toolbar { display: flex; gap: 16px; margin-bottom: 24px; flex-wrap: wrap; align-items: center; }
+.toolbar-row { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
 .rank-list { background: #fff; border-radius: 8px; border: 1px solid #ebeef5; overflow: hidden; }
 .rank-item { display: flex; align-items: center; gap: 16px; padding: 14px 20px; border-bottom: 1px solid #f5f5f5; }
 .rank-item:last-child { border-bottom: none; }
@@ -85,7 +88,9 @@ onMounted(load)
 .rank-value { font-weight: 700; color: var(--brand-primary); font-size: 16px; flex-shrink: 0; }
 @media (max-width: 767px) {
   .toolbar { gap: 8px; }
-  .toolbar .el-radio-group { width: 100%; }
+  .toolbar-row { width: 100%; gap: 8px; }
+  .toolbar-row .el-radio-group { flex: 1; min-width: 0; }
+  .toolbar-row .el-select { flex: 0 0 110px; }
   .rank-item { gap: 12px; padding: 12px 14px; }
   .rank-value { font-size: 14px; }
 }

@@ -6,7 +6,7 @@ from collections import defaultdict
 from typing import cast
 
 from fastapi import HTTPException, status
-from sqlalchemy import delete, func, or_, select
+from sqlalchemy import delete, func, or_, select, update
 from sqlalchemy.orm import Session
 
 from app.core.security import hash_password
@@ -106,6 +106,57 @@ def set_status(db: Session, actor: int, user_id: int, enabled: bool, scope: set[
     audit_log(db, actor, "user.enable" if enabled else "user.disable", "user", user_id)
     db.refresh(u)
     return u
+
+
+def delete_user(db: Session, actor: int, actor_role: str, user_id: int, scope: set[int] | None = None) -> None:
+    """删除用户（仅超级管理员，且不能删自己/最后一个超级管理员）。
+
+    级联清理该用户的练习/考试/复核/分组数据；审计日志与考试定义、试卷模板
+    保留（仅把 creator 引用置空），保持历史可追溯。
+    """
+    from app.models.exam import ExamDefinition, PaperTemplate
+    from app.models.record import ExamResult, ExamSession, PracticeRecord, QuestionState, ShortAnswerReview
+    from app.models.system import AuditLog, Draft
+    from app.models.user import EmailVerification
+
+    if actor_role != "super_admin":
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "仅超级管理员可删除用户")
+    if actor == user_id:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "不能删除当前登录账号")
+    _check_scope(db, user_id, scope)
+    u = _get(db, user_id)
+    if u.role == "super_admin":
+        remaining = db.execute(
+            select(func.count()).select_from(User).where(User.role == "super_admin", User.id != user_id)
+        ).scalar_one()
+        if remaining == 0:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "不能删除最后一个超级管理员账号")
+
+    # 本人考试会话 → 成绩 → 简答复核，按外键依赖顺序清理
+    session_ids = [r[0] for r in db.execute(select(ExamSession.id).where(ExamSession.user_id == user_id)).all()]
+    if session_ids:
+        result_ids = (
+            select(ExamResult.id).where(ExamResult.exam_session_id.in_(session_ids)).scalar_subquery()
+        )
+        db.execute(delete(ShortAnswerReview).where(ShortAnswerReview.exam_result_id.in_(result_ids)))
+        db.execute(delete(ExamResult).where(ExamResult.exam_session_id.in_(session_ids)))
+        db.execute(delete(ExamSession).where(ExamSession.id.in_(session_ids)))
+    # 兜底清理无会话关联的遗留成绩/复核（历史数据），以及练习记录、掌握度
+    db.execute(delete(ExamResult).where(ExamResult.user_id == user_id))
+    db.execute(delete(ShortAnswerReview).where(ShortAnswerReview.user_id == user_id))
+    db.execute(delete(PracticeRecord).where(PracticeRecord.user_id == user_id))
+    db.execute(delete(QuestionState).where(QuestionState.user_id == user_id))
+    db.execute(delete(UserGroup).where(UserGroup.user_id == user_id))
+    db.execute(delete(Draft).where(Draft.user_id == user_id))
+    db.execute(delete(EmailVerification).where(EmailVerification.email == u.email))
+    # 保留审计日志与考试/模板实体，仅解除对被删用户的引用
+    db.execute(update(AuditLog).where(AuditLog.actor == user_id).values(actor=None))
+    db.execute(update(ShortAnswerReview).where(ShortAnswerReview.reviewer == user_id).values(reviewer=None))
+    db.execute(update(ExamDefinition).where(ExamDefinition.created_by == user_id).values(created_by=None))
+    db.execute(update(PaperTemplate).where(PaperTemplate.created_by == user_id).values(created_by=None))
+    db.delete(u)
+    db.commit()
+    audit_log(db, actor, "user.delete", "user", user_id, {"email": u.email})
 
 
 def reset_password(

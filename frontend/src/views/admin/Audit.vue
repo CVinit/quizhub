@@ -24,7 +24,9 @@
       <el-table-column prop="target_id" label="目标ID" width="80" />
       <el-table-column label="详情" min-width="240">
         <template #default="{ row }">
-          <span v-if="row.detail">{{ JSON.stringify(row.detail) }}</span>
+          <el-tooltip v-if="row.detail" :content="JSON.stringify(row.detail, null, 2)" placement="top" :show-after="200">
+            <span class="detail-cell">{{ JSON.stringify(row.detail) }}</span>
+          </el-tooltip>
           <span v-else class="muted">—</span>
         </template>
       </el-table-column>
@@ -38,7 +40,7 @@
         <div class="mc-row"><span class="mc-label">时间</span>{{ fmt(row.created_at) }}</div>
         <div class="mc-row"><span class="mc-label">操作人</span>{{ row.actor }}</div>
         <div class="mc-row"><span class="mc-label">目标</span>{{ row.target_type }} #{{ row.target_id }}</div>
-        <div class="mc-row" v-if="row.detail"><span class="mc-label">详情</span>{{ JSON.stringify(row.detail) }}</div>
+        <div class="mc-row" v-if="row.detail"><span class="mc-label">详情</span><span class="detail-cell">{{ JSON.stringify(row.detail) }}</span></div>
         <div class="mc-row" v-if="row.ip"><span class="mc-label">IP</span>{{ row.ip }}</div>
       </div>
     </div>
@@ -98,5 +100,21 @@ onMounted(load)
 .toolbar { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; }
 .title { font-size: 18px; font-weight: 600; }
 .filters { display: flex; gap: 8px; }
+@media (max-width: 767px) {
+  .toolbar { flex-direction: column; align-items: stretch; gap: 12px; }
+  .filters { flex-wrap: wrap; }
+  .filters > * { flex: 1 1 40%; min-width: 0; }
+  .filters .el-button { flex: 1 1 40%; }
+}
 .muted { color: #c0c4cc; }
+.detail-cell {
+  display: inline-block; max-width: 100%;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  vertical-align: bottom;
+}
+.mobile-card-list .detail-cell { max-width: 200px; }
+@media (max-width: 767px) {
+  .mobile-card-list .mc-row { align-items: flex-start; }
+  .mobile-card-list .mc-row > span:last-child { text-align: right; min-width: 0; }
+}
 </style>

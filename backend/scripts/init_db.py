@@ -13,7 +13,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from sqlalchemy import select
 
-from app.config import SUPER_ADMIN_EMAIL, SUPER_ADMIN_PASSWORD, SUPER_ADMIN_PASSWORD_IS_DEFAULT
+from app.config import DB_PATH, SUPER_ADMIN_EMAIL, SUPER_ADMIN_PASSWORD, SUPER_ADMIN_PASSWORD_IS_DEFAULT
 from app.core.security import hash_password
 from app.database import db_session, init_db
 from app.models.user import User
@@ -24,26 +24,27 @@ logger = logging.getLogger("quizhub")
 
 
 def main() -> None:
-    # 未注入口令时生成一次性随机强口令，避免使用仓库内固定凭据。
-    admin_password = SUPER_ADMIN_PASSWORD
-    if SUPER_ADMIN_PASSWORD_IS_DEFAULT:
-        import secrets
-        import string
-
-        alphabet = string.ascii_letters + string.digits
-        admin_password = "".join(secrets.choice(alphabet) for _ in range(16))
-        logger.warning(
-            "[init] 未设置 TRAINING_SUPER_ADMIN_PASSWORD，已生成一次性随机超管口令：\n"
-            "       %s\n"
-            "       请立即记录并首次登录后修改。生产环境务必经环境变量注入固定口令。",
-            admin_password,
-        )
-
     init_db()
     with db_session() as db:
         ensure_defaults(db)
         existing = db.execute(select(User).where(User.email == SUPER_ADMIN_EMAIL)).scalar_one_or_none()
-        if existing is None:
+        if existing is not None:
+            logger.info("[init] 超级管理员已存在: %s（口令保持不变）", SUPER_ADMIN_EMAIL)
+        else:
+            # 仅在需要新建超管时生成/使用口令；已存在时不应打印误导性的随机口令。
+            admin_password = SUPER_ADMIN_PASSWORD
+            if SUPER_ADMIN_PASSWORD_IS_DEFAULT:
+                import secrets
+                import string
+
+                alphabet = string.ascii_letters + string.digits
+                admin_password = "".join(secrets.choice(alphabet) for _ in range(16))
+                logger.warning(
+                    "[init] 未设置 TRAINING_SUPER_ADMIN_PASSWORD，已生成一次性随机超管口令：\n"
+                    "       %s\n"
+                    "       请立即记录并首次登录后修改。生产环境务必经环境变量注入固定口令。",
+                    admin_password,
+                )
             db.add(
                 User(
                     email=SUPER_ADMIN_EMAIL,
@@ -56,9 +57,7 @@ def main() -> None:
             )
             db.commit()
             logger.info("[init] 超级管理员已创建: %s", SUPER_ADMIN_EMAIL)
-        else:
-            logger.info("[init] 超级管理员已存在: %s", SUPER_ADMIN_EMAIL)
-    logger.info("[init] 数据库初始化完成 → %s", "data/quizhub.db")
+    logger.info("[init] 数据库初始化完成 → %s", DB_PATH)
 
 
 if __name__ == "__main__":

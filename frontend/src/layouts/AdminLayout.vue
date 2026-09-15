@@ -15,6 +15,7 @@
         </el-sub-menu>
         <el-sub-menu index="question">
           <template #title>题库管理</template>
+          <el-menu-item index="/admin/question-banks">题库管理</el-menu-item>
           <el-menu-item index="/admin/questions">题目列表</el-menu-item>
           <el-menu-item index="/admin/upload">上传题库</el-menu-item>
           <el-menu-item index="/admin/exam-templates">试卷模板</el-menu-item>
@@ -62,6 +63,7 @@
         </el-sub-menu>
         <el-sub-menu index="question">
           <template #title>题库管理</template>
+          <el-menu-item index="/admin/question-banks">题库管理</el-menu-item>
           <el-menu-item index="/admin/questions">题目列表</el-menu-item>
           <el-menu-item index="/admin/upload">上传题库</el-menu-item>
           <el-menu-item index="/admin/exam-templates">试卷模板</el-menu-item>

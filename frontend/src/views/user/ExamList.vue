@@ -119,8 +119,10 @@ onMounted(load)
 .card-actions { margin-top: 12px; }
 @media (max-width: 767px) {
   .mock-card { flex-direction: column; align-items: flex-start; gap: 16px; padding: 18px; }
+  .mock-card :deep(.el-button) { width: 100%; }
   .exam-cards { grid-template-columns: 1fr; gap: 12px; }
   .exam-card { padding: 16px; }
   .card-meta { gap: 10px; }
+  .exam-list h2 { margin-bottom: 12px; }
 }
 </style>

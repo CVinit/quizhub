@@ -16,18 +16,31 @@ from app.models.record import ExamResult, ShortAnswerReview
 from app.models.user import User
 
 
-def list_pending(db: Session, scope: set[int] | None = None, limit: int = 500) -> list[dict]:
-    """待复核简答列表。scope 非 None（部门管理员）时仅返回其数据范围内用户的待复核项。"""
+def list_pending(
+    db: Session, scope: set[int] | None = None, limit: int = 500, verdict: str | None = None
+) -> list[dict]:
+    """简答复核列表。scope 非 None（部门管理员）时仅返回其数据范围内用户的复核项。
+
+    verdict 为状态筛选：
+    - None / "pending"：待复核（verdict IS NULL），保持原有默认行为；
+    - "pass" / "fail" / "partial"：按已复核结论筛选；
+    - "done"：所有已复核项（任一 verdict 非空）。
+    """
     stmt = (
         select(ShortAnswerReview, ExamResult, ExamDefinition, Question, User)
         .join(ExamResult, ExamResult.id == ShortAnswerReview.exam_result_id)
         .join(ExamDefinition, ExamDefinition.id == ExamResult.exam_definition_id)
         .join(Question, Question.id == ShortAnswerReview.question_id)
         .join(User, User.id == ShortAnswerReview.user_id)
-        .where(ShortAnswerReview.verdict.is_(None))
         .order_by(ShortAnswerReview.id.desc())
         .limit(limit)
     )
+    if verdict in (None, "pending"):
+        stmt = stmt.where(ShortAnswerReview.verdict.is_(None))
+    elif verdict == "done":
+        stmt = stmt.where(ShortAnswerReview.verdict.is_not(None))
+    else:
+        stmt = stmt.where(ShortAnswerReview.verdict == verdict)
     if scope is not None:
         from app.core.deps import users_in_scope
 
@@ -48,6 +61,10 @@ def list_pending(db: Session, scope: set[int] | None = None, limit: int = 500) -
                 "question": question.question[:60],
                 "user_answer": r.user_answer,
                 "reference_answer": r.reference_answer,
+                # 复核状态：前端据此区分「待复核」与「已复核」行（已复核只读展示结论）
+                "verdict": r.verdict,
+                "partial_score": r.partial_score,
+                "reviewed_at": r.reviewed_at,
             }
         )
     return out

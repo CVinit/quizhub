@@ -1,6 +1,7 @@
 import { onMounted } from 'vue'
 import { api } from '@/api/http'
 import { useSiteStore } from '@/stores/site'
+import router from '@/router'
 
 const hexToRgb = (color: string) => ({
   r: parseInt(color.slice(1, 3), 16),
@@ -45,7 +46,11 @@ export function useTheme() {
       site.rank_visible = data.rank_visible !== false
       site.loaded = true
       if (data.brand_color) apply(data.brand_color)
-      if (data.site_name) document.title = data.site_name
+      // 站点名就绪后按 `页面名 · 站点名` 重新刷新标题（router.afterEach 已先写入默认名）
+      if (data.site_name) {
+        const page = router.currentRoute.value.meta.title as string | undefined
+        document.title = page ? `${page} · ${site.site_name}` : site.site_name
+      }
     } catch { /* 忽略，用默认主题 */ }
   }
 

@@ -9,7 +9,8 @@ config 结构：
   "tags": ["网络"],          # 来源标签筛选（任一命中）
   "allow_duplicate": false,
   "seed": 12345,
-  "max_questions": 100
+  "max_questions": 100,
+  "order_mode": "bank"        # 出题顺序：bank(默认,与导入顺序一致) / random / grouped
 }
 
 返回固化题目清单 id 列表 + 每题分值。
@@ -24,6 +25,14 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.models.question import Question
+from app.services.question_service import QUESTION_TYPES
+
+# 出题顺序模式：
+# - bank    抽题后按题目入库顺序（Question.id 升序）排列，与题库导入顺序一致（默认）
+# - random  完全随机（抽中顺序即出题顺序）
+# - grouped 按题型分组（同题型连在一起），组内随机
+ORDER_MODES = ("bank", "random", "grouped")
+DEFAULT_ORDER_MODE = "bank"
 
 
 def generate_paper(db: Session, config: dict) -> dict:
@@ -58,6 +67,9 @@ def generate_paper(db: Session, config: dict) -> dict:
     bank_ids = config.get("bank_ids") or []
     group_ids = config.get("group_ids") or []
     tags = config.get("tags") or []
+    order_mode = config.get("order_mode") or DEFAULT_ORDER_MODE
+    if order_mode not in ORDER_MODES:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, f"出题顺序必须是 {ORDER_MODES} 之一")
 
     rng = random.Random(seed)
 
@@ -81,10 +93,12 @@ def generate_paper(db: Session, config: dict) -> dict:
     # 按 (题型, 难度) 分层，便于难度配比
     by_type_diff: dict[tuple[str, int], list[tuple]] = {}
     by_type: dict[str, list[tuple]] = {}
+    type_of: dict[int, str] = {}  # qid -> 题型，供 grouped 排序使用
     for cid, ctype, cdiff, cscore in candidates:
         row = (cid, ctype, cdiff, cscore or 2)
         by_type.setdefault(ctype, []).append(row)
         by_type_diff.setdefault((ctype, cdiff), []).append(row)
+        type_of[cid] = ctype
 
     chosen_ids: list[int] = []
     scores: dict[int, float] = {}
@@ -143,9 +157,20 @@ def generate_paper(db: Session, config: dict) -> dict:
         chosen_ids = chosen_ids[:max_q]
         total_score = sum(scores[q] for q in chosen_ids)
 
+    # 出题顺序：抽题阶段按题型分层（保证配额/难度配比准确），此处仅对最终清单重新排序。
+    # bank 模式按题目入库顺序（Question.id 升序）排列 —— 与题库导入（Excel 行序）一致。
+    if order_mode == "bank":
+        chosen_ids = sorted(chosen_ids)
+    elif order_mode == "grouped":
+        # 按标准题型顺序分组（单选→多选→判断→填空→简答→拖拽），组内保持入库顺序
+        type_rank = {t: i for i, t in enumerate(QUESTION_TYPES)}
+        chosen_ids = sorted(chosen_ids, key=lambda qid: (type_rank.get(type_of.get(qid, ""), 99), qid))
+    # random 模式保持抽中顺序
+
     return {
         "question_ids": chosen_ids,
         "scores": scores,
         "total_score": total_score,
         "count": len(chosen_ids),
+        "order_mode": order_mode,
     }

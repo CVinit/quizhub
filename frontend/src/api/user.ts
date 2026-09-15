@@ -61,6 +61,7 @@ export const userApi = {
   approve: (id: number) => api.post(`/admin/users/${id}/approve`),
   disable: (id: number) => api.post(`/admin/users/${id}/disable`),
   enable: (id: number) => api.post(`/admin/users/${id}/enable`),
+  remove: (id: number) => api.delete(`/admin/users/${id}`),
   resetPassword: (id: number, new_password: string) =>
     api.post<{ success: boolean }>(`/admin/users/${id}/reset-password`, { new_password }),
   assignGroups: (id: number, group_ids: number[]) =>

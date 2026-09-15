@@ -8,15 +8,19 @@
     <el-card>
       <el-form :model="config" label-width="120px">
         <el-form-item label="题型配比">
-          <div class="quota-grid">
-            <div v-for="t in types" :key="t" class="quota-row">
-              <span class="q-name">{{ t }}</span>
-              <el-input-number v-model="config.type_quota[t]" :min="0" :max="100" />
-            </div>
-          </div>
+          <TypeQuotaEditor v-model="config.type_quota" :sources="quotaSources" :max-questions="config.max_questions" />
         </el-form-item>
         <el-form-item label="最大题数">
           <el-input-number v-model="config.max_questions" :min="1" :max="500" />
+          <span class="tip">各题型配额之和不应超过最大题数</span>
+        </el-form-item>
+        <el-form-item label="出题顺序">
+          <el-select v-model="config.order_mode" style="width: 100%">
+            <el-option v-for="m in ORDER_MODES" :key="m.value" :label="m.label" :value="m.value">
+              <span>{{ m.label }}</span>
+              <span class="tip" style="float: right">{{ m.hint }}</span>
+            </el-option>
+          </el-select>
         </el-form-item>
         <el-form-item label="允许重复抽题">
           <el-switch v-model="config.allow_duplicate" />
@@ -45,20 +49,27 @@
 </template>
 
 <script setup lang="ts">
-import { onMounted, reactive, ref } from 'vue'
+import { computed, onMounted, reactive, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import { examApi } from '@/api/exam'
 import { groupApi, type GroupNode } from '@/api/group'
 import { questionApi, type QuestionBank } from '@/api/question'
+import { DEFAULT_ORDER_MODE, ORDER_MODES } from '@/constants/paper'
 
-const types = ['单选题', '多选题', '判断题', '填空题', '简答题', '拖拽题']
 const loading = ref(false)
 const saving = ref(false)
 const groupTree = ref<GroupNode[]>([])
 const banks = ref<QuestionBank[]>([])
 const treeRef = ref()
 const tagInput = ref('')
-const config = reactive<any>({ type_quota: {}, group_ids: [], bank_ids: [], tags: [], allow_duplicate: false, max_questions: 30 })
+const config = reactive<any>({ type_quota: {}, group_ids: [], bank_ids: [], tags: [], allow_duplicate: false, max_questions: 30, order_mode: DEFAULT_ORDER_MODE })
+
+// 题型配比编辑器的来源条件：题库/分组直接取 config，标签来自输入框（watch 去重由组件负责）
+const quotaSources = computed(() => ({
+  bank_ids: config.bank_ids || [],
+  group_ids: config.group_ids || [],
+  tags: tagInput.value.split(/[,，]/).map((s) => s.trim()).filter(Boolean),
+}))
 
 const onGroupCheck = () => {
   config.group_ids = treeRef.value?.getCheckedKeys(false) || []
@@ -75,6 +86,7 @@ const load = async () => {
       tags: d.tags || [],
       allow_duplicate: d.allow_duplicate || false,
       max_questions: d.max_questions || 30,
+      order_mode: d.order_mode || DEFAULT_ORDER_MODE,
     })
     tagInput.value = (d.tags || []).join(', ')
     groupTree.value = gt
@@ -101,12 +113,6 @@ onMounted(load)
 <style scoped>
 .mock-config { max-width: 720px; }
 .mock-config h2 { margin-bottom: 20px; }
-.quota-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px 24px; }
-.quota-row { display: flex; align-items: center; justify-content: space-between; }
-.q-name { font-size: 14px; }
 .tip { color: #909399; font-size: 12px; margin-left: 8px; }
 .actions { margin-top: 12px; }
-@media (max-width: 767px) {
-  .quota-grid { grid-template-columns: 1fr; gap: 8px; }
-}
 </style>

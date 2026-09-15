@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import logging
 import math
 from typing import Any
 
@@ -13,6 +14,8 @@ from sqlalchemy.orm import Session
 
 from app.core.security import decrypt_value, encrypt_value
 from app.models.system import Setting
+
+logger = logging.getLogger("quizhub")
 
 DEFAULT_SETTINGS: dict[str, tuple[str, str, bool]] = {
     # key: (value, category, encrypted)
@@ -75,12 +78,28 @@ def ensure_defaults(db: Session) -> None:
 
 
 def get_settings(db: Session, category: str | None = None) -> dict[str, str]:
+    """读取设置项。
+
+    历史遗留的 "plain:" 前缀行（旧版未配置 ENC_KEY 时的回退写法，见
+    docs/audit_report.md SEC-P1-6）已无法解密。此处对其降级为空字符串并继续，
+    而不是让整个分类抛 RuntimeError —— 否则单个坏行会让
+    GET /system/settings 整体 500，管理端连邮件设置页都打不开。
+    真正的修复由 migrate_2026_08_28.migrate_legacy_plain_settings 完成。
+    """
     stmt = select(Setting)
     if category:
         stmt = stmt.where(Setting.category == category)
     out: dict[str, str] = {}
     for row in db.execute(stmt).scalars():
-        out[row.setting_key] = decrypt_value(row.value) if row.encrypted else row.value
+        if not row.encrypted:
+            out[row.setting_key] = row.value
+            continue
+        try:
+            out[row.setting_key] = decrypt_value(row.value)
+        except RuntimeError:
+            # 遗留不可解密值：降级为空，保证设置页仍可打开并由管理员重填
+            logger.warning("[settings] 设置项 %s 解密失败，已降级为空值（需重新填写）", row.setting_key)
+            out[row.setting_key] = ""
     return out
 
 

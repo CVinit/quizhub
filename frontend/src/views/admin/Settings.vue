@@ -151,6 +151,13 @@ onMounted(loadCategories)
 .enc-tip { color: #909399; font-size: 12px; margin-left: 8px; }
 .logo-upload { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
 @media (max-width: 767px) {
-  .settings-page :deep(.el-form-item__label) { font-size: 13px; }
+  .settings-page { max-width: none; }
+  /* 160px 固定 label 在手机上挤压输入区，改为上置标签 */
+  .settings-page :deep(.el-form-item__label) {
+    display: block; text-align: left; width: 100% !important; padding-bottom: 4px; font-size: 13px;
+  }
+  .settings-page :deep(.el-form-item) { display: block; }
+  .settings-page :deep(.el-form-item__content) { margin-left: 0 !important; }
+  .enc-tip { display: inline-block; margin-left: 0; margin-top: 4px; }
 }
 </style>

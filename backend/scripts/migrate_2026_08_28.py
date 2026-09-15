@@ -126,6 +126,30 @@ def migrate_exam_question_unique(conn: sqlite3.Connection) -> None:
     logger.info("[migrate] uq_exam_question 已创建")
 
 
+def migrate_legacy_plain_settings(conn: sqlite3.Connection) -> None:
+    """清理历史遗留的 "plain:" 前缀敏感设置值。
+
+    旧版 encrypt_value 在未配置 TRAINING_ENC_KEY 时回退写入 "plain:"+base64(value)
+    却仍以 encrypted=1 入库（见 docs/audit_report.md SEC-P1-6）。该回退已被移除，
+    decrypt_value 现在遇到 "plain:" 会直接抛 RuntimeError —— 若库中残留此类行，
+    GET /system/settings（尤其 category=smtp）会整体 500，管理端无法打开邮件设置。
+
+    迁移策略：敏感设置无法安全还原为密文（且旧回退本身不安全），因此
+    一律清空其值并置 encrypted=0：(key, value, encrypted) -> (key, '', 0)。
+    密码等敏感项被清空后需管理员重新填写，这是安全的默认行为。
+    """
+    rows = conn.execute(
+        "SELECT key, value FROM settings WHERE value LIKE 'plain:%'"
+    ).fetchall()
+    if not rows:
+        logger.info("[migrate] 未发现遗留 plain: 敏感设置，跳过")
+        return
+    keys = [r[0] for r in rows]
+    conn.execute("UPDATE settings SET value = '', encrypted = 0 WHERE value LIKE 'plain:%'")
+    conn.commit()
+    logger.info("[migrate] 已清空 %d 个遗留 plain: 设置项：%s（需管理员重新填写）", len(keys), ", ".join(keys))
+
+
 def main() -> None:
     if not DB_PATH.exists():
         logger.error("[migrate] 数据库不存在：%s，请先运行 init_db.py", DB_PATH)
@@ -138,6 +162,7 @@ def main() -> None:
         migrate_verification_attempts(conn)
         migrate_exam_question_unique(conn)
         migrate_active_session_index(conn)
+        migrate_legacy_plain_settings(conn)
     finally:
         conn.close()
     logger.info("[migrate] 迁移完成")

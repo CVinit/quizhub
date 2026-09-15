@@ -44,17 +44,12 @@
         <el-form-item label="模板名称"><el-input v-model="editing.name" /></el-form-item>
         <el-form-item label="类型">
           <el-radio-group v-model="editing.mode">
-            <el-radio label="mock">模拟</el-radio>
-            <el-radio label="formal">正式</el-radio>
+            <el-radio value="mock">模拟</el-radio>
+            <el-radio value="formal">正式</el-radio>
           </el-radio-group>
         </el-form-item>
         <el-form-item label="题型配比">
-          <div class="quota-grid">
-            <div v-for="t in types" :key="t" class="quota-row">
-              <span class="q-name">{{ t }}</span>
-              <el-input-number v-model="editing.config.type_quota[t]" :min="0" :max="100" size="small" />
-            </div>
-          </div>
+          <TypeQuotaEditor v-model="editing.config.type_quota" :sources="quotaSources" :max-questions="editing.config.max_questions" />
         </el-form-item>
         <el-form-item label="来源题库">
           <el-select v-model="editing.config.bank_ids" multiple filterable clearable placeholder="留空则不限（全部题库）" style="width: 100%">
@@ -73,6 +68,14 @@
         </el-form-item>
         <el-form-item label="最大题数">
           <el-input-number v-model="editing.config.max_questions" :min="1" :max="500" />
+        </el-form-item>
+        <el-form-item label="出题顺序">
+          <el-select v-model="editing.config.order_mode" style="width: 100%">
+            <el-option v-for="m in ORDER_MODES" :key="m.value" :label="m.label" :value="m.value">
+              <span>{{ m.label }}</span>
+              <span class="tip" style="float: right">{{ m.hint }}</span>
+            </el-option>
+          </el-select>
         </el-form-item>
         <el-form-item label="允许重复">
           <el-switch v-model="editing.config.allow_duplicate" />
@@ -103,16 +106,16 @@
 </template>
 
 <script setup lang="ts">
-import { onMounted, reactive, ref } from 'vue'
+import { computed, onMounted, reactive, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { examApi } from '@/api/exam'
 import { groupApi, type GroupNode } from '@/api/group'
 import { questionApi, type QuestionBank } from '@/api/question'
 import { useResponsive } from '@/composables/useResponsive'
+import { DEFAULT_ORDER_MODE, ORDER_MODES } from '@/constants/paper'
 
 const { isMobile } = useResponsive()
 
-const types = ['单选题', '多选题', '判断题', '填空题', '简答题', '拖拽题']
 const loading = ref(false)
 const saving = ref(false)
 const rows = ref<any[]>([])
@@ -125,13 +128,20 @@ const banks = ref<QuestionBank[]>([])
 const tagInput = ref('')
 const editing = reactive<{ id: number; name: string; mode: string; config: any }>({
   id: 0, name: '', mode: 'mock',
-  config: { type_quota: {}, difficulty_dist: {}, group_ids: [], bank_ids: [], tags: [], allow_duplicate: false, max_questions: 100 },
+  config: { type_quota: {}, difficulty_dist: {}, group_ids: [], bank_ids: [], tags: [], allow_duplicate: false, max_questions: 100, order_mode: DEFAULT_ORDER_MODE },
 })
 
 const quotaText = (config: any) => {
   const q = config?.type_quota || {}
   return Object.entries(q).filter(([, v]: any) => v > 0).map(([k, v]: any) => `${k}×${v}`).join('  ') || '—'
 }
+
+// 题型配比编辑器的来源条件（标签输入框变化时组件自动重查统计）
+const quotaSources = computed(() => ({
+  bank_ids: editing.config.bank_ids || [],
+  group_ids: editing.config.group_ids || [],
+  tags: tagInput.value.split(/[,，]/).map((s) => s.trim()).filter(Boolean),
+}))
 
 const onGroupCheck = () => {
   const ids = groupTreeRef.value?.getCheckedKeys(false) as number[]
@@ -154,7 +164,7 @@ const openCreate = () => {
   editing.id = 0
   editing.name = ''
   editing.mode = 'mock'
-  editing.config = { type_quota: {}, difficulty_dist: {}, group_ids: [], bank_ids: [], tags: [], allow_duplicate: false, max_questions: 100 }
+  editing.config = { type_quota: {}, difficulty_dist: {}, group_ids: [], bank_ids: [], tags: [], allow_duplicate: false, max_questions: 100, order_mode: DEFAULT_ORDER_MODE }
   tagInput.value = ''
   dlg.value = true
 }
@@ -196,8 +206,10 @@ const save = async () => {
 }
 
 const onDel = async (row: any) => {
-  await ElMessageBox.confirm(`确认删除模板「${row.name}」？`, '提示', { type: 'warning' })
-  ElMessage.info('模板删除接口待补充')
+  await ElMessageBox.confirm(`确认删除模板「${row.name}」？被正式考试引用时将无法删除。`, '提示', { type: 'warning' })
+  await examApi.deleteTemplate(row.id)
+  ElMessage.success('已删除')
+  await load()
 }
 
 onMounted(load)
@@ -206,7 +218,7 @@ onMounted(load)
 <style scoped>
 .toolbar { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; }
 .title { font-size: 18px; font-weight: 600; }
-.quota-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px 24px; }
-.quota-row { display: flex; align-items: center; justify-content: space-between; }
-.q-name { font-size: 14px; }
+@media (max-width: 767px) {
+  .toolbar { flex-direction: column; align-items: stretch; gap: 12px; }
+}
 </style>

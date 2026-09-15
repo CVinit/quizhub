@@ -36,7 +36,6 @@ import { computed, onMounted, reactive, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { practiceApi, type Question } from '@/api/practice'
-import { api } from '@/api/http'
 
 const router = useRouter()
 const loading = ref(false)
@@ -56,8 +55,6 @@ const load = async () => {
   try {
     // 用 wrong 模式拉取全部错题
     rows.value = await practiceApi.start('wrong')
-    // 取标记状态
-    const marks = await api.get('/records/practice/progress').catch(() => null)
   } finally {
     loading.value = false
   }

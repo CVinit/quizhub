@@ -16,6 +16,12 @@
             {{ i + 1 }}
           </div>
         </div>
+        <div class="grid-legend" v-show="navOpen && answeredCount > 0">
+          <span><i class="dot dot-correct"></i>答对</span>
+          <span><i class="dot dot-wrong"></i>答错</span>
+          <span><i class="dot dot-pending"></i>待自评</span>
+        </div>
+        <div class="grid-hint" v-show="navOpen">键盘：A–F 选择 · Enter 提交/下一题 · ←→ 切题</div>
       </div>
 
       <!-- 题目区 -->
@@ -139,9 +145,9 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref, watch } from 'vue'
+import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import { ArrowDown, ArrowUp } from '@element-plus/icons-vue'
 import { practiceApi, type Question } from '@/api/practice'
 
@@ -167,6 +173,9 @@ const resultCorrect = ref<boolean | null>(null)
 const correctAnswer = ref<any>(null)
 const referenceAnswer = ref('')
 const marked = ref(false)
+
+// 已提交题目的历史：idx → { 提交的答案, 后端判定 }，用于答题卡着色与回看解析
+const history = ref<Record<number, { answer: any; res: { is_correct: boolean | null; correct_answer: any; reference_answer?: string } }>>({})
 
 const mode = computed(() => String(route.params.mode || 'sequence'))
 const bankId = computed(() => {
@@ -204,7 +213,8 @@ const load = async () => {
       ElMessage.info('暂无题目')
     } else {
       currentIdx.value = 0
-      resetAnswer()
+      history.value = {}
+      syncCurrent()
     }
   } finally {
     loading.value = false
@@ -213,7 +223,8 @@ const load = async () => {
 
 // 题库练习时切换子模式：仅替换 route.query 不触发整页刷新
 // （已移除页内子模式切换条，模式由入口页选定；此处保留 watch route 以支持返回后重进）
-const resetAnswer = () => {
+// 切题后重置作答区；若该题此前已提交过，则恢复当时的答案与解析（回看）
+const syncCurrent = () => {
   picked.value = ''
   pickedMulti.value = []
   blanks.value = (current.value?.question.match(/_{2,}/g) || []).map(() => '')
@@ -223,14 +234,41 @@ const resetAnswer = () => {
   shuffledLeft.value = [...(current.value?.left_items || [])].sort(() => Math.random() - 0.5)
   showResult.value = false
   resultCorrect.value = null
+  correctAnswer.value = null
+  referenceAnswer.value = ''
   marked.value = false
+
+  const saved = history.value[currentIdx.value]
+  if (!saved) return
+  const a = saved.answer
+  if (current.value?.type === '简答题' && typeof a === 'string') {
+    shortAns.value = a
+  } else if (typeof a === 'string') {
+    if (current.value?.type === '多选题') pickedMulti.value = a.split('')
+    else picked.value = a
+  } else if (Array.isArray(a)) {
+    blanks.value = [...a]
+  } else if (a && typeof a === 'object') {
+    // 提交时存的是 left->right，还原成 right->left 的 dragMap
+    Object.entries(a as Record<string, string>).forEach(([left, right]) => { dragMap[right] = left })
+  }
+  showResult.value = true
+  resultCorrect.value = saved.res.is_correct
+  correctAnswer.value = saved.res.correct_answer
+  referenceAnswer.value = saved.res.reference_answer || ''
 }
+
+const answeredCount = computed(() => Object.keys(history.value).length)
 
 const cellClass = (q: Question, i: number) => {
   const cls: string[] = []
   if (i === currentIdx.value) cls.push('current')
-  if (q.type === '简答题') return cls
-  // 练习模式：从后端状态推断（简化：提交后着色由本地 showResult 控制）
+  const saved = history.value[i]
+  if (saved) {
+    if (saved.res.is_correct === true) cls.push('cell-correct')
+    else if (saved.res.is_correct === false) cls.push('cell-wrong')
+    else cls.push('cell-pending')
+  }
   return cls
 }
 
@@ -294,8 +332,27 @@ const onDrop = (right: string) => {
 }
 const onUnassign = (right: string) => { delete dragMap[right] }
 
+// 提交前校验：避免误触把空答案记成错题
+const validateAnswer = () => {
+  if (!current.value) return false
+  const type = current.value.type
+  if ((type === '单选题' || type === '判断题') && !picked.value) {
+    ElMessage.warning('请先选择答案'); return false
+  }
+  if (type === '多选题' && pickedMulti.value.length === 0) {
+    ElMessage.warning('请先选择答案'); return false
+  }
+  if (type === '填空题' && !blanks.value.some((b) => b.trim())) {
+    ElMessage.warning('请先填写答案'); return false
+  }
+  if (type === '简答题' && !shortAns.value.trim()) {
+    ElMessage.warning('请先填写答案'); return false
+  }
+  return true
+}
+
 const submit = async () => {
-  if (!current.value) return
+  if (!current.value || !validateAnswer()) return
   let answer: any = null
   if (['单选题', '判断题'].includes(current.value.type)) answer = picked.value
   else if (current.value.type === '多选题') answer = pickedMulti.value.sort().join('')
@@ -307,6 +364,7 @@ const submit = async () => {
   resultCorrect.value = res.is_correct
   correctAnswer.value = res.correct_answer
   referenceAnswer.value = res.reference_answer || ''
+  history.value[currentIdx.value] = { answer, res: { is_correct: res.is_correct, correct_answer: res.correct_answer, reference_answer: res.reference_answer || '' } }
 }
 
 const submitDrag = async () => {
@@ -317,12 +375,15 @@ const submitDrag = async () => {
   showResult.value = true
   resultCorrect.value = res.is_correct
   correctAnswer.value = res.correct_answer
+  history.value[currentIdx.value] = { answer: mapping, res: { is_correct: res.is_correct, correct_answer: res.correct_answer, reference_answer: '' } }
 }
 
 const onSelfEval = async (mastered: boolean) => {
   await practiceApi.shortEval(current.value!.id, mastered)
   ElMessage.success(mastered ? '已标记掌握' : '已加入错题本')
   showResult.value = false
+  const saved = history.value[currentIdx.value]
+  if (saved) saved.res.is_correct = mastered
 }
 
 const toggleMark = async () => {
@@ -331,22 +392,66 @@ const toggleMark = async () => {
   ElMessage.success(marked.value ? '已标记' : '已取消标记')
 }
 
-const prev = () => { if (currentIdx.value > 0) { currentIdx.value--; resetAnswer() } }
+const prev = () => { if (currentIdx.value > 0) { currentIdx.value--; syncCurrent() } }
 const next = () => {
   if (currentIdx.value < questions.value.length - 1) {
     currentIdx.value++
-    resetAnswer()
+    syncCurrent()
   } else {
-    ElMessage.success('已完成全部题目')
-    router.push('/answer')
+    // 完成全部题目：给出本轮成绩小结
+    const total = questions.value.length
+    const done = answeredCount.value
+    const correct = Object.values(history.value).filter((h) => h.res.is_correct === true).length
+    ElMessageBox.confirm(
+      `共 ${total} 题，已答 ${done} 题，答对 ${correct} 题。`,
+      '练习完成',
+      { confirmButtonText: '返回模式选择', cancelButtonText: '留在本页', type: 'success' },
+    ).then(() => router.push('/answer')).catch(() => {})
   }
 }
-const jumpTo = (i: number) => { currentIdx.value = i; resetAnswer() }
+const jumpTo = (i: number) => { currentIdx.value = i; syncCurrent() }
 
-watch(currentIdx, () => { /* reactivity via current computed */ })
+// 键盘快捷键：A–J/数字键选择（仅选择题），Enter 提交/下一题，←→ 切题。
+// 焦点在输入框时忽略，避免干扰填空/简答输入。
+const onKeydown = (e: KeyboardEvent) => {
+  const t = e.target as HTMLElement | null
+  if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return
+  if (e.ctrlKey || e.metaKey || e.altKey) return
+  if (!current.value || loading.value) return
+
+  const type = current.value.type
+  if (['单选题', '多选题', '判断题'].includes(type)) {
+    let idx = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'.indexOf(e.key.toUpperCase())
+    if (idx < 0 && /^[1-9]$/.test(e.key)) idx = Number(e.key) - 1
+    if (idx >= 0) {
+      if (type === '判断题') {
+        if (idx <= 1) pickJudge(idx === 0 ? '正确' : '错误')
+        return
+      }
+      const opts = current.value.options || []
+      if (idx < opts.length) {
+        if (type === '单选题') pickChoice(idx)
+        else pickMulti(idx)
+      }
+      return
+    }
+  }
+  if (e.key === 'Enter') {
+    if (showResult.value) next()
+    else if (type !== '拖拽题') submit()
+    return
+  }
+  if (e.key === 'ArrowLeft') { prev(); return }
+  if (e.key === 'ArrowRight' && (showResult.value || !needSubmit.value)) next()
+}
+
 // 路由参数变化（模式 / 题库范围 / 题型变化）时重新加载题目
 watch(() => [route.params.mode, route.query.bank, route.query.type], () => { load() })
-onMounted(load)
+onMounted(() => {
+  load()
+  window.addEventListener('keydown', onKeydown)
+})
+onUnmounted(() => window.removeEventListener('keydown', onKeydown))
 </script>
 
 <style scoped>
@@ -356,10 +461,18 @@ onMounted(load)
 .grid-title-row { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; }
 .grid-title { font-weight: 600; }
 .grid-toggle { display: none; cursor: pointer; font-size: 16px; color: #909399; }
-.bank-switch { margin-bottom: 14px; }
 .grid-box { display: grid; grid-template-columns: repeat(auto-fill, minmax(36px, 1fr)); gap: 6px; }
 .grid-cell { height: 36px; line-height: 36px; text-align: center; border-radius: 4px; background: #f4f4f5; cursor: pointer; font-size: 13px; }
 .grid-cell.current { border: 2px solid var(--brand-primary); }
+.grid-cell.cell-correct { background: #f0f9eb; color: #67c23a; font-weight: 600; }
+.grid-cell.cell-wrong { background: #fef0f0; color: #f56c6c; font-weight: 600; }
+.grid-cell.cell-pending { background: #fdf6ec; color: #e6a23c; }
+.grid-legend { display: flex; gap: 12px; margin-top: 10px; font-size: 12px; color: #909399; flex-wrap: wrap; }
+.grid-legend .dot { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 4px; vertical-align: -1px; }
+.grid-legend .dot-correct { background: #95d475; }
+.grid-legend .dot-wrong { background: #f89898; }
+.grid-legend .dot-pending { background: #f3d19e; }
+.grid-hint { margin-top: 8px; font-size: 12px; color: #c0c4cc; }
 .question-area { flex: 1; background: #fff; border-radius: 8px; padding: 24px; min-height: 400px; min-width: 0; }
 .q-header { display: flex; gap: 8px; margin-bottom: 16px; flex-wrap: wrap; }
 .q-stem { font-size: 16px; line-height: 1.7; margin-bottom: 20px; white-space: pre-wrap; word-break: break-word; }
@@ -391,6 +504,7 @@ onMounted(load)
   .layout { flex-direction: column; }
   .nav-grid { width: 100%; position: static; }
   .grid-toggle { display: inline-flex; }
+  .grid-hint { display: none; } /* 快捷键提示仅桌面端有意义 */
   .question-area { padding: 16px; min-height: auto; order: -1; }
   /* 手机端默认折叠答题卡，题目优先 */
   .nav-grid { order: 1; }

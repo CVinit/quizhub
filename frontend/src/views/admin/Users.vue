@@ -36,7 +36,7 @@
           <el-tag :type="row.email_verified ? 'success' : 'info'" size="small">{{ row.email_verified ? '已验证' : '未验证' }}</el-tag>
         </template>
       </el-table-column>
-      <el-table-column label="操作" width="360" fixed="right">
+      <el-table-column label="操作" width="420" fixed="right">
         <template #default="{ row }">
           <el-button size="small" v-if="row.status === 'pending'" type="success" @click="onApprove(row)">审批</el-button>
           <el-button size="small" @click="onEdit(row)">编辑</el-button>
@@ -44,6 +44,10 @@
           <el-button size="small" type="warning" @click="onResetPwd(row)">重置密码</el-button>
           <el-button size="small" v-if="row.status === 'active'" type="danger" @click="onToggle(row, false)">禁用</el-button>
           <el-button size="small" v-else-if="row.status === 'disabled'" type="success" @click="onToggle(row, true)">启用</el-button>
+          <el-tooltip v-if="deleteReason(row)" :content="deleteReason(row)!" placement="top">
+            <span><el-button size="small" type="danger" plain disabled>删除</el-button></span>
+          </el-tooltip>
+          <el-button size="small" type="danger" plain v-else @click="onDelete(row)">删除</el-button>
         </template>
       </el-table-column>
     </el-table>
@@ -62,6 +66,10 @@
           <el-button size="small" type="warning" @click="onResetPwd(row)">重置密码</el-button>
           <el-button size="small" v-if="row.status === 'active'" type="danger" @click="onToggle(row, false)">禁用</el-button>
           <el-button size="small" v-else-if="row.status === 'disabled'" type="success" @click="onToggle(row, true)">启用</el-button>
+          <el-tooltip v-if="deleteReason(row)" :content="deleteReason(row)!" placement="top">
+            <span><el-button size="small" type="danger" plain disabled>删除</el-button></span>
+          </el-tooltip>
+          <el-button size="small" type="danger" plain v-else @click="onDelete(row)">删除</el-button>
         </div>
       </div>
     </div>
@@ -227,9 +235,11 @@ import type { FormInstance, FormRules } from 'element-plus'
 import { UploadFilled } from '@element-plus/icons-vue'
 import { userApi, type UserItem, type UserImportPreview, type UserImportResult } from '@/api/user'
 import { groupApi, type GroupNode } from '@/api/group'
+import { useAuthStore } from '@/stores/auth'
 import { useResponsive } from '@/composables/useResponsive'
 
 const { isMobile } = useResponsive()
+const auth = useAuthStore()
 
 const rows = ref<UserItem[]>([])
 const loading = ref(false)
@@ -290,6 +300,18 @@ const roleLabel = (r: string) => ({ user: '普通用户', dept_admin: '部门管
 const statusLabel = (s: string) => ({ pending: '待审批', active: '正常', disabled: '已禁用' }[s] || s)
 const statusTag = (s: string) => ({ pending: 'warning', active: 'success', disabled: 'info' }[s] || 'info')
 
+/**
+ * 删除按钮不可用的原因（null 表示可删除）。
+ *
+ * 与后端 user_service.delete_user 的校验保持一致：仅超级管理员可删、不可删自己。
+ * 返回原因而非静默隐藏按钮，避免非超管管理员误以为系统缺少删除功能。
+ */
+const deleteReason = (row: UserItem): string | null => {
+  if (!auth.isSuper) return '仅超级管理员可删除用户'
+  if (row.id === auth.user?.id) return '不能删除当前登录账号'
+  return null
+}
+
 const onApprove = async (row: UserItem) => {
   await userApi.approve(row.id)
   ElMessage.success('已审批通过')
@@ -327,6 +349,16 @@ const onToggle = async (row: UserItem, enable: boolean) => {
   if (enable) await userApi.enable(row.id)
   else await userApi.disable(row.id)
   ElMessage.success('操作成功')
+  await load()
+}
+const onDelete = async (row: UserItem) => {
+  await ElMessageBox.confirm(
+    `确认删除用户「${row.email}」？其练习记录、考试成绩等数据将一并删除，操作不可恢复。`,
+    '删除用户',
+    { type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消' },
+  )
+  await userApi.remove(row.id)
+  ElMessage.success('已删除')
   await load()
 }
 const onGroups = async (row: UserItem) => {
@@ -438,5 +470,7 @@ onMounted(load)
 @media (max-width: 767px) {
   .toolbar { flex-direction: column; align-items: stretch; gap: 12px; }
   .filters { flex-wrap: wrap; }
+  .filters > * { flex: 1 1 40%; min-width: 0; }
+  .filters .el-button { flex: 1 1 40%; }
 }
 </style>

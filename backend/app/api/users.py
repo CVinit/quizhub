@@ -146,6 +146,13 @@ def approve(user_id: int, db: Session = Depends(get_db), user: User = Depends(re
     return _to_dict(user_service.approve(db, user.id, user_id, dept_scope_ids(db, user)))
 
 
+@router.delete("/{user_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_user(user_id: int, db: Session = Depends(get_db), user: User = Depends(require_admin)):
+    """删除用户（仅超级管理员；不能删自己/最后一个超管）。级联清理其练习与考试数据。"""
+    user_service.delete_user(db, user.id, user.role, user_id, dept_scope_ids(db, user))
+    return None
+
+
 @router.post("/{user_id}/disable")
 def disable(user_id: int, db: Session = Depends(get_db), user: User = Depends(require_admin)):
     return _to_dict(user_service.set_status(db, user.id, user_id, False, dept_scope_ids(db, user)))

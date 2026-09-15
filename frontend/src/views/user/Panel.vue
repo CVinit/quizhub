@@ -51,7 +51,7 @@
 
     <div class="recent-tables">
       <div class="section-title">最近考试</div>
-      <el-table :data="recentExams" border v-if="recentExams.length" size="small">
+      <el-table :data="recentExams" border v-if="recentExams.length && !isMobile" size="small">
         <el-table-column prop="name" label="考试" min-width="160" />
         <el-table-column label="得分" width="120">
           <template #default="{ row }">{{ row.published ? `${row.score} / ${row.total_score}` : '待复核' }}</template>
@@ -63,9 +63,22 @@
           </template>
         </el-table-column>
       </el-table>
+      <!-- 手机端：考试卡片 -->
+      <div class="mobile-card-list" v-if="isMobile && recentExams.length">
+        <div class="mc" v-for="row in recentExams" :key="row.id">
+          <div class="mc-title">{{ row.name }}</div>
+          <div class="mc-row">
+            <span class="mc-label">结果</span>
+            <el-tag v-if="row.published" :type="row.passed ? 'success' : 'danger'" size="small">{{ row.passed ? '通过' : '未通过' }}</el-tag>
+            <el-tag v-else type="warning" size="small">待复核</el-tag>
+          </div>
+          <div class="mc-row" v-if="row.published"><span class="mc-label">得分</span>{{ row.score }} / {{ row.total_score }}</div>
+        </div>
+      </div>
+      <el-empty v-if="!recentExams.length" description="还没有考试记录" :image-size="80" />
 
       <div class="section-title">最近练习</div>
-      <el-table :data="recent" border v-if="recent.length" size="small">
+      <el-table :data="recent" border v-if="recent.length && !isMobile" size="small">
         <el-table-column prop="question" label="题目" min-width="320" show-overflow-tooltip>
           <template #default="{ row }">{{ row.question }}</template>
         </el-table-column>
@@ -79,7 +92,20 @@
         </el-table-column>
         <el-table-column prop="answered_at" label="时间" width="160" />
       </el-table>
-      <el-empty v-else description="还没有练习记录，去答题吧" :image-size="80" />
+      <!-- 手机端：练习卡片 -->
+      <div class="mobile-card-list" v-if="isMobile && recent.length">
+        <div class="mc" v-for="row in recent" :key="row.id ?? row.question">
+          <div class="mc-row">
+            <el-tag v-if="row.is_correct === true" type="success" size="small">正确</el-tag>
+            <el-tag v-else-if="row.is_correct === false" type="danger" size="small">错误</el-tag>
+            <el-tag v-else type="info" size="small">待自评</el-tag>
+            <el-tag type="info" size="small" effect="plain">{{ row.type }}</el-tag>
+          </div>
+          <div class="mc-title">{{ row.question }}</div>
+          <div class="mc-row" v-if="row.answered_at"><span class="mc-label">时间</span>{{ row.answered_at }}</div>
+        </div>
+      </div>
+      <el-empty v-if="!recent.length" description="还没有练习记录，去答题吧" :image-size="80" />
     </div>
   </div>
 </template>
@@ -90,8 +116,10 @@ import { useAuthStore } from '@/stores/auth'
 import { practiceApi } from '@/api/practice'
 import { Document, Refresh, Files, Warning, Collection } from '@/utils/icons'
 import { api } from '@/api/http'
+import { useResponsive } from '@/composables/useResponsive'
 
 const auth = useAuthStore()
+const { isMobile } = useResponsive()
 const loading = ref(false)
 const stats = ref({ total: 0, practiced: 0, wrong: 0, marked: 0, type_dist: {} as Record<string, number> })
 const recent = ref<any[]>([])
@@ -146,8 +174,10 @@ onMounted(load)
 .shortcut { background: #fff; border: 1px solid #ebeef5; border-radius: 8px; padding: 18px; display: flex; flex-direction: column; align-items: center; gap: 8px; cursor: pointer; transition: all .2s; }
 .shortcut:hover { box-shadow: 0 4px 12px rgba(0,0,0,.08); transform: translateY(-2px); }
 .shortcut .el-icon { font-size: 26px; color: var(--brand-primary); }
-/* 手机端：统计卡片/快捷入口单列，表格横向滚动 */
+/* 手机端：统计卡片/快捷入口单列收紧；最近考试/练习用卡片列表（模板内按 isMobile 切换） */
 @media (max-width: 767px) {
+  .panel { max-width: none; }
+  .hello { font-size: 18px; margin-bottom: 14px; }
   .stat-cards { grid-template-columns: repeat(2, 1fr); gap: 10px; }
   .stat-card { padding: 14px 8px; }
   .stat-num { font-size: 22px; }
@@ -155,6 +185,5 @@ onMounted(load)
   .shortcut { padding: 14px 6px; }
   .shortcut .el-icon { font-size: 22px; }
   .shortcut span { font-size: 12px; }
-  .recent-tables .el-table { font-size: 12px; }
 }
 </style>

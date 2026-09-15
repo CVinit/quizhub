@@ -188,5 +188,11 @@ onMounted(async () => {
 @media (max-width: 767px) {
   .step-body { padding: 16px 0; }
   .step-actions .el-button { flex: 1; }
+  /* 100px 固定 label 在手机上挤压输入区，改为上置标签 */
+  .step-body :deep(.el-form-item__label) {
+    display: block; text-align: left; width: 100% !important; padding-bottom: 4px;
+  }
+  .step-body :deep(.el-form-item) { display: block; }
+  .step-body :deep(.el-form-item__content) { margin-left: 0 !important; }
 }
 </style>

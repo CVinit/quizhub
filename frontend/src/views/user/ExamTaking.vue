@@ -212,25 +212,31 @@ const next = () => {
 
 const save = async (answer: any) => {
   if (!current.value || !session.value) return
-  // 多选：从 multiPicked 计算
-  let payload = answer
-  if (current.value.type === '多选题') {
-    payload = multiPicked.value.slice().sort().join('')
-  } else if (current.value.type === '拖拽题') {
+  const q = current.value
+  // 先更新本地 UI 状态，再发请求：否则点击后视图不刷新（选择题不高亮、填空/简答输入不落态），
+  // 表现为“第一题有变化、后续题目点了没反应”。
+  if (q.type === '多选题') {
+    answer = multiPicked.value.slice().sort().join('')
+  } else if (q.type === '拖拽题') {
     const mapping: Record<string, string> = {}
     Object.entries(dragMap).forEach(([right, left]) => { mapping[left] = right })
-    payload = mapping
-  } else if (current.value.type === '填空题') {
-    payload = blanks.value
-  } else if (current.value.type === '简答题') {
-    payload = shortAns.value
+    answer = mapping
+  } else if (q.type === '填空题') {
+    answer = blanks.value
+  } else if (q.type === '简答题') {
+    answer = shortAns.value
+  } else {
+    // 单选/判断：以点击项为准同步高亮状态
+    picked.value = typeof answer === 'string' ? answer : ''
   }
+  const payload = answer
+
   try {
-    const res = await examApi.answer(session.value.session_id, current.value.id, payload, version.value)
+    const res = await examApi.answer(session.value.session_id, q.id, payload, version.value)
     version.value = res.version
     // 同步到本地 answers 用于答题卡着色
     const ans = { ...session.value.answers }
-    ans[String(current.value.id)] = { answer: payload }
+    ans[String(q.id)] = { answer: payload }
     session.value.answers = ans
   } catch (err: any) {
     if (err.response?.status === 409) {

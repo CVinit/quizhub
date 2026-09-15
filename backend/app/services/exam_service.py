@@ -11,7 +11,7 @@ from datetime import datetime, timedelta, timezone
 from typing import cast
 
 from fastapi import HTTPException, status
-from sqlalchemy import or_, select, update
+from sqlalchemy import delete, func, or_, select, update
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -128,6 +128,11 @@ def _count_attempts(db: Session, exam_id: int, user_id: int) -> int:
 
 
 def _exam_brief(e: ExamDefinition, state: str, attempts: int = 0) -> dict:
+    """用户端考试摘要。
+
+    刻意不包含 rules / paper_template_id / group_ids：这些是组卷配置与指派范围，
+    属于管理端信息，不应暴露给参加考试的用户。
+    """
     return {
         "id": e.id,
         "name": e.name,
@@ -142,6 +147,27 @@ def _exam_brief(e: ExamDefinition, state: str, attempts: int = 0) -> dict:
         "max_attempts": e.max_attempts,
         "total_questions": _exam_question_count(e),
     }
+
+
+def _exam_admin_brief(e: ExamDefinition) -> dict:
+    """管理端考试列表项：在用户端摘要基础上补齐可编辑配置。
+
+    编辑弹窗需要回填组卷方式、题型配比、来源题库与指派分组；缺失这些字段会导致
+    打开编辑时配比/题库显示为空，保存后原配置被清空。
+    """
+    brief = _exam_brief(e, e.status)
+    brief.update(
+        {
+            "rules": e.rules or {},
+            "paper_template_id": e.paper_template_id,
+            "manual_questions": e.manual_questions,
+            "group_ids": e.group_ids or [],
+            "need_review": e.need_review,
+            "show_score_immediately": e.show_score_immediately,
+            "show_analysis": e.show_analysis,
+        }
+    )
+    return brief
 
 
 def _exam_question_count(e: ExamDefinition) -> int:
@@ -619,6 +645,26 @@ def save_mock_config(db: Session, config: dict) -> dict:
     return {"success": True}
 
 
+def _restrict_mock_config_to_enabled_banks(db: Session, rules: dict) -> dict:
+    """把模拟考试规则中的 bank_ids 收敛到「允许用户练习」的题库范围内。
+
+    模拟考试在产品上是练习性质（docs/requirement.md：练习性，不计正式档案；
+    用户端文案「可反复练习」），管理员界面对关闭练习的题库也明确标注为
+    「仅考试使用」——因此它必须和练习入口保持同一口径，否则用户仍能通过
+    模拟考试练到已关闭练习的题库，开关形同虚设。
+
+    规则：配置了 bank_ids 时取其与开放题库的交集；未配置（空/缺省）时
+    展开为全部开放题库，避免"空列表 = 不过滤"导致抽到已关闭的题库。
+    """
+    from app.services.practice_service import enabled_bank_ids
+
+    enabled = enabled_bank_ids(db)
+    configured = rules.get("bank_ids") or []
+    rules = dict(rules)
+    rules["bank_ids"] = [bid for bid in configured if bid in set(enabled)] if configured else enabled
+    return rules
+
+
 def start_mock_exam(db: Session, user: User) -> dict:
     """模拟考试：按默认规则即时生成并开考。
 
@@ -638,6 +684,7 @@ def start_mock_exam(db: Session, user: User) -> dict:
             "max_questions": 30,
         }
     )
+    config = _restrict_mock_config_to_enabled_banks(db, config)
     settings = get_settings(db, "exam")
     # 复用当前用户进行中的 mock 考试；无则新建
     existing = (
@@ -651,6 +698,10 @@ def start_mock_exam(db: Session, user: User) -> dict:
         .first()
     )
     if existing:
+        # 既有定义复用了旧的 rules；此处同步为按当前开放题库收敛后的范围，
+        # 否则管理员后来关闭某题库，复用中的模拟考试仍会抽到它。
+        existing.rules = _restrict_mock_config_to_enabled_banks(db, dict(existing.rules or {}))
+        db.commit()
         return start_exam(db, user, existing.id)
     e = ExamDefinition(
         name="模拟考试",
@@ -733,17 +784,34 @@ def create_template(db: Session, payload, user: User) -> dict:
     return {"id": tpl.id, "name": tpl.name, "count": paper["count"]}
 
 
+def delete_template(db: Session, template_id: int) -> None:
+    """删除试卷模板；被正式考试引用时拒绝删除（保持考试可追溯）。"""
+    tpl = db.get(PaperTemplate, template_id)
+    if tpl is None:
+        raise HTTPException(status_code=404, detail="模板不存在")
+    in_use = db.execute(
+        select(func.count()).select_from(ExamDefinition).where(ExamDefinition.paper_template_id == template_id)
+    ).scalar_one()
+    if in_use:
+        raise HTTPException(status_code=409, detail=f"模板已被 {in_use} 场考试引用，无法删除")
+    db.delete(tpl)
+    db.commit()
+
+
 # ---------- 管理端：正式考试 ----------
-def list_exams(db: Session, scope: set[int] | None = None) -> list[dict]:
+def list_exams(
+    db: Session, scope: set[int] | None = None, status_: str | None = None
+) -> list[dict]:
     """管理端正式考试列表。scope 非 None（部门管理员）时仅返回指派分组落在
     其子树内、或无指派（全量）的考试由 super_admin 可见——这里按 group_ids 与 scope 取交集过滤，
     无指派的考试仅 super_admin 可见（避免 dept_admin 看到未指派给其部门的考试）。
+
+    status_ 为 None 时返回全部状态（含已归档）；显式传入时按状态筛选。
     """
-    rows = (
-        db.execute(select(ExamDefinition).where(ExamDefinition.type == "formal").order_by(ExamDefinition.id.desc()))
-        .scalars()
-        .all()
-    )
+    stmt = select(ExamDefinition).where(ExamDefinition.type == "formal")
+    if status_:
+        stmt = stmt.where(ExamDefinition.status == status_)
+    rows = db.execute(stmt.order_by(ExamDefinition.id.desc())).scalars().all()
     out = []
     for e in rows:
         if scope is not None:
@@ -751,7 +819,7 @@ def list_exams(db: Session, scope: set[int] | None = None) -> list[dict]:
             if not e_groups or not set(e_groups).issubset(scope):
                 # 无指派考试默认全员可见，但部门管理员不应看到此类全局考试
                 continue
-        out.append(_exam_brief(e, e.status))
+        out.append(_exam_admin_brief(e))
     return out
 
 
@@ -815,13 +883,20 @@ def _validate_exam_question_scope(
 
 
 def list_results(
-    db: Session, exam_id: int | None = None, scope: set[int] | None = None, limit: int = 500
+    db: Session,
+    exam_id: int | None = None,
+    scope: set[int] | None = None,
+    limit: int = 500,
+    outcome: str | None = None,
 ) -> list[dict]:
     """管理端：考试成绩列表（JOIN 一次取齐关联信息，消除 N+1）。
 
     scope 非 None（部门管理员）时仅返回其数据范围内用户的成绩，杜绝跨部门窥探成绩。
     保留返回 list 的契约：前端按全部成绩做客户端关键字过滤，未引入分页控件，
     故不改变响应结构；性能瓶颈（逐行 db.get）已由 JOIN 消除。
+
+    outcome 为状态筛选（None=全部）：passed/failed 按是否及格，
+    pending 为待复核（need_review=True 且未公布），published 为已公布。
     """
     from app.core.deps import users_in_scope
     from app.models.exam import ExamDefinition
@@ -842,6 +917,14 @@ def list_results(
     )
     if exam_id:
         stmt = stmt.where(ExamResult.exam_definition_id == exam_id)
+    if outcome == "passed":
+        stmt = stmt.where(ExamResult.passed.is_(True))
+    elif outcome == "failed":
+        stmt = stmt.where(ExamResult.passed.is_(False))
+    elif outcome == "pending":
+        stmt = stmt.where(ExamResult.published.is_(False), ExamResult.need_review.is_(True))
+    elif outcome == "published":
+        stmt = stmt.where(ExamResult.published.is_(True))
     if scope is not None:
         if not exam_id:
             allowed_exam_ids = {
@@ -944,6 +1027,62 @@ def update_exam(db: Session, exam_id: int, payload: dict, scope: set[int] | None
     ):
         if k in payload:
             setattr(e, k, payload[k])
+    db.commit()
+    db.refresh(e)
+    return {"id": e.id, "name": e.name, "status": e.status}
+
+
+def delete_exam(db: Session, exam_id: int, scope: set[int] | None = None) -> None:
+    """删除考试。
+
+    可删除条件：无任何作答记录（ExamSession）。草稿与已发布但无人作答的考试
+    （典型如测试考试）都可删除；一旦有作答记录则拒绝，改用「归档」以保留成绩可追溯。
+    """
+    e = db.get(ExamDefinition, exam_id)
+    if not e:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "考试不存在")
+    _check_exam_scope(db, e, scope)
+    sessions = db.execute(
+        select(func.count()).select_from(ExamSession).where(ExamSession.exam_definition_id == exam_id)
+    ).scalar_one()
+    if sessions:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            f"该考试已有 {sessions} 条作答记录，无法删除；请改用「归档」（归档后对用户隐藏，成绩仍可追溯）",
+        )
+    # 一并清理成绩/复核等无会话关联的残留（防御历史脏数据导致外键失败）
+    result_ids = select(ExamResult.id).where(ExamResult.exam_definition_id == exam_id).scalar_subquery()
+    db.execute(delete(ShortAnswerReview).where(ShortAnswerReview.exam_result_id.in_(result_ids)))
+    db.execute(delete(ExamResult).where(ExamResult.exam_definition_id == exam_id))
+    db.execute(delete(ExamQuestion).where(ExamQuestion.exam_definition_id == exam_id))
+    db.delete(e)
+    db.commit()
+
+
+def archive_exam(db: Session, exam_id: int, scope: set[int] | None = None) -> dict:
+    """归档考试：对用户隐藏（不再出现在可用列表），但保留定义与成绩记录。
+
+    用于已发布且已有作答记录、不能删除的考试（如测试考试）。
+    """
+    e = db.get(ExamDefinition, exam_id)
+    if not e:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "考试不存在")
+    _check_exam_scope(db, e, scope)
+    e.status = "archived"
+    db.commit()
+    db.refresh(e)
+    return {"id": e.id, "name": e.name, "status": e.status}
+
+
+def unarchive_exam(db: Session, exam_id: int, scope: set[int] | None = None) -> dict:
+    """取消归档：恢复为已发布（重新对用户可见）。"""
+    e = db.get(ExamDefinition, exam_id)
+    if not e:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "考试不存在")
+    _check_exam_scope(db, e, scope)
+    if e.status != "archived":
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "该考试未处于归档状态")
+    e.status = "published"
     db.commit()
     db.refresh(e)
     return {"id": e.id, "name": e.name, "status": e.status}
