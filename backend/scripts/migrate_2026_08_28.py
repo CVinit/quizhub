@@ -82,7 +82,20 @@ def migrate_active_session_index(conn: sqlite3.Connection) -> None:
     logger.info("[migrate] uq_active_exam_session 已创建")
 
 
+def _table_exists(conn: sqlite3.Connection, table: str) -> bool:
+    return bool(
+        conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)).fetchone()
+    )
+
+
 def migrate_exam_question_unique(conn: sqlite3.Connection) -> None:
+    # 中断恢复：上一次迁移可能在 RENAME 后、回填前失败（例如索引名冲突），
+    # 留下空的 exam_questions + 有数据的 exam_questions_old。此时必须先把数据
+    # 搬回去，否则后续判断会误认为"已迁移完成"而永久丢数据。
+    if _table_exists(conn, "exam_questions_old"):
+        logger.warning("[migrate] 检测到中断的重建（exam_questions_old 残留），先恢复数据 ...")
+        _recover_interrupted_rebuild(conn)
+
     if _table_has_index(conn, "uq_exam_question"):
         logger.info("[migrate] uq_exam_question 已存在，跳过")
         return
@@ -99,6 +112,12 @@ def migrate_exam_question_unique(conn: sqlite3.Connection) -> None:
     logger.info("[migrate] 为 exam_questions 重建表以增加唯一约束 uq_exam_question ...")
     conn.execute("PRAGMA foreign_keys=OFF")
     conn.execute("ALTER TABLE exam_questions RENAME TO exam_questions_old")
+    # SQLite 的 RENAME 会把原表的索引一并带走并保留索引名，
+    # 若在此处不删除，下面的 CREATE INDEX 会因"索引名已存在"失败，
+    # 导致迁移中断在"已 RENAME、未回填"的危险状态（exam_questions 变空）。
+    for idx in ("ix_exam_questions_exam_definition_id", "ix_exam_questions_question_id", "uq_exam_question"):
+        if _table_has_index(conn, idx):
+            conn.execute(f"DROP INDEX {idx}")
     conn.execute(
         """
         CREATE TABLE exam_questions (
@@ -124,6 +143,44 @@ def migrate_exam_question_unique(conn: sqlite3.Connection) -> None:
     conn.execute("PRAGMA foreign_keys=ON")
     conn.commit()
     logger.info("[migrate] uq_exam_question 已创建")
+
+
+def _recover_interrupted_rebuild(conn: sqlite3.Connection) -> None:
+    """从"已 RENAME 但未回填"的中断状态恢复 exam_questions 数据。
+
+    中断特征：exam_questions 为空（或不存在）而 exam_questions_old 有数据。
+    恢复策略：以 old 表为准重建目标表并回填，最后删除 old 表。
+    """
+    old_count = conn.execute("SELECT COUNT(*) FROM exam_questions_old").fetchone()[0]
+    new_count = (
+        conn.execute("SELECT COUNT(*) FROM exam_questions").fetchone()[0]
+        if _table_exists(conn, "exam_questions")
+        else 0
+    )
+    if new_count >= old_count and new_count > 0:
+        # 目标表已有完整数据，仅需清理残留 old 表
+        conn.execute("DROP TABLE exam_questions_old")
+        conn.commit()
+        logger.info("[migrate] exam_questions 数据完整（%d 行），已清理残留旧表", new_count)
+        return
+
+    logger.warning(
+        "[migrate] 检测到数据未回填（新表 %d 行 < 旧表 %d 行），正在恢复 ...", new_count, old_count
+    )
+    conn.execute("PRAGMA foreign_keys=OFF")
+    if _table_exists(conn, "exam_questions"):
+        conn.execute("DROP TABLE exam_questions")
+    conn.execute("ALTER TABLE exam_questions_old RENAME TO exam_questions")
+    # RENAME 会把 old 表上的索引带过来并保留名字，必须先删掉同名索引再新建
+    for idx in ("ix_exam_questions_exam_definition_id", "ix_exam_questions_question_id", "uq_exam_question"):
+        if _table_has_index(conn, idx):
+            conn.execute(f"DROP INDEX {idx}")
+    conn.execute("CREATE INDEX ix_exam_questions_exam_definition_id ON exam_questions (exam_definition_id)")
+    conn.execute("CREATE INDEX ix_exam_questions_question_id ON exam_questions (question_id)")
+    conn.execute("PRAGMA foreign_keys=ON")
+    conn.commit()
+    restored = conn.execute("SELECT COUNT(*) FROM exam_questions").fetchone()[0]
+    logger.info("[migrate] 已恢复 exam_questions：%d 行", restored)
 
 
 def migrate_legacy_plain_settings(conn: sqlite3.Connection) -> None:
