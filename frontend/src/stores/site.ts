@@ -8,6 +8,14 @@ interface SiteInfo {
   rank_visible: boolean
 }
 
+/**
+ * 进行中的站点信息请求。
+ *
+ * LogoMark（setup 期）、useTheme（App mounted）、路由守卫三处都会触发加载，
+ * 复用同一个 Promise 可避免首屏并发发出多次 /system/site。
+ */
+let inflight: Promise<void> | null = null
+
 /** 站点信息（站点名、Logo、主题色），全应用共享，仅拉取一次。 */
 export const useSiteStore = defineStore('site', {
   state: () => ({
@@ -26,16 +34,25 @@ export const useSiteStore = defineStore('site', {
       if (this.loaded) return
       await this.refresh()
     },
-    /** 强制重新拉取站点设置（绕过 loaded 缓存，用于需要实时性的场景如排行可见性校验）。 */
+    /** 拉取站点设置（绕过 loaded 缓存，用于需要实时性的场景如排行可见性校验）。 */
     async refresh() {
-      try {
-        const data = await api.get<SiteInfo>('/system/site')
-        this.site_name = data.site_name || '培训考试平台'
-        this.site_logo = data.site_logo || ''
-        this.brand_color = data.brand_color || '#E60012'
-        this.rank_visible = data.rank_visible !== false
-      } catch { /* 忽略，用默认 */ }
-      this.loaded = true
+      if (inflight) return inflight
+      const request = (async () => {
+        try {
+          const data = await api.get<SiteInfo>('/system/site')
+          this.site_name = data.site_name || '培训考试平台'
+          this.site_logo = data.site_logo || ''
+          this.brand_color = data.brand_color || '#E60012'
+          this.rank_visible = data.rank_visible !== false
+        } catch {
+          // 忽略，用默认值
+        } finally {
+          this.loaded = true
+          inflight = null
+        }
+      })()
+      inflight = request
+      return request
     },
     /** Logo 上传成功后本地同步（避免重新拉取）。 */
     setLogo(url: string) {

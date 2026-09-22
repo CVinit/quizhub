@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile, status
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
@@ -11,8 +12,10 @@ from app.database import get_db
 from app.models.user import User
 from app.schemas.question import (
     QuestionBankCreate,
+    QuestionBankOut,
     QuestionBankUpdate,
     QuestionCreate,
+    QuestionOut,
     QuestionUpdate,
 )
 from app.services import import_service, question_service
@@ -34,14 +37,14 @@ def list_banks(
     return question_service.list_banks(db, dept_scope_ids(db, user), practice_enabled)
 
 
-@router.post("/question-banks", status_code=status.HTTP_201_CREATED)
+@router.post("/question-banks", status_code=status.HTTP_201_CREATED, response_model=QuestionBankOut)
 def create_bank(payload: QuestionBankCreate, db: Session = Depends(get_db), user: User = Depends(require_admin)):
     b = question_service.create_bank(db, payload, dept_scope_ids(db, user))
     audit_log(db, user.id, "question_bank.create", "question_bank", b.id, {"name": b.name})
     return b
 
 
-@router.put("/question-banks/{bank_id}")
+@router.put("/question-banks/{bank_id}", response_model=QuestionBankOut)
 def update_bank(
     bank_id: int,
     payload: QuestionBankUpdate,
@@ -58,7 +61,9 @@ def update_bank(
         bank_id,
         payload.model_dump(exclude_unset=True),
     )
-    return {"id": b.id, "name": b.name, "practice_enabled": bool(b.practice_enabled)}
+    # 返回完整题库对象并由 schema 收敛字段：原实现手拼 dict 漏了 group_id，
+    # 与前端 `QuestionBank` 类型不符（类型上 group_id 是必填）。
+    return b
 
 
 @router.delete("/question-banks/{bank_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -116,14 +121,14 @@ def question_type_stats(
     )
 
 
-@router.post("/questions", status_code=status.HTTP_201_CREATED)
+@router.post("/questions", status_code=status.HTTP_201_CREATED, response_model=QuestionOut)
 def create_question(payload: QuestionCreate, db: Session = Depends(get_db), user: User = Depends(require_admin)):
     q = question_service.create_question(db, payload, dept_scope_ids(db, user))
     audit_log(db, user.id, "question.create", "question", q.id, {"type": payload.type})
     return q
 
 
-@router.put("/questions/{qid}")
+@router.put("/questions/{qid}", response_model=QuestionOut)
 def update_question(
     qid: int, payload: QuestionUpdate, db: Session = Depends(get_db), user: User = Depends(require_admin)
 ):
@@ -178,7 +183,7 @@ async def upload_preview(
     max_bytes = int(max_mb * 1024 * 1024)
     declared = file.size or 0
     if declared and declared > max_bytes:
-        raise HTTPException(status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, f"文件超过上限 {max_mb}MB")
+        raise HTTPException(status.HTTP_413_CONTENT_TOO_LARGE, f"文件超过上限 {max_mb}MB")
     # 分块读取，超过上限即中止，避免一次性 read() 耗尽内存
     chunks: list[bytes] = []
     total = 0
@@ -188,11 +193,16 @@ async def upload_preview(
             break
         total += len(chunk)
         if total > max_bytes:
-            raise HTTPException(status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, f"文件超过上限 {max_mb}MB")
+            raise HTTPException(status.HTTP_413_CONTENT_TOO_LARGE, f"文件超过上限 {max_mb}MB")
         chunks.append(chunk)
     content = b"".join(chunks)
+    scope = dept_scope_ids(db, user)
     try:
-        return import_service.preview(db, content, group_id, bank_id, bank_name, user.id, dept_scope_ids(db, user))
+        # openpyxl 解析大工作簿是 CPU 密集型同步工作；在 async 路由内直接调用会
+        # 阻塞事件循环，导致其它请求全部挂起。放到线程池执行。
+        return await run_in_threadpool(
+            import_service.preview, db, content, group_id, bank_id, bank_name, user.id, scope
+        )
     except ValueError as exc:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
 

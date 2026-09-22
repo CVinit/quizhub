@@ -10,7 +10,7 @@ from typing import Any
 import bcrypt
 from jose import JWTError, jwt
 
-from app.config import ALGORITHM, SECRET_KEY, SETTINGS_ENC_KEY
+from app.config import ACCESS_TOKEN_EXPIRE_MINUTES, ALGORITHM, SECRET_KEY, SETTINGS_ENC_KEY
 
 # 敏感设置（如 SMTP 密码）在读取接口中的展示掩码。
 # 生产端（API 读取）与消费端（update_settings 跳过写回）必须共用同一常量：
@@ -36,7 +36,9 @@ def verify_password(plain: str, hashed: str) -> bool:
 
 
 def create_access_token(subject: str | int, extra: dict[str, Any] | None = None) -> str:
-    expire = datetime.now(timezone.utc) + timedelta(days=7)
+    # 有效期统一由 config.ACCESS_TOKEN_EXPIRE_MINUTES 决定（原实现硬编码 days=7，
+    # 使该配置项成为永不生效的死配置，两处一旦不同步就是安全/体验问题）。
+    expire = datetime.now(timezone.utc) + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
     payload = {"sub": str(subject), "exp": expire}
     if extra:
         payload.update(extra)

@@ -23,9 +23,15 @@ export function useResponsive() {
   let mqlTablet: MediaQueryList | null = null
   let mqlDesktop: MediaQueryList | null = null
 
-  const onMobile = (e: MediaQueryListEvent) => { isMobile.value = e.matches }
-  const onTablet = (e: MediaQueryListEvent) => { isTablet.value = e.matches }
-  const onDesktop = (e: MediaQueryListEvent) => { isDesktop.value = e.matches }
+  const onMobile = (e: MediaQueryListEvent) => {
+    isMobile.value = e.matches
+  }
+  const onTablet = (e: MediaQueryListEvent) => {
+    isTablet.value = e.matches
+  }
+  const onDesktop = (e: MediaQueryListEvent) => {
+    isDesktop.value = e.matches
+  }
 
   onMounted(() => {
     if (!hasMql) return

@@ -67,6 +67,12 @@ class RateLimiter:
         for k in expired:
             del self._store[k]
 
+    def reset(self) -> None:
+        """清空全部计数（测试隔离用：固定窗口是进程内单例，会跨用例累积）。"""
+        with self._lock:
+            self._store.clear()
+            self._last_gc = 0.0
+
 
 limiter = RateLimiter()
 

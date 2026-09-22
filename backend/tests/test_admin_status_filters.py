@@ -14,6 +14,7 @@ import secrets
 from fastapi import HTTPException
 from sqlalchemy import select
 
+from app.core.errors import DomainError
 from app.core.security import hash_password
 from app.database import db_session, init_db
 from app.models.exam import ExamDefinition
@@ -240,6 +241,9 @@ def test_review_list_verdict_filter():
         # 已复核项需带上结论字段，供前端只读展示
         done = review_service.list_pending(db, None, 500, "done")
         assert all(r["verdict"] in ("pass", "fail") for r in done)
+        # 「部分得分」上限必须用该题分值校验（前端硬编码会超分/给不满）
+        assert all(r["score"] == 2 for r in done)
+        assert review_service.list_pending(db, None, 500, "pending")[0]["score"] == 2
 
 
 def test_review_still_rejects_double_review():
@@ -286,7 +290,7 @@ def test_review_still_rejects_double_review():
         try:
             review_service.review(db, r.id, "fail", None, admin, None)
             raise AssertionError("已复核项被重复复核")
-        except HTTPException as exc:
+        except (DomainError, HTTPException) as exc:
             assert exc.status_code == 400
 
 

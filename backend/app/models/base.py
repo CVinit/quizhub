@@ -5,16 +5,11 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
-
 from sqlalchemy import Integer, String
 from sqlalchemy.orm import Mapped, mapped_column
 
+from app.core.timeutil import utcnow_iso
 from app.database import Base
-
-
-def _now() -> str:
-    return datetime.now(timezone.utc).isoformat()
 
 
 class PKMixin(Base):
@@ -26,4 +21,4 @@ class PKMixin(Base):
 class TimestampMixin(Base):
     __abstract__ = True
 
-    created_at: Mapped[str] = mapped_column(String, default=_now, nullable=False)
+    created_at: Mapped[str] = mapped_column(String, default=utcnow_iso, nullable=False)

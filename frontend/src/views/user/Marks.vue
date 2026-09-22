@@ -3,11 +3,16 @@
     <div class="toolbar">
       <span class="title">我的标记</span>
       <div class="filters">
-        <el-select v-model="filters.type" placeholder="题型" clearable style="width: 130px" @change="load">
+        <el-select v-model="filters.type" placeholder="题型" clearable aria-label="按题型筛选" style="width: 130px">
           <el-option v-for="t in types" :key="t" :label="t" :value="t" />
         </el-select>
-        <el-input v-model="filters.keyword" placeholder="题干关键词" clearable style="width: 200px" @keyup.enter="load" />
-        <el-button type="primary" @click="load">查询</el-button>
+        <el-input
+          v-model="filters.keyword"
+          placeholder="题干关键词"
+          clearable
+          aria-label="按题干关键词筛选"
+          style="width: 200px"
+        />
       </div>
     </div>
 
@@ -35,13 +40,15 @@
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref } from 'vue'
 import { useRouter } from 'vue-router'
-import { ElMessage, ElMessageBox } from 'element-plus'
+import { ElMessage } from 'element-plus'
 import { practiceApi, type Question } from '@/api/practice'
+import { QUESTION_TYPES } from '@/constants/question'
+import { promptBox } from '@/utils/dialog'
 
 const router = useRouter()
 const loading = ref(false)
-const rows = ref<(Question & { marked_note?: string })[]>([])
-const types = ['单选题', '多选题', '判断题', '填空题', '简答题', '拖拽题']
+const rows = ref<Question[]>([])
+const types = QUESTION_TYPES
 const filters = reactive({ type: '', keyword: '' })
 
 const filtered = computed(() => {
@@ -55,6 +62,8 @@ const load = async () => {
   loading.value = true
   try {
     rows.value = await practiceApi.start('mark')
+  } catch {
+    // 加载失败：http 拦截器已提示；保留当前列表，避免把失败误显示为“还没有标记”
   } finally {
     loading.value = false
   }
@@ -64,36 +73,97 @@ const redo = () => {
   router.push({ name: 'answer', params: { mode: 'mark' } })
 }
 
-const toggleMark = async (q: any) => {
-  await practiceApi.toggleMark(q.id, false)
+const toggleMark = async (q: Question) => {
+  try {
+    await practiceApi.toggleMark(q.id, false)
+  } catch {
+    // http 拦截器已提示
+    return
+  }
   ElMessage.success('已取消标记')
   await load()
 }
 
-const addNote = async (q: any) => {
-  const { value } = await ElMessageBox.prompt('请输入备注', '标记备注', {
-    inputValue: q.marked_note || '', inputPlaceholder: '可选的解题笔记',
+const addNote = async (q: Question) => {
+  const hadNote = !!q.marked_note
+  const value = await promptBox('请输入备注', '标记备注', {
+    inputValue: q.marked_note || '',
+    inputPlaceholder: '可选的解题笔记',
   })
-  await practiceApi.toggleMark(q.id, true, value || '')
-  q.marked_note = value || ''
-  ElMessage.success('已保存')
+  if (value === null) return
+  // 输入框已用现有备注预填，因此「清空后确认」是明确的删除意图（不会误清空）；
+  // 本来就无备注又提交空值则直接跳过，避免无意义的写请求。
+  if (value.trim() === '' && !hadNote) return
+  try {
+    await practiceApi.toggleMark(q.id, true, value)
+  } catch {
+    // http 拦截器已提示
+    return
+  }
+  q.marked_note = value
+  ElMessage.success(value.trim() === '' && hadNote ? '已清除备注' : '已保存')
 }
 
 onMounted(load)
 </script>
 
 <style scoped>
-.marks-page { max-width: 1000px; }
-.toolbar { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; }
-.title { font-size: 18px; font-weight: 600; }
-.filters { display: flex; gap: 8px; }
-.card-list { display: flex; flex-direction: column; gap: 12px; }
-.q-card { background: #fff; border: 1px solid #ebeef5; border-left: 3px solid #e6a23c; border-radius: 8px; padding: 16px 20px; }
-.card-head { display: flex; gap: 8px; align-items: center; margin-bottom: 10px; flex-wrap: wrap; }
-.note { color: #909399; font-size: 13px; word-break: break-all; }
-.q-stem { font-size: 15px; line-height: 1.6; margin-bottom: 12px; white-space: pre-wrap; word-break: break-word; }
-.card-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.marks-page {
+  max-width: 1000px;
+}
+.toolbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 16px;
+}
+.title {
+  font-size: 18px;
+  font-weight: 600;
+}
+.filters {
+  display: flex;
+  gap: 8px;
+}
+.card-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.q-card {
+  background: var(--el-bg-color);
+  border: 1px solid var(--el-border-color-lighter);
+  border-left: 3px solid var(--el-color-warning);
+  border-radius: 8px;
+  padding: 16px 20px;
+}
+.card-head {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin-bottom: 10px;
+  flex-wrap: wrap;
+}
+.note {
+  color: var(--el-text-color-secondary);
+  font-size: 13px;
+  word-break: break-all;
+}
+.q-stem {
+  font-size: 15px;
+  line-height: 1.6;
+  margin-bottom: 12px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.card-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
 @media (max-width: 767px) {
-  .q-card { padding: 14px; }
+  .q-card {
+    padding: 14px;
+  }
 }
 </style>

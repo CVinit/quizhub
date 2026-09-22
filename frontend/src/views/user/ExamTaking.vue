@@ -4,36 +4,35 @@
       <!-- 顶部信息条 -->
       <div class="topbar">
         <div class="exam-title">{{ session.exam_name }}</div>
-        <div class="countdown" :class="{ urgent: urgent }">
+        <div class="countdown" :class="{ urgent: urgent }" role="timer" :aria-label="`剩余时间 ${countdown}`">
           <el-icon><Clock /></el-icon>
-          <span>{{ countdown }}</span>
-          <span class="hint" v-if="urgent">即将交卷！</span>
+          <span aria-hidden="true">{{ countdown }}</span>
+          <span class="hint" v-if="urgent" aria-live="polite">即将交卷！</span>
         </div>
       </div>
 
       <div class="layout">
         <!-- 答题卡 -->
-        <div class="answer-card">
-          <div class="card-title-row">
-            <span class="card-title">答题卡</span>
-            <el-icon class="card-toggle" @click="cardOpen = !cardOpen"><ArrowDown v-if="!cardOpen" /><ArrowUp v-else /></el-icon>
-          </div>
-          <div class="grid" v-show="cardOpen">
-            <div
-              v-for="q in session.questions" :key="q.id"
-              class="cell" :class="cellClass(q)"
-              @click="jumpTo(q.seq)">
-              {{ q.seq + 1 }}
-            </div>
-          </div>
-          <div class="legend" v-show="cardOpen">
-            <span><i class="dot answered"></i>已答</span>
-            <span><i class="dot"></i>未答</span>
-            <span><i class="dot current"></i>当前</span>
-          </div>
-          <el-button type="danger" class="submit-btn" @click="confirmSubmit" :loading="submitting">
-            交卷
-          </el-button>
+        <div class="side">
+          <AnswerCard
+            v-model:open="cardOpen"
+            title="答题卡"
+            :count="session.questions.length"
+            :active-index="currentIndex"
+            :cell-class="cellClass"
+            :legend="cardLegend"
+            @jump="onJump"
+          >
+            <el-button
+              type="danger"
+              class="submit-btn"
+              data-testid="exam-submit"
+              @click="confirmSubmit"
+              :loading="submitting"
+            >
+              交卷
+            </el-button>
+          </AnswerCard>
         </div>
 
         <!-- 题目区 -->
@@ -45,73 +44,36 @@
           </div>
           <div class="q-stem">{{ current.question }}</div>
 
-          <!-- 单选 -->
-          <template v-if="current.type === '单选题'">
-            <div
-              v-for="(opt, i) in current.options || []" :key="i"
-              class="option" :class="{ picked: isPicked(letter(i)) }"
-              @click="save(letter(i))">
-              <span class="opt-letter">{{ letter(i) }}</span>
-              <span class="opt-text">{{ opt }}</span>
-            </div>
-          </template>
-
-          <!-- 判断 -->
-          <template v-if="current.type === '判断题'">
-            <div
-              v-for="opt in judgeOptions" :key="opt"
-              class="option" :class="{ picked: isPicked(opt) }"
-              @click="save(opt)">
-              <span class="opt-letter">{{ opt === '正确' ? '✓' : '✗' }}</span>
-              <span class="opt-text">{{ opt }}</span>
-            </div>
-          </template>
-
-          <!-- 多选 -->
-          <template v-if="current.type === '多选题'">
-            <div
-              v-for="(opt, i) in current.options || []" :key="i"
-              class="option" :class="{ picked: multiPicked.includes(letter(i)) }"
-              @click="toggleMulti(letter(i))">
-              <span class="opt-letter">{{ letter(i) }}</span>
-              <span class="opt-text">{{ opt }}</span>
-            </div>
-          </template>
-
-          <!-- 填空 -->
-          <template v-if="current.type === '填空题'">
-            <div v-for="(b, i) in blanks" :key="i" class="blank-row">
-              <span class="blank-label">空{{ i + 1 }}</span>
-              <el-input v-model="blanks[i]" @blur="save(blanks.filter(x => x).length ? blanks : null)" placeholder="请输入" />
-            </div>
-          </template>
-
-          <!-- 简答 -->
-          <template v-if="current.type === '简答题'">
-            <el-input v-model="shortAns" type="textarea" :rows="6" @blur="save(shortAns)" placeholder="请输入答案" />
-          </template>
-
-          <!-- 拖拽 -->
-          <template v-if="current.type === '拖拽题'">
-            <div class="drag-area">
-              <div class="drag-source">
-                <div v-for="item in shuffledLeft" :key="item"
-                  class="drag-item" draggable="true"
-                  @dragstart="dragItem = item" @click="pickSource(item)">{{ item }}</div>
-              </div>
-              <div class="drag-target">
-                <div v-for="right in (current.right_items || [])" :key="right" class="drop-zone"
-                  @dragover.prevent @drop="onDrop(right)" @click="unassign(right)">
-                  <span class="zone-label">{{ right }}</span>
-                  <span class="zone-value">{{ dragMap[right] || '—' }}</span>
-                </div>
-              </div>
-            </div>
-          </template>
+          <QuestionBody
+            :question="current"
+            :picked="picked"
+            :multi-picked="multiPicked"
+            :blanks="blanks"
+            :short-ans="shortAns"
+            :drag-map="dragMap"
+            :shuffled-left="shuffledLeft"
+            :short-rows="6"
+            @pick="onPick"
+            @toggle-multi="onToggleMulti"
+            @update-blank="updateBlank"
+            @update:short-ans="setShortAns"
+            @blur="saveOnBlur"
+            @drag-start="startDrag"
+            @pick-source="onPickSource"
+            @drop="onDropTarget"
+            @unassign="onUnassign"
+          />
 
           <div class="actions">
-            <el-button :disabled="current.seq === 0" @click="prev">上一题</el-button>
-            <el-button type="primary" @click="next">下一题</el-button>
+            <el-button :disabled="current.seq === 0" data-testid="exam-prev" @click="prev">上一题</el-button>
+            <el-button
+              type="primary"
+              data-testid="exam-next"
+              :disabled="currentIndex >= session.questions.length - 1"
+              @click="next"
+            >
+              下一题
+            </el-button>
           </div>
         </div>
       </div>
@@ -120,12 +82,19 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, reactive, ref } from 'vue'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRoute, useRouter, onBeforeRouteLeave } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Clock, ArrowDown, ArrowUp } from '@element-plus/icons-vue'
-import { examApi, type ExamSession } from '@/api/exam'
+import { Clock } from '@element-plus/icons-vue'
+import { examApi, type ExamSession, type ExamSessionDetail } from '@/api/exam'
+import type { QuestionAnswer } from '@/api/practice'
+import { httpStatusOf } from '@/api/http'
+import AnswerCard from '@/components/AnswerCard.vue'
+import QuestionBody from '@/components/QuestionBody.vue'
+import { useAnswerDraft } from '@/composables/useAnswerDraft'
+import { useCountdown } from '@/composables/useCountdown'
 import { useResponsive } from '@/composables/useResponsive'
+import { alertBox, confirmBox } from '@/utils/dialog'
 
 const route = useRoute()
 const router = useRouter()
@@ -135,68 +104,99 @@ const session = ref<ExamSession | null>(null)
 const version = ref(1)
 const currentSeq = ref(0)
 const submitting = ref(false)
-const countdown = ref('')
-const urgent = ref(false)
 const cardOpen = ref(!isMobile.value) // 手机端答题卡默认折叠，桌面端展开
 const submitted = ref(false)
+// 桌面端折叠按钮不可见，切回桌面时强制展开，避免卡片被永久折叠
+watch(isMobile, (mobile) => {
+  if (!mobile) cardOpen.value = true
+})
 
-const picked = ref('') // 当前单选/判断
-const multiPicked = ref<string[]>([])
-const blanks = ref<string[]>([])
-const shortAns = ref('')
-const dragMap = reactive<Record<string, string>>({})
-const shuffledLeft = ref<string[]>([])
-const dragItem = ref('')
-const judgeOptions = ['正确', '错误'] // 判断题固定选项（DB 中 options 为 null）
+// 作答状态与载荷转换与练习页共用（见 useAnswerDraft），本页只负责保存时机与交卷
+const {
+  picked,
+  multiPicked,
+  blanks,
+  shortAns,
+  dragMap,
+  shuffledLeft,
+  applyAnswer,
+  buildPayload,
+  hasAnswer,
+  toggleMulti,
+  updateBlank,
+  setShortAns,
+  pickSource,
+  startDrag,
+  dropOn,
+  unassign,
+} = useAnswerDraft()
 
-let timer: any = null
-let remaining = 0
+/** 截止时间驱动的倒计时：后台标签页被节流也不会多给时间。 */
+const {
+  seconds: remaining,
+  start: startTimer,
+  stop: stopTimer,
+  setOnVisible,
+} = useCountdown(() => {
+  ElMessage.warning('考试时间已到，自动交卷')
+  void doSubmit()
+})
+
+const countdown = computed(() => {
+  const s = remaining.value
+  const h = Math.floor(s / 3600)
+  const m = Math.floor((s % 3600) / 60)
+  const sec = s % 60
+  const mm = String(m).padStart(2, '0')
+  const ss = String(sec).padStart(2, '0')
+  return h > 0 ? `${h}:${mm}:${ss}` : `${m}:${ss}`
+})
+const urgent = computed(() => remaining.value <= 300)
 
 const current = computed(() => {
   const qs = session.value?.questions || []
   return qs.find((q) => q.seq === currentSeq.value) || qs[0]
 })
 
-const letter = (i: number) => String.fromCharCode(65 + i)
-const isPicked = (l: string) => picked.value === l
+/** 当前题在卷面中的下标（答题卡按题号下标工作）。 */
+const currentIndex = computed(() => {
+  const qs = session.value?.questions || []
+  const i = qs.findIndex((q) => q.seq === currentSeq.value)
+  return i >= 0 ? i : 0
+})
 
-const cellClass = (q: any) => {
+const onJump = (index: number) => {
+  const q = session.value?.questions[index]
+  if (q) jumpTo(q.seq)
+}
+
+/** 答题卡图例：考试页只区分已答/未答/当前（不显示对错，避免泄题）。 */
+const cardLegend = [
+  { text: '已答', className: 'dot-answered' },
+  { text: '未答', className: 'dot' },
+  { text: '当前', className: 'dot-current' },
+]
+
+/** 答题卡题号状态（由 AnswerCard 按题号下标回调）。 */
+const cellClass = (index: number) => {
   const cls: string[] = []
-  if (q.seq === currentSeq.value) cls.push('current')
-  const ans = session.value?.answers?.[String(q.id)]
-  if (ans && ans.answer !== null && ans.answer !== '' && ans.answer !== undefined) cls.push('answered')
+  if (index === currentIndex.value) cls.push('current')
+  const q = session.value?.questions[index]
+  if (q && hasAnswer(session.value?.answers?.[String(q.id)]?.answer)) cls.push('cell-answered')
   return cls
 }
 
+/** 用后端答案恢复当前题的交互状态；考试页左侧题项保持卷面顺序，避免两次进入顺序不同。 */
 const syncFromAnswers = () => {
   if (!current.value) return
-  const a = session.value?.answers?.[String(current.value.id)]?.answer
-  picked.value = ''
-  multiPicked.value = []
-  blanks.value = []
-  shortAns.value = ''
-  Object.keys(dragMap).forEach((k) => delete dragMap[k])
-  if (a == null) {
-    // 空
-  } else if (typeof a === 'string') {
-    picked.value = a
-  } else if (Array.isArray(a)) {
-    blanks.value = [...a]
-  } else if (typeof a === 'object') {
-    // 拖拽 left->right
-    Object.entries(a).forEach(([left, right]) => {
-      dragMap[String(right)] = left
-    })
+  // 当前题有未确认落库的作答（队列中的最新一次，或此前保存失败的）时不要用服务端副本
+  // 覆盖交互状态：reload() 的整表替换会丢掉用户正在输入的内容（简答/填空半截文本）。
+  const pending = unsaved.get(current.value.id)
+  if (pending !== undefined) {
+    applyAnswer(current.value, pending, { randomizeLeft: false })
+    return
   }
-  // 多选答案也用 string 存（已排序），还原需拆字符
-  if (current.value.type === '多选题' && typeof a === 'string') {
-    multiPicked.value = a.split('')
-    picked.value = ''
-  }
-  if (current.value.type === '填空题' && blanks.value.length === 0) {
-    blanks.value = (current.value.question.match(/_{2,}/g) || ['']).map(() => '')
-  }
-  shuffledLeft.value = [...(current.value.left_items || [])]
+  applyAnswer(current.value, session.value?.answers?.[String(current.value.id)]?.answer, { randomizeLeft: false })
 }
 
 const jumpTo = (seq: number) => {
@@ -204,186 +204,283 @@ const jumpTo = (seq: number) => {
   syncFromAnswers()
 }
 
-const prev = () => { if (currentSeq.value > 0) { currentSeq.value--; syncFromAnswers() } }
+const prev = () => {
+  if (currentSeq.value > 0) {
+    currentSeq.value--
+    syncFromAnswers()
+  }
+}
 const next = () => {
   const total = session.value?.questions.length || 0
-  if (currentSeq.value < total - 1) { currentSeq.value++; syncFromAnswers() }
+  if (currentSeq.value < total - 1) {
+    currentSeq.value++
+    syncFromAnswers()
+  }
 }
 
-const save = async (answer: any) => {
-  if (!current.value || !session.value) return
-  const q = current.value
-  // 先更新本地 UI 状态，再发请求：否则点击后视图不刷新（选择题不高亮、填空/简答输入不落态），
-  // 表现为“第一题有变化、后续题目点了没反应”。
-  if (q.type === '多选题') {
-    answer = multiPicked.value.slice().sort().join('')
-  } else if (q.type === '拖拽题') {
-    const mapping: Record<string, string> = {}
-    Object.entries(dragMap).forEach(([right, left]) => { mapping[left] = right })
-    answer = mapping
-  } else if (q.type === '填空题') {
-    answer = blanks.value
-  } else if (q.type === '简答题') {
-    answer = shortAns.value
-  } else {
-    // 单选/判断：以点击项为准同步高亮状态
-    picked.value = typeof answer === 'string' ? answer : ''
-  }
-  const payload = answer
+/**
+ * 作答请求必须串行：服务端以 `version` 做乐观锁（UPDATE ... WHERE version=?），
+ * 并发提交（连点多选、拖拽连放、连续失焦）会让后到的请求 409，而 409 的恢复路径
+ * reload() 用服务端副本整体覆盖本地，用户最新的一次选择会被静默丢掉。
+ * 串行后每个请求都能拿到上一个请求返回的 version，自冲突消失。
+ */
+let saveQueue: Promise<void> = Promise.resolve()
 
+/**
+ * 未确认落库的答案（题目 id → 载荷）。
+ *
+ * 非 409 的保存失败（网络中断/5xx/422）必须把答案留在这里：答题卡着色与交卷统计都基于本地
+ * `session.answers`，直接丢弃会让用户看到「已作答」而服务端没有这条答案，交卷后才发现丢题。
+ * 交卷前会补发一轮，仍失败则明确询问用户是否继续。
+ */
+const unsaved = new Map<number, QuestionAnswer>()
+const unsavedCount = ref(0)
+
+const syncUnsavedCount = () => {
+  unsavedCount.value = unsaved.size
+}
+
+/** 入队一次保存（队列自身永不 reject，保证后续保存不会被一次异常卡死）。 */
+const enqueue = (sid: number, qid: number, payload: QuestionAnswer) => {
+  saveQueue = saveQueue.then(() => sendAnswer(sid, qid, payload)).catch(() => {})
+  return saveQueue
+}
+
+const sendAnswer = async (sid: number, qid: number, payload: QuestionAnswer) => {
   try {
-    const res = await examApi.answer(session.value.session_id, q.id, payload, version.value)
+    const res = await examApi.answer(sid, qid, payload, version.value, { quiet: true })
     version.value = res.version
-    // 同步到本地 answers 用于答题卡着色
-    const ans = { ...session.value.answers }
-    ans[String(q.id)] = { answer: payload }
-    session.value.answers = ans
-  } catch (err: any) {
-    if (err.response?.status === 409) {
+    // 仅当期间没有产生更新的作答时才移出待保存集合（引用比较）
+    if (unsaved.get(qid) === payload) {
+      unsaved.delete(qid)
+      syncUnsavedCount()
+    }
+    // 把已落库的载荷合并回本地副本：reload() 会用服务端副本整体替换 session，
+    // 若本地副本里缺了这些答案，答题卡会涂成「未答」、交卷统计也会少算已答题。
+    if (session.value) {
+      session.value.answers = { ...session.value.answers, [String(qid)]: { answer: payload } }
+    }
+  } catch (err) {
+    if (httpStatusOf(err) === 409) {
+      // 串行后仍冲突 = 其它端/会话已推进版本，只能重新拉取
       ElMessage.error('数据版本冲突，正在刷新')
       await reload()
+      return
     }
+    // 其它失败：保留在 unsaved 中由交卷前补发，并提示用户，避免误以为已保存
+    ElMessage.error('答案暂未保存，将在交卷前自动重试')
   }
 }
 
-const toggleMulti = (l: string) => {
-  multiPicked.value = multiPicked.value.includes(l)
-    ? multiPicked.value.filter((x) => x !== l)
-    : [...multiPicked.value, l]
-  save(null)
+/** 保存当前题：载荷由 useAnswerDraft 按题型归一化，本页只负责入队与本地状态。 */
+const save = () => {
+  if (!current.value || !session.value) return
+  const q = current.value
+  const sid = session.value.session_id
+  const payload = buildPayload(q)
+
+  // 本地先落状态（答题卡着色、回看答案），请求排队异步发出
+  const ans = { ...session.value.answers }
+  ans[String(q.id)] = { answer: payload }
+  session.value.answers = ans
+
+  unsaved.set(q.id, payload)
+  syncUnsavedCount()
+  enqueue(sid, q.id, payload)
 }
 
-// 拖拽
-const pickSource = (item: string) => {
-  const rights = current.value?.right_items || []
-  const empty = rights.find((r: string) => !dragMap[r])
-  if (empty) { dragMap[empty] = item; save(null) }
+// 交互事件：先改本地状态，再触发一次保存
+const onPick = (value: string) => {
+  picked.value = value
+  save()
 }
-const onDrop = (right: string) => {
-  if (dragItem.value) {
-    Object.keys(dragMap).forEach((k) => { if (dragMap[k] === dragItem.value) delete dragMap[k] })
-    dragMap[right] = dragItem.value
-    dragItem.value = ''
-    save(null)
-  }
+const onToggleMulti = (letter: string) => {
+  toggleMulti(letter)
+  save()
 }
-const unassign = (right: string) => { delete dragMap[right]; save(null) }
+const onPickSource = (item: string) => {
+  pickSource(current.value, item)
+  save()
+}
+const onDropTarget = (right: string) => {
+  dropOn(right)
+  save()
+}
+const onUnassign = (right: string) => {
+  unassign(right)
+  save()
+}
+
+// 文本题只在失焦时保存：逐字符保存会把每次输入变成一次带乐观锁的写请求
+const saveOnBlur = () => save()
+
+/** 服务端已结束：放行离开守卫并停表，避免「已交卷」之后又被「尚未交卷」拦住停在空白页。 */
+const leaveFinished = async (message: string) => {
+  submitted.value = true
+  stopTimer()
+  ElMessage.warning(message)
+  await router.replace('/exam')
+}
 
 const reload = async () => {
-  // 版本冲突：重新拉取会话恢复进度（start 幂等；模拟考试用会话详情），失败则退回列表
+  // 只按会话 id 拉详情。再调 start 会在已交卷后另开一场（max_attempts 未用尽时）。
   try {
-    const examId = Number(route.query.examId) || 0
-    const s = examId ? await examApi.start(examId) : await examApi.sessionDetail(Number(route.params.id))
-    if ((s as any).finished) {
-      ElMessage.warning('该考试已交卷')
-      router.push('/exam')
+    const s: ExamSessionDetail = await examApi.sessionDetail(Number(route.params.id))
+    if (s.finished) {
+      await leaveFinished('该考试已交卷')
       return
     }
     session.value = s
     version.value = s.version
     syncFromAnswers()
   } catch {
-    router.push('/exam')
+    submitted.value = true
+    stopTimer()
+    await router.replace('/exam')
   }
 }
 
-const startTimer = () => {
-  if (timer) clearInterval(timer)
-  timer = setInterval(() => {
-    if (remaining <= 0) {
-      clearInterval(timer)
-      ElMessage.warning('考试时间已到，自动交卷')
-      doSubmit(true)
-      return
-    }
-    remaining -= 1
-    const h = Math.floor(remaining / 3600)
-    const m = Math.floor((remaining % 3600) / 60)
-    const s = remaining % 60
-    countdown.value = h > 0 ? `${h}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}` : `${m}:${String(s).padStart(2, '0')}`
-    urgent.value = remaining <= 300
-  }, 1000)
-}
-
 const confirmSubmit = async () => {
+  if (submitting.value || submitted.value) return
   const total = session.value?.questions.length || 0
-  const answered = Object.keys(session.value?.answers || {}).length
-  await ElMessageBox.confirm(`共 ${total} 题，已作答 ${answered} 题。确认交卷？`, '交卷确认', { type: 'warning' })
-  await doSubmit(false)
+  const answers = Object.values(session.value?.answers || {})
+  const answered = answers.filter((x) => hasAnswer(x?.answer)).length
+  const ok = await confirmBox(`共 ${total} 题，已作答 ${answered} 题。确认交卷？`, '交卷确认')
+  // 确认框打开期间倒计时可能已经自动交卷，不能再打一次 /submit
+  if (!ok || submitted.value) return
+  await doSubmit()
 }
 
-const doSubmit = async (auto: boolean) => {
-  if (submitting.value) return
+/** 交卷前把「只在失焦保存」的文本题补交一次，并等排队中的保存全部落库，避免丢答案。 */
+const flushCurrentAnswer = async () => {
+  const type = current.value?.type
+  if (type === '填空题' || type === '简答题') save()
+  await saveQueue
+  // 之前失败过的答案在这里补发一轮（仍失败会重新留在 unsaved 中）
+  const sid = session.value?.session_id
+  if (sid == null || unsaved.size === 0) return
+  for (const [qid, payload] of [...unsaved]) {
+    await enqueue(sid, qid, payload)
+  }
+}
+
+const doSubmit = async () => {
+  if (submitting.value || submitted.value) return
+  // 自动交卷时关掉仍开着的「确认交卷」，避免确认回调在 submitting 复位后再交一次
+  ElMessageBox.close()
   submitting.value = true
-  if (timer) clearInterval(timer)
+  // stopTimer() 会把剩余秒数清零（见 useCountdown.stop），先记录下来，
+  // 交卷失败或用户选择返回检查时才能原样恢复倒计时。
+  const leftBeforeStop = remaining.value
+  stopTimer()
   try {
+    await flushCurrentAnswer()
+    // 补发后仍未保存成功的答案：直接交卷等于永久丢这些题，必须让用户知情并决定
+    if (unsavedCount.value > 0) {
+      const goOn = await confirmBox(
+        `有 ${unsavedCount.value} 题的答案仍未保存成功（可能是网络问题）。继续交卷将丢失这些作答，确认交卷？`,
+        '答案未保存',
+        { type: 'warning', confirmButtonText: '仍然交卷', cancelButtonText: '返回检查' },
+      )
+      if (!goOn) {
+        if (leftBeforeStop > 0) startTimer(leftBeforeStop)
+        return
+      }
+    }
     const sid = session.value!.session_id
     const res = await examApi.submit(sid)
     submitted.value = true // 交卷成功后再跳转，避免被离开守卫拦截
     if (res.need_review) {
-      await ElMessageBox.alert('已交卷。本次考试含简答题，成绩待管理员复核后公布。', '提交成功', { type: 'info' })
+      await alertBox('已交卷。本次考试含简答题，成绩待管理员复核后公布。', '提交成功', { type: 'info' })
     } else if (res.score !== undefined) {
       const passText = res.passed ? '🎉 恭喜通过！' : '很遗憾未通过'
-      await ElMessageBox.alert(
+      await alertBox(
         `${passText}\n得分：${res.score} / ${res.total_score}\n答对：${res.correct_count} / ${res.total_count}`,
-        '考试结果', { type: res.passed ? 'success' : 'warning' },
+        '考试结果',
+        { type: res.passed ? 'success' : 'warning' },
       )
     } else {
-      await ElMessageBox.alert('已交卷。', '提交成功')
+      await alertBox('已交卷。', '提交成功')
     }
-    router.push('/exam')
-  } catch (err) {
-    if (timer) startTimer()
-    submitting.value = false
+  } catch {
+    // 交卷失败（网络/服务端）：恢复倒计时并允许重试；已成功交卷时不再恢复。
+    // 用 stop 前记录的剩余秒数：remaining 已清零，且为 0 时重启会变成每秒重试一次的自动交卷循环。
+    if (!submitted.value && leftBeforeStop > 0) startTimer(leftBeforeStop)
   } finally {
     submitting.value = false
   }
+  if (submitted.value) router.replace('/exam')
 }
 
 const load = async () => {
   loading.value = true
   const sid = Number(route.params.id)
   try {
-    const examId = Number(route.query.examId) || 0
-    let s: ExamSession
-    if (examId) {
-      // 正式考试：start 幂等返回进行中会话
-      s = await examApi.start(examId)
-    } else {
-      // 模拟考试或刷新场景：用会话详情恢复
-      s = await examApi.sessionDetail(sid)
-    }
-    if ((s as any).finished) {
-      await ElMessageBox.alert('该考试已交卷。', '提示', { type: 'info' })
-      router.push('/exam')
+    // start 只发生在列表页点击「开始」。这里再调 start，后退/刷新会在已交卷后另开一场。
+    const s: ExamSessionDetail = await examApi.sessionDetail(sid)
+    if (s.finished) {
+      submitted.value = true
+      stopTimer()
+      await alertBox('该考试已交卷。', '提示', { type: 'info' })
+      await router.replace('/exam')
       return
     }
     session.value = s
     version.value = s.version
-    remaining = s.remaining_sec ?? s.duration_min * 60 ?? 0
     currentSeq.value = 0
     syncFromAnswers()
-    startTimer()
+    startTimer(s.remaining_sec ?? s.duration_min * 60)
+  } catch {
+    // 加载失败不留空白页，退回考试中心（拦截器已提示原因）；同时放行离开守卫
+    submitted.value = true
+    stopTimer()
+    await router.replace('/exam')
   } finally {
     loading.value = false
   }
 }
 
-onMounted(load)
-onUnmounted(() => { if (timer) clearInterval(timer) })
+/** 回到前台时用服务端剩余时间校准，避免只信本地时钟（改系统时间会提前或拖后交卷）。 */
+const syncRemainingFromServer = async () => {
+  if (submitted.value || !session.value) return
+  try {
+    const s = await examApi.sessionDetail(session.value.session_id)
+    if (s.finished) {
+      await leaveFinished('该考试已交卷')
+      return
+    }
+    // 只在服务端明确给出剩余时间时重启。start(0) 会立刻触发自动交卷，不能用来表示「未知」。
+    if (typeof s.remaining_sec === 'number' && s.remaining_sec >= 0) startTimer(s.remaining_sec)
+  } catch {
+    /* 校准失败不打断作答，本地 deadline 继续走 */
+  }
+}
 
-// 考试中防误触：路由离开需确认（交卷成功后放行）
+onMounted(() => {
+  setOnVisible(() => {
+    if (document.visibilityState !== 'visible') return
+    void syncRemainingFromServer()
+  })
+  void load()
+})
+
+// 考试中防误触：路由离开需确认（交卷成功后放行）。
+// 离开前必须刷完保存队列：未落库的答案只活在内存里，组件销毁后就没了。
 onBeforeRouteLeave(async () => {
   if (submitted.value) return true
-  try {
-    await ElMessageBox.confirm(
-      '考试尚未交卷，作答记录已自动保存，返回后可重新进入继续作答（计时不停）。确定离开吗？',
-      '离开考试', { type: 'warning', confirmButtonText: '离开', cancelButtonText: '继续作答' },
+  await flushCurrentAnswer()
+  if (unsavedCount.value > 0) {
+    return confirmBox(
+      `还有 ${unsavedCount.value} 题未能保存，离开后这些作答会丢失。确定离开吗？`,
+      '离开考试',
+      { type: 'warning', confirmButtonText: '仍然离开', cancelButtonText: '继续作答' },
     )
-    return true
-  } catch {
-    return false
   }
+  return confirmBox(
+    '考试尚未交卷。已保存的作答可稍后继续（计时不停）。确定离开吗？',
+    '离开考试',
+    { type: 'warning', confirmButtonText: '离开', cancelButtonText: '继续作答' },
+  )
 })
 
 // 浏览器关闭/刷新提示
@@ -397,55 +494,123 @@ onUnmounted(() => window.removeEventListener('beforeunload', onBeforeUnload))
 </script>
 
 <style scoped>
-.exam-taking { max-width: 1100px; }
-.topbar { display: flex; justify-content: space-between; align-items: center; background: #fff; border-radius: 8px; padding: 12px 20px; margin-bottom: 16px; border: 1px solid #ebeef5; gap: 12px; }
-.exam-title { font-weight: 600; font-size: 16px; }
-.countdown { display: flex; align-items: center; gap: 6px; font-size: 20px; font-weight: 700; color: var(--brand-primary); flex-shrink: 0; }
-.countdown.urgent { color: #f56c6c; animation: blink 1s infinite; }
-.countdown .hint { font-size: 12px; margin-left: 4px; }
-@keyframes blink { 50% { opacity: .6; } }
-.layout { display: flex; gap: 16px; align-items: flex-start; }
-.answer-card { width: 240px; background: #fff; border-radius: 8px; padding: 16px; position: sticky; top: 16px; border: 1px solid #ebeef5; flex-shrink: 0; }
-.card-title-row { display: flex; align-items: center; justify-content: space-between; }
-.card-title { font-weight: 600; margin-bottom: 12px; }
-.card-toggle { display: none; cursor: pointer; font-size: 16px; color: #909399; }
-.grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(36px, 1fr)); gap: 6px; }
-.cell { height: 36px; line-height: 36px; text-align: center; border-radius: 4px; background: #f4f4f5; cursor: pointer; font-size: 13px; }
-.cell.answered { background: var(--brand-primary); color: #fff; }
-.cell.current { border: 2px solid var(--brand-primary); }
-.legend { display: flex; flex-direction: column; gap: 4px; margin: 14px 0; font-size: 12px; color: #909399; }
-.legend .dot { display: inline-block; width: 10px; height: 10px; border-radius: 2px; background: #f4f4f5; margin-right: 4px; }
-.legend .dot.answered { background: var(--brand-primary); }
-.legend .dot.current { background: #fff; border: 2px solid var(--brand-primary); }
-.submit-btn { width: 100%; }
-.question-area { flex: 1; background: #fff; border-radius: 8px; padding: 24px; min-height: 400px; min-width: 0; }
-.q-header { display: flex; gap: 8px; margin-bottom: 16px; flex-wrap: wrap; }
-.q-stem { font-size: 16px; line-height: 1.7; margin-bottom: 20px; white-space: pre-wrap; word-break: break-word; }
-.option { display: flex; align-items: center; gap: 12px; padding: 12px 16px; border: 1px solid #ebeef5; border-radius: 6px; margin-bottom: 10px; cursor: pointer; }
-.option:hover { border-color: var(--brand-primary); }
-.option.picked { border-color: var(--brand-primary); background: var(--brand-primary-light-9); }
-.opt-letter { width: 28px; height: 28px; line-height: 28px; text-align: center; border-radius: 50%; background: #f4f4f5; font-weight: 600; flex-shrink: 0; }
-.blank-row { display: flex; align-items: center; gap: 12px; margin-bottom: 12px; }
-.blank-label { width: 40px; color: #909399; flex-shrink: 0; }
-.drag-area { display: flex; gap: 24px; }
-.drag-source { display: flex; flex-direction: column; gap: 8px; flex: 1; }
-.drag-item { padding: 10px 16px; border: 1px solid #dcdfe6; border-radius: 6px; cursor: grab; background: #fafafa; }
-.drag-target { display: flex; flex-direction: column; gap: 8px; flex: 1; }
-.drop-zone { display: flex; justify-content: space-between; padding: 10px 16px; border: 1px dashed #c0c4cc; border-radius: 6px; min-height: 44px; align-items: center; cursor: pointer; }
-.zone-label { color: #606266; }
-.zone-value { font-weight: 600; color: var(--brand-primary); }
-.actions { margin-top: 24px; display: flex; gap: 8px; justify-content: flex-end; flex-wrap: wrap; }
-/* 手机端：答题卡折叠置顶，题目区下方堆叠 */
+.exam-taking {
+  max-width: 1100px;
+}
+.topbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  background: var(--el-bg-color);
+  border-radius: 8px;
+  padding: 12px 20px;
+  margin-bottom: 16px;
+  border: 1px solid var(--el-border-color-lighter);
+  gap: 12px;
+}
+.exam-title {
+  font-weight: 600;
+  font-size: 16px;
+}
+.countdown {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 20px;
+  font-weight: 700;
+  color: var(--brand-primary);
+  flex-shrink: 0;
+}
+.countdown.urgent {
+  color: var(--el-color-danger);
+  animation: blink 1s infinite;
+}
+.countdown .hint {
+  font-size: 12px;
+  margin-left: 4px;
+}
+@keyframes blink {
+  50% {
+    opacity: 0.6;
+  }
+}
+/* 前庭敏感用户：闪烁动效降级为静态高亮 */
+@media (prefers-reduced-motion: reduce) {
+  .countdown.urgent {
+    animation: none;
+  }
+}
+.layout {
+  display: flex;
+  gap: 16px;
+  align-items: flex-start;
+}
+/* 答题卡容器：宽度/吸顶/移动端排序属于页面布局，不放进展示组件 */
+.side {
+  width: 240px;
+  position: sticky;
+  top: 16px;
+  flex-shrink: 0;
+}
+.submit-btn {
+  width: 100%;
+}
+.question-area {
+  flex: 1;
+  background: var(--el-bg-color);
+  border-radius: 8px;
+  padding: 24px;
+  min-height: 400px;
+  min-width: 0;
+}
+.q-header {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 16px;
+  flex-wrap: wrap;
+}
+.q-stem {
+  font-size: 16px;
+  line-height: 1.7;
+  margin-bottom: 20px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.actions {
+  margin-top: 24px;
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+}
+/* 手机端：答题卡折叠后置底，题目优先 */
 @media (max-width: 767px) {
-  .layout { flex-direction: column; }
-  .answer-card { width: 100%; position: static; padding: 12px; }
-  .card-toggle { display: inline-flex; }
-  .card-title { margin-bottom: 0; }
-  .question-area { padding: 16px; min-height: auto; }
-  .topbar { flex-direction: column; align-items: flex-start; padding: 10px 14px; }
-  .countdown { font-size: 18px; }
-  .drag-area { flex-direction: column; gap: 12px; }
-  .actions { justify-content: stretch; }
-  .actions .el-button { flex: 1; }
+  .layout {
+    flex-direction: column;
+  }
+  .side {
+    width: 100%;
+    position: static;
+    order: 1;
+  }
+  .question-area {
+    padding: 16px;
+    min-height: auto;
+    order: -1;
+  }
+  .topbar {
+    flex-direction: column;
+    align-items: flex-start;
+    padding: 10px 14px;
+  }
+  .countdown {
+    font-size: 18px;
+  }
+  .actions {
+    justify-content: stretch;
+  }
+  .actions .el-button {
+    flex: 1;
+  }
 }
 </style>

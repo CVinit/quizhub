@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+from collections import defaultdict
+
 from fastapi import Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer
-from sqlalchemy import select
+from sqlalchemy import CompoundSelect, select
 from sqlalchemy.orm import Session
 
 from app.core.security import decode_access_token
@@ -69,6 +71,37 @@ def subtree_ids(db: Session, group_id: int) -> set[int]:
 group_subtree_ids = subtree_ids
 
 
+def subtree_map(db: Session) -> dict[int, set[int]]:
+    """一次性返回 {分组 id: 自身 + 全部后代} 映射。
+
+    供「批量判定可见性」的场景使用（如考试指派到父分组时展开整棵子树）。
+    逐分组调用 `subtree_ids` 会退化成 N 次查询，这里改为单次查询 + 迭代展开。
+    数据异常（父子成环）时靠 `child not in subtree` 兜底，不会死循环。
+
+    Args:
+        db: 数据库会话。
+
+    Returns:
+        分组 id → 该分组及其全部后代的 id 集合。
+    """
+    rows = db.execute(select(Group.id, Group.parent_id)).all()
+    children: dict[int | None, list[int]] = defaultdict(list)
+    for gid, parent_id in rows:
+        children[parent_id].append(gid)
+
+    mapping: dict[int, set[int]] = {}
+    for gid, _parent_id in rows:
+        subtree: set[int] = {gid}
+        stack = [gid]
+        while stack:
+            for child in children.get(stack.pop(), []):
+                if child not in subtree:
+                    subtree.add(child)
+                    stack.append(child)
+        mapping[gid] = subtree
+    return mapping
+
+
 def dept_scope_ids(db: Session, user: User) -> set[int] | None:
     """部门管理员的数据范围。
 
@@ -77,11 +110,15 @@ def dept_scope_ids(db: Session, user: User) -> set[int] | None:
     - 普通用户/未配置部门：返回空集合，表示无任何管理范围。
 
     供服务层做"按 user_id / group_id 操作前的归属校验"与"列表过滤"。
+
+    性能：这里复用一次查询即可拿到全量映射的 `subtree_map`，而不是 `subtree_ids`
+    （后者对子树中每个节点各发一条 SELECT，在 42 个管理端调用点、大部门下会放大成
+    每请求上百次查询）。
     """
     if user.role == "super_admin":
         return None
     if user.role == "dept_admin" and user.dept_group_id:
-        return subtree_ids(db, user.dept_group_id)
+        return subtree_map(db).get(user.dept_group_id, {user.dept_group_id})
     return set()
 
 
@@ -112,9 +149,29 @@ def users_in_scope(db: Session, scope: set[int] | None) -> set[int] | None:
     scope 为 None（super_admin）返回 None 表示全量，不做范围限制；
     否则返回 dept_group_id ∈ scope 或经 user_groups 关联到 scope 的用户 id 集合。
     供列表/概览查询做按用户维度的范围过滤。
+
+    注意：需要按用户维度过滤 SQL 查询时，优先用 `user_ids_subquery`——本函数会把
+    整个范围的用户 id 物化到 Python 集合，大部门下会触及 SQLite 绑定参数上限。
     """
     if scope is None:
         return None
     by_dept = {r[0] for r in db.execute(select(User.id).where(User.dept_group_id.in_(scope))).all()}
     by_group = {r[0] for r in db.execute(select(UserGroup.user_id).where(UserGroup.group_id.in_(scope))).all()}
     return by_dept | by_group
+
+
+def user_ids_subquery(scope: set[int]) -> CompoundSelect:
+    """把数据范围表达为 SQL 子查询，避免物化用户 id 后再拼 `IN (...)`。
+
+    等价于 `users_in_scope` 的集合，但由 SQLite 完成集合运算：不把成百上千个
+    用户 id 变成绑定参数（SQLite 有参数上限），也不在大部门下产生内存峰值。
+
+    Args:
+        scope: 分组 id 集合（部门子树，规模通常很小）。
+
+    Returns:
+        选出范围内全部用户 id 的 UNION 子查询。
+    """
+    by_dept = select(User.id).where(User.dept_group_id.in_(scope))
+    by_group = select(UserGroup.user_id).where(UserGroup.group_id.in_(scope))
+    return by_dept.union(by_group)

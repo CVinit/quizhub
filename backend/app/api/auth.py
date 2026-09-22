@@ -6,11 +6,12 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, BackgroundTasks, Depends, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
 from app.core.captcha import store as captcha_store
 from app.core.deps import get_current_user
+from app.core.email import normalize_email
 from app.core.rate_limit import check, ip_limit
 from app.database import get_db
 from app.models.user import User
@@ -55,7 +56,7 @@ def send_code(
     """发送注册验证码：必须先通过图形验证码校验。"""
     if not captcha_store.verify(payload.captcha_id, payload.captcha_code):
         raise _bad("图形验证码错误或已过期")
-    check(f"send-code:email:{payload.email.lower()}", 3, 3600, "发送验证码")
+    check(f"send-code:email:{normalize_email(payload.email)}", 3, 3600, "发送验证码")
     auth_service.send_code(db, payload.email, bg)
     return {"success": True, "message": "验证码已发送，请查收邮箱"}
 
@@ -67,7 +68,7 @@ def register(
     db: Session = Depends(get_db),
     _ip: None = Depends(ip_limit("register", 10, 3600)),
 ):
-    check(f"register:email:{payload.email.lower()}", 3, 3600, "注册")
+    check(f"register:email:{normalize_email(payload.email)}", 3, 3600, "注册")
     return auth_service.register(
         db,
         payload.email,
@@ -81,14 +82,20 @@ def register(
 
 @router.get("/register-groups")
 def register_groups(db: Session = Depends(get_db)):
-    """公开接口：返回可选分组树与是否必选，供注册页选择分组（无需登录）。"""
+    """公开接口：返回可选分组树与是否必选，供注册页选择分组（无需登录）。
+
+    仅返回管理员在「系统设置 → 注册与审批 → 允许公开注册加入的分组」中
+    显式勾选的分组；未配置时列表为空（fail-closed）。
+    列表为空时 required 恒为 False，避免注册页出现「必选但没有可选项」的死表单。
+    """
     from app.services.auth_service import allowed_register_group_ids
     from app.services.group_service import build_tree
     from app.services.system_service import get_settings
 
     settings = get_settings(db, "register")
-    required = settings.get("register_group_required", "false").lower() == "true"
-    return {"groups": build_tree(db, allowed_register_group_ids(db)), "required": required}
+    groups = build_tree(db, allowed_register_group_ids(db))
+    required = settings.get("register_group_required", "false").lower() == "true" and bool(groups)
+    return {"groups": groups, "required": required}
 
 
 @router.post("/verify")
@@ -98,7 +105,7 @@ def verify(
     _ip: None = Depends(ip_limit("verify", 30, 600)),
 ):
     # 旧版激活流程（兼容）：验证码爆破防护，单邮箱 10 分钟内最多 5 次
-    check(f"verify:email:{payload.email.lower()}", 5, 600, "验证")
+    check(f"verify:email:{normalize_email(payload.email)}", 5, 600, "验证")
     auth_service.verify_email(db, payload.email, payload.code)
     return {"success": True}
 
@@ -109,7 +116,7 @@ def login(
     db: Session = Depends(get_db),
     _ip: None = Depends(ip_limit("login", 10, 60)),
 ):
-    check(f"login:account:{payload.username.lower()}", 8, 300, "登录")
+    check(f"login:account:{normalize_email(payload.username)}", 8, 300, "登录")
     return auth_service.login(db, payload.username, payload.password)
 
 
@@ -125,7 +132,7 @@ def resend(
     db: Session = Depends(get_db),
     _ip: None = Depends(ip_limit("resend", 10, 600)),
 ):
-    check(f"resend:email:{payload.email.lower()}", 3, 600, "重发验证码")
+    check(f"resend:email:{normalize_email(payload.email)}", 3, 600, "重发验证码")
     auth_service.resend(db, payload.email, bg)
     return {"success": True}
 
@@ -141,7 +148,5 @@ def change_password(
     return {"success": True}
 
 
-def _bad(msg: str):
-    from fastapi import HTTPException
-
+def _bad(msg: str) -> HTTPException:
     return HTTPException(status.HTTP_400_BAD_REQUEST, msg)

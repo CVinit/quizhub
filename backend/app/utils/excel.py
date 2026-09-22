@@ -8,15 +8,45 @@
 
 from __future__ import annotations
 
+import math
 from io import BytesIO
 from typing import Any
+from xml.etree.ElementTree import ParseError
 from zipfile import BadZipFile, ZipFile
 
 from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
+from openpyxl.utils.exceptions import InvalidFileException
 
 from app.schemas.question import UploadPreview, UploadPreviewRow
+
+# openpyxl 在「合法 zip 但非工作簿」时抛出的异常集合。这些都不是 ValueError，
+# 路由只捕获 ValueError → 会变成 500，因此统一包装。
+_WORKBOOK_OPEN_ERRORS = (KeyError, OSError, BadZipFile, InvalidFileException, ParseError)
+
+
+def open_workbook(buf: BytesIO):
+    """打开 xlsx 工作簿，并把 openpyxl 的解析异常统一转换为 ValueError。
+
+    `validate_workbook_archive` 只校验 zip 结构与解压体积：一个合法 zip 若缺少
+    `[Content_Types].xml`（把 .docx/.zip 改名成 .xlsx 是最常见的用户错误），
+    openpyxl 抛的是 `KeyError`，而上传路由只把 `ValueError` 转成 400。
+
+    Args:
+        buf: 已定位到开头的字节流。
+
+    Returns:
+        打开的只读工作簿。
+
+    Raises:
+        ValueError: 文件不是可解析的 xlsx 工作簿。
+    """
+    try:
+        return load_workbook(buf, data_only=True, read_only=True)
+    except _WORKBOOK_OPEN_ERRORS as exc:
+        raise ValueError("上传文件不是有效的 xlsx 工作簿") from exc
+
 
 SHEET_ORDER = ["单选题", "多选题", "判断题", "填空题", "简答题", "拖拽题"]
 PARSE_ROW_MAX = 10000
@@ -55,29 +85,6 @@ ANSWER_COL = {
 
 HEADER_FILL = PatternFill("solid", fgColor="E60012")
 HEADER_FONT = Font(color="FFFFFF", bold=True)
-
-# Excel/Calc 会把以这些字符开头的单元格当作公式执行。
-_FORMULA_PREFIXES = ("=", "+", "-", "@", "\t", "\r")
-
-
-def safe_cell(value: object) -> object:
-    """转义可能被 Excel 解释为公式的文本，防止公式注入。
-
-    当前导出接口只产出静态模板，尚未写回用户数据；本函数供后续「导出题目/用户」
-    类功能使用：题库题干、选项、解析、标签都来自导入的任意文本，若原样写回
-    xlsx，攻击者可植入 `=HYPERLINK(...)` 或 DDE 载荷，管理员打开即触发。
-
-    做法是在危险文本前加单引号（Excel 视为纯文本），非字符串原样返回。
-
-    Args:
-        value: 待写入单元格的值。
-
-    Returns:
-        转义后的值；非字符串类型不变。
-    """
-    if isinstance(value, str) and value.startswith(_FORMULA_PREFIXES):
-        return "'" + value
-    return value
 
 
 def build_template() -> BytesIO:
@@ -187,7 +194,7 @@ def parse_workbook(buf: BytesIO) -> UploadPreview:
     """
     validate_workbook_archive(buf.getvalue())
     buf.seek(0)
-    wb = load_workbook(buf, data_only=True, read_only=True)
+    wb = open_workbook(buf)
     rows: list[UploadPreviewRow] = []
     errors: list[dict] = []
     type_dist: dict[str, int] = {}
@@ -197,7 +204,20 @@ def parse_workbook(buf: BytesIO) -> UploadPreview:
             if sheet_name not in wb.sheetnames:
                 continue
             ws = wb[sheet_name]
-            for r_idx, row in enumerate(ws.iter_rows(min_row=2, values_only=True), start=2):
+            # 列是**按位置**取值的，表头一旦被调换/改名，分值、难度、答案会静默错位。
+            # 因此先校验第 1 行与模板一致，不一致直接跳过该 Sheet 并给出可见错误。
+            row_iter = ws.iter_rows(min_row=1, values_only=True)
+            header = next(row_iter, None)
+            if not headers_match(header, HEADERS[sheet_name]):
+                errors.append(
+                    {
+                        "sheet": sheet_name,
+                        "row": 1,
+                        "error": "表头与模板不一致，请下载最新模板后重新填写",
+                    }
+                )
+                continue
+            for r_idx, row in enumerate(row_iter, start=2):
                 if r_idx > PARSE_ROW_MAX + 1:
                     break
                 if not row or all(c is None or str(c).strip() == "" for c in row):
@@ -215,13 +235,13 @@ def parse_workbook(buf: BytesIO) -> UploadPreview:
     finally:
         wb.close()
 
-    # 仅返回前 20 条用于预览
-    preview_rows = rows[:20]
+    # rows 仅返回前 20 条用于预览；all_rows 提供完整结果供导入消费（避免二次解析）
     return UploadPreview(
-        rows=preview_rows,
+        rows=rows[:20],
         total=len(rows),
         type_dist=type_dist,
         errors=errors,
+        all_rows=rows,
     )
 
 
@@ -264,6 +284,14 @@ def validate_workbook_archive(content: bytes) -> None:
         raise ValueError("上传文件已损坏，无法解析") from exc
 
 
+def headers_match(header: tuple | None, expected: list[str]) -> bool:
+    """校验工作表首行是否与模板表头一致（忽略单元格两端空白）。"""
+    if header is None:
+        return False
+    actual = [str(cell).strip() if cell is not None else "" for cell in header]
+    return actual[: len(expected)] == expected
+
+
 def _parse_row(sheet_name: str, row: tuple, r_idx: int) -> UploadPreviewRow:
     """把一行 Excel 解析为标准化题目结构。"""
     qtype = sheet_name  # Sheet 名即题型
@@ -294,6 +322,10 @@ def _parse_row(sheet_name: str, row: tuple, r_idx: int) -> UploadPreviewRow:
             valid_letters = {chr(ord("A") + i) for i in range(len(options))}
             if not set(ans).issubset(valid_letters):
                 error = f"答案 {ans} 超出选项范围 {sorted(valid_letters)}"
+            elif qtype == "单选题" and len(ans) != 1:
+                # 与 question_service._validate_answer_shape 同口径：单选答案必须恰好一个
+                # 字母。放行 "AB" 会存下一道永远判错（grade 对单选做整串比较）的题。
+                error = f"单选题答案必须是一个选项字母（当前为 {ans}）"
             else:
                 answer = "".join(sorted(ans)) if qtype == "多选题" else ans
 
@@ -344,10 +376,11 @@ def _parse_row(sheet_name: str, row: tuple, r_idx: int) -> UploadPreviewRow:
             answer = mapping
 
     difficulty = _to_int(cells, _col_index(sheet_name, "难度"), default=2, lo=1, hi=3)
-    score = _to_float(cells, _col_index(sheet_name, "分值"), default=2.0)
+    score, score_error = _parse_score(cells, _col_index(sheet_name, "分值"))
     tags = _parse_tags(cells, _col_index(sheet_name, "知识点标签"))
     analysis_col = _col_index(sheet_name, "解析")
     analysis = str(cells[analysis_col] or "").strip() if analysis_col < len(cells) else ""
+    error = error or score_error
 
     return UploadPreviewRow(
         type=qtype,
@@ -394,8 +427,10 @@ def _col_index(sheet_name: str, header_name: str) -> int:
 
 def _to_int(cells: list, col: int, default: int = 0, lo: int | None = None, hi: int | None = None) -> int:
     try:
+        # OverflowError：文本 "inf"/"1e400" 经 float() 后 int() 会抛 OverflowError，
+        # 它既不是 ValueError 也不是 TypeError，不捕获会一路冒泡成 500。
         v = int(float(cells[col])) if col < len(cells) and cells[col] not in (None, "") else default
-    except (ValueError, TypeError):
+    except (ValueError, TypeError, OverflowError):
         v = default
     if lo is not None:
         v = max(lo, v)
@@ -404,8 +439,18 @@ def _to_int(cells: list, col: int, default: int = 0, lo: int | None = None, hi: 
     return v
 
 
-def _to_float(cells: list, col: int, default: float = 2.0) -> float:
+def _parse_score(cells: list, col: int, default: float = 2.0) -> tuple[float, str]:
+    """解析「分值」为 (值, 行级错误)。
+
+    负数/NaN/Infinity 会被 Pydantic 的 `FiniteFloat` + `ge=0` 拒绝，但那是**整份预览**
+    级别的 ValidationError（错误信息还不指向具体行），因此在这里就按行报错并回退默认分。
+    """
+    if col >= len(cells) or cells[col] in (None, ""):
+        return default, ""
     try:
-        return float(cells[col]) if col < len(cells) and cells[col] not in (None, "") else default
-    except (ValueError, TypeError):
-        return default
+        value = float(cells[col])
+    except (ValueError, TypeError, OverflowError):
+        return default, f"分值不是数字：{cells[col]!r}"
+    if not math.isfinite(value) or value < 0:
+        return default, f"分值必须是非负有限数字：{cells[col]!r}"
+    return value, ""

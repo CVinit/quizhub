@@ -20,15 +20,14 @@ from __future__ import annotations
 
 import argparse
 import logging
-import shutil
 import sqlite3
 import sys
-from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from app.config import DB_PATH
+from app.core.db_backup import backup_database
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 logger = logging.getLogger("quizhub.migrate")
@@ -166,6 +165,24 @@ _TABLE_DDL: dict[str, str] = {
     """,
 }
 
+# users 表的 NOCASE 重建 DDL（列定义与 app/models/user.py 的当前定义一致）。
+# 单独成常量而非复用 _TABLE_DDL：users 的重建时机（migrate_email_collation）先于
+# 通用重建循环，且需要保留其原有索引。
+_USERS_DDL_NOCASE = (
+    "CREATE TABLE users__new ("
+    "id INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,"
+    "email VARCHAR NOT NULL COLLATE NOCASE,"
+    "password_hash VARCHAR NOT NULL,"
+    "name VARCHAR NOT NULL,"
+    "role VARCHAR NOT NULL,"
+    "status VARCHAR NOT NULL,"
+    "email_verified BOOLEAN NOT NULL,"
+    "token_version INTEGER NOT NULL,"
+    "dept_group_id INTEGER REFERENCES groups (id) ON DELETE SET NULL,"
+    "created_at VARCHAR NOT NULL,"
+    "UNIQUE (email))"
+)
+
 # 重建后需要恢复的索引：(索引名, 表, 列定义)
 _INDEXES: list[tuple[str, str, str]] = [
     ("ix_practice_records_user_id", "practice_records", "user_id"),
@@ -193,6 +210,31 @@ _INDEXES: list[tuple[str, str, str]] = [
     ("ix_stats_date_user", "stats_user_daily", "date, user_id"),
 ]
 
+# 含 WHERE 子句的部分索引（_INDEXES 只能表达普通列清单，无法覆盖）。
+# 重建 exam_sessions 会随 DROP TABLE 删除它，必须在重建后显式补回，否则
+# 「同一用户同一考试仅一个进行中会话」的数据库级约束会永久丢失。
+_PARTIAL_INDEX_DDL: dict[str, str] = {
+    "exam_sessions": (
+        "CREATE UNIQUE INDEX IF NOT EXISTS uq_active_exam_session "
+        "ON exam_sessions (exam_definition_id, user_id) "
+        "WHERE status IN ('in_progress', 'scoring')"
+    ),
+}
+
+# 需要长期保留、但 reviewer 被删除后应置空的表（否则 foreign_key_check 失败中断迁移）
+_NULLIFY_ORPHANS: list[tuple[str, str]] = [
+    ("audit_logs", "actor"),
+    ("stats_user_daily", "group_id"),
+    ("short_answer_reviews", "reviewer"),
+]
+
+
+def _restore_partial_indexes(conn: sqlite3.Connection, table: str) -> None:
+    """补回某表上的部分索引（重建只恢复 _INDEXES 中的普通索引）。"""
+    ddl = _PARTIAL_INDEX_DDL.get(table)
+    if ddl:
+        conn.execute(ddl)
+
 
 def _table_exists(conn: sqlite3.Connection, table: str) -> bool:
     row = conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name=?", (table,)).fetchone()
@@ -208,35 +250,57 @@ def _has_ondelete(conn: sqlite3.Connection, table: str) -> bool:
 def migrate_normalize_emails(conn: sqlite3.Connection, dry_run: bool) -> int:
     """把 users.email 归一为小写并处理归一后产生的重复账号。
 
+    归一后可能撞唯一约束（Admin@x.com 与 admin@x.com 并存）：保留 id 最小者，
+    其余账号改名加 `.dup<id>` 后缀以保证可登录且数据不丢，交由管理员人工合并。
+
+    实现要点：**一趟算出每行的最终值再写入**。原实现先对冲突行改名、随后又用一个
+    遍历 `changed` 的循环把该行写回未加后缀的归一值，改名被覆盖 → 撞 ix_users_email
+    → IntegrityError，使本迁移对它本要修复的数据永远无法完成（start.sh 的 set -e
+    会让服务直接起不来）。
+
     Returns:
         被归一（值发生变化）的行数。
+
+    Raises:
+        RuntimeError: 归一后仍存在重复邮箱（自检失败，宁可中止也不留半迁移状态）。
     """
-    rows = conn.execute("SELECT id, email FROM users").fetchall()
+    rows = conn.execute("SELECT id, email FROM users ORDER BY id").fetchall()
     changed = [(rid, email) for rid, email in rows if email and email != email.strip().lower()]
     if not changed:
         logger.info("[migrate] users.email 无需归一，跳过")
         return 0
     logger.info("[migrate] 发现 %d 个非归一邮箱，将转为小写", len(changed))
 
-    # 归一后可能撞唯一约束（Admin@x.com 与 admin@x.com 并存）：
-    # 保留 id 最小者，其余账号改名加后缀以保证可登录且数据不丢，交由管理员人工合并。
-    seen: dict[str, int] = {}
-    for rid, email in sorted(rows, key=lambda r: r[0]):
+    # 按 id 升序确定每行的最终邮箱；已被占用的值追加 .dup<id>（必要时继续追加序号）
+    final: dict[int, str] = {}
+    taken: set[str] = set()
+    for rid, email in rows:
         low = (email or "").strip().lower()
         if not low:
             continue
-        if low in seen:
-            new_email = f"{low}.dup{rid}"
-            logger.warning("[migrate] 邮箱冲突：id=%s 的 %s 与 id=%s 重复，改名为 %s", rid, email, seen[low], new_email)
-            if not dry_run:
-                conn.execute("UPDATE users SET email=? WHERE id=?", (new_email, rid))
-        else:
-            seen[low] = rid
+        if low in taken:
+            base = f"{low}.dup{rid}"
+            logger.warning("[migrate] 邮箱冲突：id=%s 的 %r 与既有账号归一后重复，改名为 %s", rid, email, base)
+            low = base
+            suffix = 0
+            while low in taken:
+                suffix += 1
+                low = f"{base}.{suffix}"
+        taken.add(low)
+        final[rid] = low
 
-    if not dry_run:
-        for rid, email in changed:
-            conn.execute("UPDATE users SET email=? WHERE id=?", (email.strip().lower(), rid))
-        conn.commit()
+    if len(set(final.values())) != len(final):
+        raise RuntimeError("邮箱归一后仍存在重复，已中止；请人工处理后重试")
+
+    if dry_run:
+        logger.info("[migrate] dry-run：将写入 %d 行最终邮箱", len(final))
+        return len(changed)
+
+    original = {rid: (email or "") for rid, email in rows}
+    for rid, new_email in final.items():
+        if original.get(rid) != new_email:
+            conn.execute("UPDATE users SET email=? WHERE id=?", (new_email, rid))
+    conn.commit()
     return len(changed)
 
 
@@ -267,6 +331,7 @@ def rebuild_table_with_ondelete(conn: sqlite3.Connection, table: str, ddl: str, 
     for name, tbl, coldef in _INDEXES:
         if tbl == table:
             conn.execute(f"CREATE INDEX IF NOT EXISTS {name} ON {table} ({coldef})")
+    _restore_partial_indexes(conn, table)
     conn.commit()
     logger.info("[migrate] 表 %s 重建完成", table)
     return True
@@ -284,7 +349,7 @@ def purge_orphans(conn: sqlite3.Connection, dry_run: bool) -> int:
         被清理的行数。
     """
     # 需要保留记录本身的表：置空外键而非删除
-    nullify: list[tuple[str, str]] = [("audit_logs", "actor"), ("stats_user_daily", "group_id")]
+    nullify: list[tuple[str, str]] = list(_NULLIFY_ORPHANS)
     # 依赖用户的业务数据：外键失效则整行无意义，删除
     cascade: list[tuple[str, str]] = [
         ("practice_records", "user_id"),
@@ -363,40 +428,34 @@ def migrate_email_collation(conn: sqlite3.Connection, dry_run: bool) -> None:
         logger.info("[migrate] [dry-run] 将重建 users 表以启用 email COLLATE NOCASE")
         return
     logger.info("[migrate] 重建 users 表以启用 email COLLATE NOCASE ...")
-    old_sql = row[0]
-    new_sql = old_sql.replace("email VARCHAR NOT NULL", "email VARCHAR NOT NULL COLLATE NOCASE", 1)
-    if "COLLATE NOCASE" not in new_sql:
-        # 兜底：按已知定义重建
-        new_sql = (
-            "CREATE TABLE users__new ("
-            "id INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,"
-            "email VARCHAR NOT NULL COLLATE NOCASE,"
-            "password_hash VARCHAR NOT NULL,"
-            "name VARCHAR NOT NULL,"
-            "role VARCHAR NOT NULL,"
-            "status VARCHAR NOT NULL,"
-            "email_verified BOOLEAN NOT NULL,"
-            "token_version INTEGER NOT NULL,"
-            "dept_group_id INTEGER REFERENCES groups (id) ON DELETE SET NULL,"
-            "created_at VARCHAR NOT NULL,"
-            "UNIQUE (email))"
-        )
-        conn.execute("DROP TABLE IF EXISTS users__new")
-        conn.execute(new_sql)
-        cols = [r[1] for r in conn.execute("PRAGMA table_info(users)").fetchall()]
-        collist = ", ".join(f'"{c}"' for c in cols)
-        conn.execute(f"INSERT INTO users__new ({collist}) SELECT {collist} FROM users")
-        conn.execute("DROP TABLE users")
-        conn.execute("ALTER TABLE users__new RENAME TO users")
-        conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS ix_users_email ON users (email)")
-        conn.commit()
-        logger.info("[migrate] users 表重建完成（NOCASE）")
-        return
-    conn.execute("PRAGMA writable_schema=ON")
-    conn.execute("UPDATE sqlite_master SET sql=? WHERE type='table' AND name='users'", (new_sql,))
-    conn.execute("PRAGMA writable_schema=OFF")
+    # 必须重建表，不能只改 sqlite_master：SQLite 的索引在建立时按当时的列排序规则排列，
+    # 只改列 collation 而不重建索引，既有索引会与新 collation 不一致（实测
+    # `PRAGMA integrity_check` 报 "row N missing from index" / "non-unique entry in index"），
+    # 邮箱唯一约束与等值查询因此不可靠。重建表会连同索引一起重建。
+    existing_indexes = [
+        r[0]
+        for r in conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='index' AND tbl_name='users' AND sql IS NOT NULL"
+        ).fetchall()
+    ]
+    conn.execute("DROP TABLE IF EXISTS users__new")
+    conn.execute(_USERS_DDL_NOCASE)
+    cols = [r[1] for r in conn.execute("PRAGMA table_info(users)").fetchall()]
+    new_cols = {r[1] for r in conn.execute("PRAGMA table_info(users__new)").fetchall()}
+    # 只拷贝两侧共有的列：历史库若多出未知列，直接按列名全量 INSERT 会因列不存在而失败
+    # （与 rebuild_table_with_ondelete 的 shared 口径一致，schema 以当前模型定义为准）。
+    shared = [c for c in cols if c in new_cols]
+    collist = ", ".join(f'"{c}"' for c in shared)
+    conn.execute(f"INSERT INTO users__new ({collist}) SELECT {collist} FROM users")
+    conn.execute("DROP TABLE users")
+    conn.execute("ALTER TABLE users__new RENAME TO users")
+    # 原样重建迁移前已存在的索引（含 ix_users_email / ix_users_role / ix_users_status /
+    # ix_users_dept_group_id）；自增索引 sql IS NULL，不在其中，由 UNIQUE 约束自动重建。
+    for index_sql in existing_indexes:
+        conn.execute(index_sql)
+    conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS ix_users_email ON users (email)")
     conn.commit()
-    logger.info("[migrate] users.email 已切换为 NOCASE（schema 级修改）")
+    logger.info("[migrate] users 表重建完成（NOCASE），随表重建索引 %d 个", len(existing_indexes))
 
 
 def main() -> None:
@@ -409,9 +468,8 @@ def main() -> None:
         sys.exit(1)
 
     if not args.dry_run:
-        backup = DB_PATH.with_suffix(f".db.bak-{datetime.now().strftime('%Y%m%d%H%M%S')}")
-        shutil.copy2(DB_PATH, backup)
-        logger.info("[migrate] 已备份数据库到 %s", backup)
+        # 备份 + 清理过旧备份：迁移每次启动都会跑，无上限的备份会撑爆磁盘
+        backup_database(DB_PATH)
 
     logger.info("[migrate] 开始迁移：%s", DB_PATH)
     conn = sqlite3.connect(str(DB_PATH))
@@ -425,6 +483,11 @@ def main() -> None:
         for table, ddl in _TABLE_DDL.items():
             if rebuild_table_with_ondelete(conn, table, ddl, args.dry_run):
                 rebuilt += 1
+        # 兜底：即使 exam_sessions 本次未重建（已含 ON DELETE），也确保部分唯一索引存在
+        # （重建路径已在 rebuild_table_with_ondelete 内补回；此处覆盖历史库索引缺失的情况）。
+        if not args.dry_run and _table_exists(conn, "exam_sessions"):
+            _restore_partial_indexes(conn, "exam_sessions")
+            conn.commit()
         conn.execute("PRAGMA legacy_alter_table=OFF")
         conn.execute("PRAGMA foreign_keys=ON")
         # 补齐约束后清理既有悬空引用，否则 foreign_key_check 必然报错
@@ -434,8 +497,23 @@ def main() -> None:
             logger.error("[migrate] 外键一致性检查仍未通过，共 %d 处：%s", len(integrity), integrity[:10])
             logger.error("[migrate] 数据库已备份，可回滚；请人工核查上述表后再重试")
             sys.exit(2)
+        if (
+            _table_exists(conn, "exam_sessions")
+            and not conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='index' AND name='uq_active_exam_session'"
+            ).fetchone()
+        ):
+            logger.error("[migrate] uq_active_exam_session 缺失，单活跃会话约束未恢复")
+            sys.exit(2)
+        # 索引一致性检查：重建/改 collation 后若索引与表定义脱节，integrity_check 会
+        # 报 "row N missing from index" / "non-unique entry in index"，必须视为迁移失败。
+        index_integrity = conn.execute("PRAGMA integrity_check").fetchall()
+        if index_integrity != [("ok",)]:
+            logger.error("[migrate] 索引一致性检查未通过：%s", index_integrity[:10])
+            logger.error("[migrate] 数据库已备份，可回滚；请人工核查后再重试")
+            sys.exit(2)
         logger.info(
-            "[migrate] 迁移完成：归一邮箱 %d 行，重建表 %d 张，清理悬空引用 %d 行，外键一致性检查通过",
+            "[migrate] 迁移完成：归一邮箱 %d 行，重建表 %d 张，清理悬空引用 %d 行，外键/索引一致性检查通过",
             normalized,
             rebuilt,
             purged,

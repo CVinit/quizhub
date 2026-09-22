@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile, status
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
 from sqlalchemy.orm import Session
@@ -92,7 +93,7 @@ def create_user(
         for gid in payload.group_ids:
             if gid not in scope:
                 raise HTTPException(status.HTTP_403_FORBIDDEN, "无权分配该分组")
-    u, _ = user_service.create_user(
+    u = user_service.create_user(
         db,
         user.id,
         payload.email,
@@ -101,12 +102,9 @@ def create_user(
         payload.password,
         payload.status,
         payload.group_ids,
+        # 部门管理员新增用户时自动归属其部门；与创建同一事务写入，避免二次 commit
+        dept_group_id=user.dept_group_id if scope is not None else None,
     )
-    # 部门管理员新增用户时，自动归属其部门
-    if scope is not None and u.dept_group_id is None:
-        u.dept_group_id = user.dept_group_id
-        db.commit()
-        db.refresh(u)
     return {
         "id": u.id,
         "email": u.email,
@@ -129,6 +127,8 @@ def update_user(
     if payload.role is not None and user.role != "super_admin":
         raise HTTPException(status.HTTP_403_FORBIDDEN, "仅超级管理员可修改用户角色")
     scope = dept_scope_ids(db, user)
+    # 显式传 null 表示「清空部门归属」；未传字段则保持不变（PATCH 语义）
+    clear_dept_group = "dept_group_id" in payload.model_fields_set and payload.dept_group_id is None
     u = user_service.update_user(
         db,
         user.id,
@@ -137,6 +137,7 @@ def update_user(
         payload.role,
         payload.dept_group_id,
         scope,
+        clear_dept_group=clear_dept_group,
     )
     return _to_dict(u)
 
@@ -213,7 +214,7 @@ async def import_preview(
     max_bytes = int(settings * 1024 * 1024)
     declared = file.size or 0
     if declared and declared > max_bytes:
-        raise HTTPException(status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, f"文件超过上限 {settings}MB")
+        raise HTTPException(status.HTTP_413_CONTENT_TOO_LARGE, f"文件超过上限 {settings}MB")
     chunks: list[bytes] = []
     total = 0
     while True:
@@ -222,11 +223,14 @@ async def import_preview(
             break
         total += len(chunk)
         if total > max_bytes:
-            raise HTTPException(status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, f"文件超过上限 {settings}MB")
+            raise HTTPException(status.HTTP_413_CONTENT_TOO_LARGE, f"文件超过上限 {settings}MB")
         chunks.append(chunk)
     content = b"".join(chunks)
     try:
-        return user_excel.preview(db, content, user.id)
+        # 解析 xlsx 并对每行做 bcrypt（单次约 300ms，行数上限 5000）是纯 CPU 工作：
+        # 直接在 async 路由内调用会独占事件循环数分钟，阻塞所有并发请求。
+        # 丢进线程池执行，保持事件循环可用。
+        return await run_in_threadpool(user_excel.preview, db, content, user.id)
     except ValueError as exc:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
 
@@ -237,14 +241,14 @@ def import_users(
     db: Session = Depends(get_db),
     user: User = Depends(require_admin),
 ):
-    # 与手动新增一致：非超级管理员不得导入管理员账号（垂直越权防护）
+    # 与手动新增一致：非超级管理员不得导入管理员账号（垂直越权防护）。
+    # 先 peek（不消费）做角色校验，通过后再 consume：校验不通过不作废本次预览。
+    rows = user_excel.peek_preview(confirm_token, user.id)
     if user.role != "super_admin":
-        rows = user_excel.consume_preview(confirm_token, user.id)
         for r in rows:
             if str(r.get("role") or "user") != "user":
                 raise HTTPException(status.HTTP_403_FORBIDDEN, "仅超级管理员可创建管理员账号")
-    else:
-        rows = user_excel.consume_preview(confirm_token, user.id)
+    rows = user_excel.consume_preview(confirm_token, user.id)
     res = user_service.import_users(db, user.id, rows, scope=dept_scope_ids(db, user), actor_role=user.role)
     return res
 

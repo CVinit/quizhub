@@ -12,12 +12,14 @@ import uuid
 from dataclasses import dataclass
 from io import BytesIO
 
+from fastapi import status
 from sqlalchemy.orm import Session
 
+from app.core.errors import DomainError
 from app.core.preview_cache import BoundedTTLCache
 from app.models.question import Question, QuestionBank
 from app.schemas.question import UploadImportResult, UploadPreview, UploadPreviewRow
-from app.utils.excel import parse_workbook
+from app.utils.excel import PARSE_ROW_MAX, parse_workbook
 
 
 @dataclass(frozen=True, slots=True)
@@ -32,12 +34,9 @@ class _PreviewEntry:
 
 # 进程内暂存：confirm_token -> _PreviewEntry。
 # 有容量上限与 TTL（见 core/preview_cache.py），避免反复预览却不导入导致内存无界增长。
-# 行数上限 _IMPORT_ROW_MAX 限制单条体积，容量上限限制条目数，二者共同给出内存上界。
+# 行数上限由 parse_workbook 的 PARSE_ROW_MAX 限制单条体积，容量上限限制条目数，
+# 二者共同给出内存上界。
 _preview_cache: BoundedTTLCache[_PreviewEntry] = BoundedTTLCache(maxsize=32, ttl=30 * 60)
-# 预览条目有效期（秒），过期不可导入
-_PREVIEW_TTL = 30 * 60
-# 单次导入行数上限，防止恶意超大文件
-_IMPORT_ROW_MAX = 10000
 
 
 def preview(
@@ -45,23 +44,25 @@ def preview(
     content: bytes,
     group_id: int | None,
     bank_id: int | None,
-    bank_name: str = "",
-    user_id: int = 0,
+    bank_name: str,
+    user_id: int,
     scope: set[int] | None = None,
 ) -> dict:
     """解析并暂存预览。返回 preview + confirm_token。
 
     bank_id 优先使用既有题库；否则导入时以 bank_name 命名新建一个题库。
+    user_id 必传：预览条目与之绑定，确认导入时校验调用者一致（防 IDOR）。
     """
     _validate_scope(db, group_id, bank_id, scope)
     buf = BytesIO(content)
     preview_obj: UploadPreview = parse_workbook(buf)
-    valid_rows = [r for r in _full_rows(preview_obj, buf) if r.valid]
-    # 行数上限保护
-    truncated = False
-    if len(valid_rows) > _IMPORT_ROW_MAX:
-        valid_rows = valid_rows[:_IMPORT_ROW_MAX]
-        truncated = True
+    # 直接使用 parse_workbook 的完整解析结果（`rows` 只是给前端的 20 行预览切片）。
+    # 原实现另起一次 `_full_rows()` 重新解析同一份字节流，不仅重复 CPU，还因为
+    # 那条路径不做表头校验，使「被 parse_workbook 判定为表头不一致而跳过的行」
+    # 仍然进入 valid_rows 并在 do_import 落库（列按位置读取 → 静默错列）。
+    valid_rows = [r for r in preview_obj.all_rows if r.valid]
+    # 解析阶段触及行数上限时如实上报（可能被截断）
+    truncated = preview_obj.total >= PARSE_ROW_MAX
 
     token = uuid.uuid4().hex
     _preview_cache.put(
@@ -85,59 +86,31 @@ def preview(
     }
 
 
-def _full_rows(preview: UploadPreview, buf: BytesIO) -> list[UploadPreviewRow]:
-    """parse_workbook 只返回前 20 行预览，这里重新解析取全部。
-
-    使用 read_only 模式 + 行数上限，避免恶意大文件/zip 炸弹耗尽内存。
-    """
-    from openpyxl import load_workbook
-
-    from app.utils.excel import SHEET_ORDER, _parse_row
-
-    buf.seek(0)
-    wb = load_workbook(buf, data_only=True, read_only=True)
-    out: list[UploadPreviewRow] = []
-    try:
-        for sheet_name in SHEET_ORDER:
-            if sheet_name not in wb.sheetnames:
-                continue
-            ws = wb[sheet_name]
-            for r_idx, row in enumerate(ws.iter_rows(min_row=2, values_only=True), start=2):
-                if r_idx > _IMPORT_ROW_MAX + 1:
-                    break
-                if not row or all(c is None or str(c).strip() == "" for c in row):
-                    continue
-                out.append(_parse_row(sheet_name, row, r_idx))
-                if len(out) >= _IMPORT_ROW_MAX:
-                    return out
-    finally:
-        wb.close()
-    return out
-
-
-def do_import(db: Session, confirm_token: str, user_id: int = 0, scope: set[int] | None = None) -> UploadImportResult:
+def do_import(db: Session, confirm_token: str, user_id: int, scope: set[int] | None = None) -> UploadImportResult:
     """根据 confirm_token 把暂存的有效题目落库。校验调用者与 token 绑定一致。
 
     bank_id 优先；为空则按 bank_name 自动建一个题库（question_bank）作为本次导入归属。
     """
-    from fastapi import HTTPException, status
 
-    # 先做归属校验再消费：越权尝试不应使上传者本人的预览失效
-    owner_id = _preview_cache.peek_owner(confirm_token)
-    if owner_id is None:
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "预览已过期，请重新上传")
-    # token 绑定用户校验（防 IDOR）：仅上传者本人可导入
-    if user_id and owner_id and user_id != owner_id:
-        raise HTTPException(status.HTTP_403_FORBIDDEN, "无权导入他人预览数据")
+    # 先 peek（不消费）→ 归属校验 → 数据范围校验 → 最后才 take：
+    # 任一校验失败都不应把上传者本人的预览作废、逼其重新上传。
+    peeked = _preview_cache.peek(confirm_token)
+    if peeked is None:
+        raise DomainError(status.HTTP_400_BAD_REQUEST, "预览已过期，请重新上传")
+    peeked_entry, owner_id = peeked
+    if int(owner_id) != user_id:
+        raise DomainError(status.HTTP_403_FORBIDDEN, "无权导入他人预览数据")
+    _validate_scope(db, peeked_entry.group_id, peeked_entry.bank_id, scope)
 
     taken = _preview_cache.take(confirm_token)
     if taken is None:
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "预览已过期，请重新上传")
+        raise DomainError(status.HTTP_400_BAD_REQUEST, "预览已过期，请重新上传")
     entry, _owner = taken
     rows = entry.rows
     group_id = entry.group_id
     bank_id = entry.bank_id
     bank_name = entry.bank_name
+    # 确认阶段再校验一次：预览与确认之间题库/分组归属可能已被改动
     _validate_scope(db, group_id, bank_id, scope)
 
     # 没有指定既有题库时，按名称自动新建一个题库（同次上传即一个题库）
@@ -188,32 +161,28 @@ def _validate_scope(db: Session, group_id: int | None, bank_id: int | None, scop
     from app.models.group import Group
 
     if group_id is not None and not db.get(Group, group_id):
-        from fastapi import HTTPException, status
-
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "分组不存在")
+        raise DomainError(status.HTTP_400_BAD_REQUEST, "分组不存在")
     if scope is not None and (group_id is None or group_id not in scope):
-        from fastapi import HTTPException, status
-
-        raise HTTPException(status.HTTP_403_FORBIDDEN, "无权导入到该分组")
+        raise DomainError(status.HTTP_403_FORBIDDEN, "无权导入到该分组")
     if bank_id:
         bank = db.get(QuestionBank, bank_id)
         if not bank:
-            from fastapi import HTTPException, status
-
-            raise HTTPException(status.HTTP_400_BAD_REQUEST, "题库不存在")
+            raise DomainError(status.HTTP_400_BAD_REQUEST, "题库不存在")
         if scope is not None and (bank.group_id is None or bank.group_id not in scope):
-            from fastapi import HTTPException, status
-
-            raise HTTPException(status.HTTP_403_FORBIDDEN, "无权导入到该题库")
+            raise DomainError(status.HTTP_403_FORBIDDEN, "无权导入到该题库")
         if group_id is not None and bank.group_id is not None and group_id != bank.group_id:
-            from fastapi import HTTPException, status
-
-            raise HTTPException(status.HTTP_400_BAD_REQUEST, "导入分组必须与题库分组一致")
+            raise DomainError(status.HTTP_400_BAD_REQUEST, "导入分组必须与题库分组一致")
 
 
 def _ensure_unique_tags(db: Session, tags: list[str]) -> None:
-    """批量确保标签存在（同事务安全）。"""
+    """批量确保标签存在（同事务安全）。
+
+    标签名有唯一约束：并发导入同一批标签时，双方都可能在 flush 前读到"不存在"，
+    后到者撞唯一约束会让整次导入 500。用 SAVEPOINT 逐条隔离（与
+    `question_service._ensure_tags` 同口径），冲突只让该条静默跳过。
+    """
     from sqlalchemy import select as sa_select
+    from sqlalchemy.exc import IntegrityError
 
     from app.models.question import QuestionTag
 
@@ -221,7 +190,12 @@ def _ensure_unique_tags(db: Session, tags: list[str]) -> None:
         return
     existing = {row[0] for row in db.execute(sa_select(QuestionTag.name).where(QuestionTag.name.in_(tags))).all()}
     for name in tags:
-        if name and name not in existing:
-            db.add(QuestionTag(name=name))
-            existing.add(name)
-    db.flush()
+        if not name or name in existing:
+            continue
+        try:
+            with db.begin_nested():
+                db.add(QuestionTag(name=name))
+        except IntegrityError:
+            # 并发或重复插入触发唯一约束冲突；SAVEPOINT 已回滚，主事务不受影响
+            pass
+        existing.add(name)

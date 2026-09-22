@@ -15,6 +15,7 @@ answer 规范（与 import_service 一致）：
 
 from __future__ import annotations
 
+import unicodedata
 from typing import Any
 
 
@@ -40,10 +41,41 @@ def grade(question_type: str, correct_answer: Any, user_answer: Any) -> bool | N
     return False
 
 
+def is_passed(score: float, total_score: float, pass_score: float, *, overtime: bool = False) -> bool:
+    """按百分制判定是否及格。
+
+    及格线（ExamDefinition.pass_score / 系统设置 default_pass_score）与前端「及格线」
+    输入框（上限 100）都是**百分制**，而成绩是题目原始分累加（Question.score 默认 2 分/题），
+    两者量纲不同，必须先归一化再比较：否则 10 题（满分 20）的模拟考即使满分也永远判不及格。
+    总分为 0（空卷/异常数据）或超时交卷一律不及格。
+
+    Args:
+        score: 得分（题目原始分累加）。
+        total_score: 卷面总分（题目原始分累加）。
+        pass_score: 及格线（百分制，0~100）。
+        overtime: 是否超时交卷；保持「超时即不及格」语义。
+
+    Returns:
+        是否及格。
+    """
+    if overtime or total_score <= 0:
+        return False
+    # 分数是 Float 累加（且 partial_score 可任意小数），数学上刚好 60% 也可能得到
+    # 59.99999999999999 而误判不及格。先按 6 位小数归一，再与及格线比较；
+    # 同一口径必须同步到 review_service.publish_results 的 SQL 表达式。
+    return round(score * 100.0 / total_score, 6) >= pass_score
+
+
 def _norm_str(v: Any) -> str:
+    """归一化作答文本：NFKC + 去空白 + 大写。
+
+    NFKC 会把全角字符折叠成 ASCII（`Ａ`→`A`、全角空格→普通空格、`１`→`1`），
+    原实现只去掉 ASCII 空格，中文输入法下的全角空格/全角字母会让正确答案被判错。
+    """
     if v is None:
         return ""
-    return str(v).strip().upper().replace(" ", "")
+    normalized = unicodedata.normalize("NFKC", str(v))
+    return normalized.strip().upper().replace(" ", "")
 
 
 def _grade_fill(correct_answer: Any, user_answer: Any) -> bool:
@@ -60,7 +92,8 @@ def _grade_fill(correct_answer: Any, user_answer: Any) -> bool:
         return False
     if len(correct_answer) != len(user_answer):
         return False
-    for blanks, ua in zip(correct_answer, user_answer, strict=False):
+    # 长度已在上面显式比较过，strict=True 只是把该不变式写进代码（不会真的触发）
+    for blanks, ua in zip(correct_answer, user_answer, strict=True):
         if not isinstance(blanks, list):
             blanks = [blanks]
         ua_norm = _norm_str(ua)

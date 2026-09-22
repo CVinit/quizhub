@@ -16,6 +16,7 @@ from fastapi import HTTPException
 from pydantic import ValidationError
 from sqlalchemy import select
 
+from app.core.errors import DomainError
 from app.core.security import hash_password
 from app.database import db_session, init_db
 from app.models.exam import ExamDefinition, ExamQuestion
@@ -215,7 +216,7 @@ def test_delete_exam_with_sessions_conflict():
             )
         )
         db.commit()
-        with pytest.raises(HTTPException) as exc:
+        with pytest.raises((DomainError, HTTPException)) as exc:
             exam_service.delete_exam(db, e.id, None)
         assert exc.value.status_code == 409
 
@@ -238,7 +239,7 @@ def test_delete_exam_scope_denied_for_foreign_dept():
         db.add(e)
         db.commit()
         scope = {rd.id}
-        with pytest.raises(HTTPException) as exc:
+        with pytest.raises((DomainError, HTTPException)) as exc:
             exam_service.delete_exam(db, e.id, scope)
         assert exc.value.status_code == 403
 
@@ -251,7 +252,7 @@ def test_delete_user_denied_for_dept_admin():
         stu = _mk_user()
         db.add_all([dept_admin, stu])
         db.commit()
-        with pytest.raises(HTTPException) as exc:
+        with pytest.raises((DomainError, HTTPException)) as exc:
             user_service.delete_user(db, dept_admin.id, "dept_admin", stu.id, None)
         assert exc.value.status_code == 403
 
@@ -262,10 +263,10 @@ def test_delete_user_cannot_delete_self_or_last_super():
         super_admin = _mk_user("super_admin")
         db.add(super_admin)
         db.commit()
-        with pytest.raises(HTTPException) as exc:
+        with pytest.raises((DomainError, HTTPException)) as exc:
             user_service.delete_user(db, super_admin.id, "super_admin", super_admin.id, None)
         assert exc.value.status_code == 400
-        with pytest.raises(HTTPException) as exc:
+        with pytest.raises((DomainError, HTTPException)) as exc:
             user_service.delete_user(db, super_admin.id, "super_admin", super_admin.id, None)
         assert exc.value.status_code == 400  # 唯一超管不可删
 

@@ -4,7 +4,9 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+from app.core.limits import validate_answer_size
 
 
 class PracticeStartIn(BaseModel):
@@ -20,6 +22,13 @@ class PracticeAnswerIn(BaseModel):
     question_id: int
     answer: Any = None
     mode: Literal["sequence", "random", "type", "wrong", "mark", "bank"] = "sequence"
+
+    @field_validator("answer")
+    @classmethod
+    def _limit_answer_size(cls, value: Any) -> Any:
+        # 与 ExamAnswerIn 共用同一上限：练习记录每次作答新增一行且原样落库，
+        # 不限长同样构成写放大/磁盘膨胀面（原先只有考试路径做了限制）。
+        return validate_answer_size(value)
 
 
 class ToggleMarkIn(BaseModel):

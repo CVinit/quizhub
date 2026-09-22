@@ -19,6 +19,7 @@ SQLite 不支持 ALTER TABLE ADD CONSTRAINT，故 exam_questions 的唯一约束
 
 from __future__ import annotations
 
+import argparse
 import logging
 import sqlite3
 import sys
@@ -27,6 +28,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from app.config import DB_PATH
+from app.core.db_backup import backup_database
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 logger = logging.getLogger("quizhub.migrate")
@@ -83,9 +85,7 @@ def migrate_active_session_index(conn: sqlite3.Connection) -> None:
 
 
 def _table_exists(conn: sqlite3.Connection, table: str) -> bool:
-    return bool(
-        conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)).fetchone()
-    )
+    return bool(conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)).fetchone())
 
 
 def migrate_exam_question_unique(conn: sqlite3.Connection) -> None:
@@ -164,9 +164,7 @@ def _recover_interrupted_rebuild(conn: sqlite3.Connection) -> None:
         logger.info("[migrate] exam_questions 数据完整（%d 行），已清理残留旧表", new_count)
         return
 
-    logger.warning(
-        "[migrate] 检测到数据未回填（新表 %d 行 < 旧表 %d 行），正在恢复 ...", new_count, old_count
-    )
+    logger.warning("[migrate] 检测到数据未回填（新表 %d 行 < 旧表 %d 行），正在恢复 ...", new_count, old_count)
     conn.execute("PRAGMA foreign_keys=OFF")
     if _table_exists(conn, "exam_questions"):
         conn.execute("DROP TABLE exam_questions")
@@ -206,9 +204,17 @@ def migrate_legacy_plain_settings(conn: sqlite3.Connection) -> None:
 
 
 def main() -> None:
+    # 刻意不声明任何选项：本脚本没有 dry-run 实现，任何多余参数（例如误传 --dry-run）
+    # 都必须立即报错退出，而不是被静默忽略后**真的执行迁移**。原实现不解析参数，
+    # 运维以为在预演、实际已开始重建 exam_questions。
+    argparse.ArgumentParser(description="历史增量迁移（overtime / token_version / 唯一约束 / 遗留设置）").parse_args()
+
     if not DB_PATH.exists():
         logger.error("[migrate] 数据库不存在：%s，请先运行 init_db.py", DB_PATH)
         sys.exit(1)
+    # 本脚本会重建 exam_questions（DROP/RENAME）等破坏性操作，必须先留可回滚的备份；
+    # backup_database 同时把自动备份数量收敛到上限，避免每次启动都堆积。
+    backup_database(DB_PATH)
     logger.info("[migrate] 开始迁移：%s", DB_PATH)
     conn = sqlite3.connect(str(DB_PATH))
     try:
@@ -218,6 +224,9 @@ def main() -> None:
         migrate_exam_question_unique(conn)
         migrate_active_session_index(conn)
         migrate_legacy_plain_settings(conn)
+    except Exception as exc:  # noqa: BLE001  迁移脚本需给出明确失败信号
+        logger.exception("[migrate] 迁移失败：%s", exc)
+        sys.exit(1)
     finally:
         conn.close()
     logger.info("[migrate] 迁移完成")

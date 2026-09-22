@@ -11,15 +11,15 @@ import uuid
 from io import BytesIO
 from typing import Any
 
-from openpyxl import Workbook, load_workbook
+from openpyxl import Workbook
 from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
 from sqlalchemy.orm import Session
 
+from app.core.email import normalize_email
 from app.core.preview_cache import BoundedTTLCache
 from app.core.security import hash_password
-from app.services.user_service import ROLES, STATUSES
-from app.utils.excel import MAX_CELL_CHARS, validate_workbook_archive
+from app.utils.excel import MAX_CELL_CHARS, headers_match, open_workbook, validate_workbook_archive
 
 HEADERS = ["邮箱", "姓名", "角色", "初始密码", "状态", "分组ID"]
 
@@ -49,7 +49,6 @@ HEADER_FONT = Font(color="FFFFFF", bold=True)
 # 有容量上限与 TTL，避免反复预览却不导入时无界增长（详见 core/preview_cache.py）。
 # 注意：存的是 **password_hash** 而非明文口令，模块级缓存中不留可用的初始凭据。
 _preview_cache: BoundedTTLCache[list[dict]] = BoundedTTLCache(maxsize=32, ttl=30 * 60)
-_PREVIEW_TTL = 30 * 60
 _IMPORT_ROW_MAX = 5000  # 单次导入用户数上限
 
 
@@ -138,25 +137,35 @@ def _parse_row(row: tuple, r_idx: int) -> dict:
         error = "单元格内容过长"
     elif not email:
         error = "邮箱为空"
+    elif any(ch in email for ch in "\r\n"):
+        # 换行符会被带进 SMTP 信封/邮件头，属命令注入与头注入素材；在解析阶段就拒绝
+        error = "邮箱不能包含换行符"
     elif "@" not in email:
         error = "邮箱格式不正确"
 
     role = _norm_role(role_raw)
-    if role_raw and role not in ROLES:
+    # 用原始值查映射表判断合法性：_norm_role 对未知值会兜底成 "user"，
+    # 若改判 role 本身则该校验永远为假（形同虚设），未知角色会被静默降级为普通用户。
+    if role_raw and role_raw not in ROLE_CN:
         error = error or f"角色非法: {role_raw}"
 
     st = _norm_status(status_raw)
-    if status_raw and st not in STATUSES:
+    if status_raw and status_raw not in STATUS_CN:
         error = error or f"状态非法: {status_raw}"
 
     if not password:
         error = error or "初始密码不能为空"
     elif len(password) < 6:
         error = error or "初始密码至少 6 位"
+    elif len(password.encode("utf-8")) > 72:
+        # bcrypt 上限：不在这里拦，预览阶段会在 hash_password 处整份文件报错，
+        # 且错误信息不指向具体行，其它合法行一起丢失。
+        error = error or "初始密码 UTF-8 编码后不能超过 72 字节"
 
     return {
         "row_index": r_idx,
-        "email": email.lower(),
+        # 与全站邮箱口径一致（strip + lower），不再用裸 .lower() 绕过 core.email 的约定
+        "email": normalize_email(email),
         "name": name,
         "role": role,
         "password": password,
@@ -167,34 +176,51 @@ def _parse_row(row: tuple, r_idx: int) -> dict:
     }
 
 
-def preview(db: Session, content: bytes, user_id: int = 0) -> dict:
-    """解析上传工作簿，暂存有效行，返回预览 + confirm_token。"""
+def preview(db: Session, content: bytes, user_id: int) -> dict:
+    """解析上传工作簿，暂存有效行，返回预览 + confirm_token。
+
+    user_id 必传：预览条目与之绑定，确认导入时校验调用者一致（防 IDOR）。
+    """
     validate_workbook_archive(content)
     buf = BytesIO(content)
-    wb = load_workbook(buf, data_only=True, read_only=True)
+    wb = open_workbook(buf)
     rows: list[dict] = []
     errors: list[dict] = []
     try:
         if "用户" in wb.sheetnames:
             ws = wb["用户"]
-            for r_idx, row in enumerate(ws.iter_rows(min_row=2, values_only=True), start=2):
-                if r_idx > _IMPORT_ROW_MAX + 1:
-                    break
-                if not row or all(c is None or str(c).strip() == "" for c in row):
-                    continue
-                parsed = _parse_row(row, r_idx)
-                rows.append(parsed)
-                if not parsed["valid"]:
-                    errors.append({"row": r_idx, "email": parsed["email"], "error": parsed["error"]})
-                if len(rows) >= _IMPORT_ROW_MAX:
-                    break
+            # 与题库导入同口径：列按位置取值，表头不一致会让邮箱/口令/分组整体错位
+            row_iter = ws.iter_rows(min_row=1, values_only=True)
+            header = next(row_iter, None)
+            if not headers_match(header, HEADERS):
+                errors.append({"row": 1, "email": "", "error": "表头与模板不一致，请下载最新模板后重新填写"})
+            else:
+                for r_idx, row in enumerate(row_iter, start=2):
+                    if r_idx > _IMPORT_ROW_MAX + 1:
+                        break
+                    if not row or all(c is None or str(c).strip() == "" for c in row):
+                        continue
+                    parsed = _parse_row(row, r_idx)
+                    rows.append(parsed)
+                    if not parsed["valid"]:
+                        errors.append({"row": r_idx, "email": parsed["email"], "error": parsed["error"]})
+                    if len(rows) >= _IMPORT_ROW_MAX:
+                        break
     finally:
         wb.close()
 
     valid_rows = [r for r in rows if r["valid"]]
     # 立即把明文口令换成 bcrypt 哈希再暂存：确认导入阶段不再需要明文，
     # 这样即便缓存被读取（堆转储、调试）也不会泄露可用的初始凭据。
-    cached_rows = [{**row, "password_hash": hash_password(str(row["password"])), "password": ""} for row in valid_rows]
+    # bcrypt 约 300ms/次，而导入模板里同一初始口令常被大量复用：按口令去重后
+    # 只哈希一次，把「行数 × 300ms」降为「不同口令数 × 300ms」。
+    hash_cache: dict[str, str] = {}
+    cached_rows: list[dict] = []
+    for row in valid_rows:
+        password = str(row["password"])
+        if password not in hash_cache:
+            hash_cache[password] = hash_password(password)
+        cached_rows.append({**row, "password_hash": hash_cache[password], "password": ""})
     token = uuid.uuid4().hex
     _preview_cache.put(token, cached_rows, owner=float(user_id))
     preview_rows = [{key: value for key, value in row.items() if key != "password"} for row in rows[:50]]
@@ -207,15 +233,44 @@ def preview(db: Session, content: bytes, user_id: int = 0) -> dict:
     }
 
 
+def peek_preview(confirm_token: str, user_id: int) -> list[dict]:
+    """只读取预览的有效行而不消费（供路由先做角色校验）。
+
+    配合 `consume_preview` 实现「先校验、后消费」：越权或非法请求不应把
+    上传者本人的预览作废、逼其重新上传。
+
+    Args:
+        confirm_token: 预览令牌。
+        user_id: 调用者 id，必须与预览归属一致。
+
+    Returns:
+        预览暂存的有效行列表。
+
+    Raises:
+        HTTPException: 预览不存在/过期（400）或归属不符（403）。
+    """
+    from fastapi import HTTPException
+    from fastapi import status as http_status
+
+    peeked = _preview_cache.peek(confirm_token)
+    if peeked is None:
+        raise HTTPException(http_status.HTTP_400_BAD_REQUEST, "预览已过期，请重新上传")
+    rows, owner = peeked
+    if int(owner) != user_id:
+        raise HTTPException(http_status.HTTP_403_FORBIDDEN, "无权导入他人预览数据")
+    return rows
+
+
 def consume_preview(confirm_token: str, user_id: int) -> list[dict]:
     """取出并消费预览暂存的有效行（校验 token 绑定用户）。"""
     from fastapi import HTTPException
     from fastapi import status as http_status
 
-    owner = _preview_cache.peek_owner(confirm_token)
-    if owner is None:
+    peeked = _preview_cache.peek(confirm_token)
+    if peeked is None:
         raise HTTPException(http_status.HTTP_400_BAD_REQUEST, "预览已过期，请重新上传")
-    if user_id and owner and user_id != owner:
+    _rows, owner = peeked
+    if int(owner) != user_id:
         # 不消费他人条目：越权尝试不应使受害者的预览失效
         raise HTTPException(http_status.HTTP_403_FORBIDDEN, "无权导入他人预览数据")
     taken = _preview_cache.take(confirm_token)
@@ -223,8 +278,3 @@ def consume_preview(confirm_token: str, user_id: int) -> list[dict]:
         raise HTTPException(http_status.HTTP_400_BAD_REQUEST, "预览已过期，请重新上传")
     rows, _owner = taken
     return rows
-
-
-def _gc_cache() -> None:
-    """兼容旧调用点：过期清理由 BoundedTTLCache 在读/写时自动完成，此处无需操作。"""
-    return None

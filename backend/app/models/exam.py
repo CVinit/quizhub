@@ -11,9 +11,12 @@ from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy.types import JSON
 
 from app.models.base import PKMixin, TimestampMixin
+from app.models.question import DEFAULT_QUESTION_SCORE
 
 EXAM_TYPE = ("mock", "formal")
-EXAM_STATUS = ("draft", "published", "ongoing", "ended", "reviewing")
+# 与 exam_service 实际写入的状态保持一致：archive_exam/unarchive_exam 使用 "archived"
+# （原枚举遗漏该项，导致「模型声明的合法状态」与「代码真正写入的状态」漂移）。
+EXAM_STATUS = ("draft", "published", "ongoing", "ended", "reviewing", "archived")
 
 
 class PaperTemplate(PKMixin, TimestampMixin):
@@ -33,7 +36,7 @@ class ExamDefinition(PKMixin, TimestampMixin):
     name: Mapped[str] = mapped_column(String, nullable=False)
     type: Mapped[str] = mapped_column(String, default="formal", nullable=False, index=True)  # EXAM_TYPE
     paper_template_id: Mapped[int | None] = mapped_column(
-        Integer, ForeignKey("paper_templates.id", ondelete="SET NULL"), nullable=True
+        Integer, ForeignKey("paper_templates.id", ondelete="SET NULL"), nullable=True, index=True
     )
     manual_questions: Mapped[list | None] = mapped_column(JSON, nullable=True)  # 手选题 id 列表
     rules: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
@@ -47,7 +50,10 @@ class ExamDefinition(PKMixin, TimestampMixin):
     show_analysis: Mapped[bool] = mapped_column(default=False, nullable=False)  # type: ignore[arg-type]
     need_review: Mapped[bool] = mapped_column(default=False, nullable=False)  # type: ignore[arg-type]
     status: Mapped[str] = mapped_column(String, default="draft", nullable=False, index=True)
-    created_by: Mapped[int | None] = mapped_column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    # index=True：mock 定义的复用/清理都按 created_by 过滤（exam/mock.py）
+    created_by: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
+    )
 
 
 class ExamQuestion(PKMixin):
@@ -62,5 +68,5 @@ class ExamQuestion(PKMixin):
         Integer, ForeignKey("questions.id", ondelete="CASCADE"), index=True, nullable=False
     )
     seq: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
-    score: Mapped[float] = mapped_column(Float, default=2, nullable=False)
+    score: Mapped[float] = mapped_column(Float, default=DEFAULT_QUESTION_SCORE, nullable=False)
     shuffle_map: Mapped[dict | None] = mapped_column(JSON, nullable=True)  # 选项打乱映射

@@ -12,6 +12,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
 from app.api import questions as questions_api
+from app.core.errors import DomainError
 from app.models.group import Group
 from app.models.question import Question, QuestionBank
 from app.models.record import ExamSession, QuestionState
@@ -56,7 +57,7 @@ def test_dept_admin_cannot_create_question_outside_scope():
             answer="A",
             group_id=other.id,
         )
-        with pytest.raises(HTTPException) as exc:
+        with pytest.raises((DomainError, HTTPException)) as exc:
             questions_api.create_question(payload, db, admin)
         assert exc.value.status_code == 403
         assert dept_scope_ids(db, admin) == {own.id}
@@ -79,7 +80,7 @@ def test_registration_is_rejected_when_registration_is_closed():
         )
         db.commit()
 
-        with pytest.raises(HTTPException) as exc:
+        with pytest.raises((DomainError, HTTPException)) as exc:
             auth_service.register(
                 db,
                 "new@quizhub.test",
@@ -110,7 +111,7 @@ def test_registration_cannot_self_assign_non_public_group():
         )
         db.commit()
 
-        with pytest.raises(HTTPException) as exc:
+        with pytest.raises((DomainError, HTTPException)) as exc:
             auth_service.register(
                 db,
                 "new@quizhub.test",
@@ -150,16 +151,18 @@ def test_short_eval_requires_an_existing_short_answer_record():
         db.add(question)
         db.commit()
 
-        with pytest.raises(HTTPException) as exc:
+        with pytest.raises((DomainError, HTTPException)) as exc:
             practice_service.short_eval(db, user.id, question.id, True)
         assert exc.value.status_code == 400
         assert db.execute(select(QuestionState).where(QuestionState.user_id == user.id)).first() is None
 
 
-def test_mail_fallback_does_not_log_recipient_or_code(caplog):
+def test_mail_unconfigured_does_not_log_recipient_or_code(caplog):
+    """SMTP 未配置的失败路径（经 send_safely 记录）不得泄露收件人或验证码。"""
     caplog.set_level("INFO", logger="quizhub")
 
-    mail_service._send(
+    mail_service.send_safely(
+        mail_service._send,
         "person@quizhub.test",
         "注册验证码",
         "验证码是 123456",
@@ -168,6 +171,7 @@ def test_mail_fallback_does_not_log_recipient_or_code(caplog):
 
     assert "person@quizhub.test" not in caplog.text
     assert "123456" not in caplog.text
+    assert "SMTP 未配置" in caplog.text
 
 
 def test_encrypt_value_fails_closed_without_encryption_key(monkeypatch):
@@ -208,7 +212,7 @@ def test_old_token_is_invalidated_after_password_change():
         user.token_version += 1
         db.commit()
 
-        with pytest.raises(HTTPException) as exc:
+        with pytest.raises((DomainError, HTTPException)) as exc:
             get_current_user(token, db)
         assert exc.value.status_code == 401
 
@@ -369,7 +373,7 @@ def test_department_admin_cannot_publish_mixed_scope_exam():
         db.add(exam)
         db.commit()
 
-        with pytest.raises(HTTPException) as exc:
+        with pytest.raises((DomainError, HTTPException)) as exc:
             review_service.publish_results(db, exam.id, {own.id})
         assert exc.value.status_code == 403
 
@@ -407,6 +411,6 @@ def test_department_admin_cannot_build_exam_from_out_of_scope_question():
             manual_questions=[question.id],
             group_ids=[own.id],
         )
-        with pytest.raises(HTTPException) as exc:
+        with pytest.raises((DomainError, HTTPException)) as exc:
             exam_service.create_exam(db, payload, admin, {own.id})
         assert exc.value.status_code == 403

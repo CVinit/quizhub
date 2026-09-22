@@ -44,7 +44,13 @@ def rank(
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    # 排行可见性开关：关闭时对普通用户隐藏（管理员仍可在后台查看）
-    if system_service.get_settings(db, "general").get("rank_visible", "true") != "true" and user.role == "user":
+    # 排行可见性开关：关闭时对普通用户隐藏（管理员仍可在后台查看）。
+    # 用 .lower() 比较：写入端虽已归一为小写，历史存量行可能是 "TRUE"。
+    rank_visible = system_service.get_settings(db, "general").get("rank_visible", "true").lower() == "true"
+    if not rank_visible and user.role == "user":
         raise HTTPException(status.HTTP_403_FORBIDDEN, "排行榜已被关闭")
-    return stats_service.rank(db, dimension, scope, range, user.id)
+    # 数据范围：部门管理员只能看到本部门子树内的用户与分组（与其它管理端接口一致）。
+    # super_admin 全量（dept_scope_ids 返回 None）；普通用户保留全局榜——前端 Rank 页的
+    # 「个人/分组」全局榜是既有产品行为，且不暴露任何管理视图。
+    dept_scope = dept_scope_ids(db, user) if user.role == "dept_admin" else None
+    return stats_service.rank(db, dimension, scope, range, user.id, dept_scope=dept_scope)

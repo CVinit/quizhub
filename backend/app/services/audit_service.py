@@ -5,17 +5,18 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import func, or_, select
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Session
 
+from app.core.deps import user_ids_subquery
+from app.core.like import ESCAPE_CHAR, like_pattern
+from app.core.request_context import get_request_ip
+from app.core.timeutil import utcnow_iso as _now
 from app.models.system import AuditLog, Draft
-
-
-def _now() -> str:
-    return datetime.now(timezone.utc).isoformat()
+from app.models.user import User
 
 
 def log(
@@ -28,6 +29,10 @@ def log(
     ip: str = "",
 ) -> None:
     """写一条审计日志并立即提交。
+
+    来源 IP 默认取自请求上下文（`core.request_context`，由 HTTP 中间件写入）：
+    调用方无需、也不应逐层透传 Request/IP。显式传入 `ip` 时以传入值为准
+    （供脚本/后台任务在无请求上下文时使用）。
 
     提交语义说明：调用方绝大多数是在业务操作**已完成提交之后**记录审计，
     此处 commit 主要确保审计行落库（不 commit 会随请求结束回滚而丢失）。
@@ -42,25 +47,10 @@ def log(
             target_type=target_type,
             target_id=str(target_id),
             detail=detail,
-            ip=ip,
+            ip=ip or get_request_ip(),
         )
     )
     db.commit()
-
-
-def _like_pattern(raw: str) -> str:
-    """把用户输入转成安全的 LIKE 模式（转义 % 与 _）。
-
-    否则管理员搜索 `_` 或 `%` 会匹配任意字符/全部行，返回与预期无关的结果。
-
-    Args:
-        raw: 用户输入的关键词。
-
-    Returns:
-        两侧加通配符、内部通配符已转义的 LIKE 模式。
-    """
-    escaped = raw.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-    return f"%{escaped}%"
 
 
 def list_logs(
@@ -84,7 +74,7 @@ def list_logs(
     if actor:
         stmt = stmt.where(AuditLog.actor == actor)
     if action:
-        stmt = stmt.where(AuditLog.action.like(_like_pattern(action), escape="\\"))
+        stmt = stmt.where(AuditLog.action.like(like_pattern(action), escape=ESCAPE_CHAR))
     if target_type:
         stmt = stmt.where(AuditLog.target_type == target_type)
     if from_:
@@ -92,32 +82,23 @@ def list_logs(
     if to:
         stmt = stmt.where(AuditLog.created_at <= to)
     if keyword:
-        from sqlalchemy import or_
-
-        kw = _like_pattern(keyword)
+        kw = like_pattern(keyword)
         stmt = stmt.where(
             or_(
-                AuditLog.action.like(kw, escape="\\"),
-                AuditLog.target_type.like(kw, escape="\\"),
-                AuditLog.target_id.like(kw, escape="\\"),
+                AuditLog.action.like(kw, escape=ESCAPE_CHAR),
+                AuditLog.target_type.like(kw, escape=ESCAPE_CHAR),
+                AuditLog.target_id.like(kw, escape=ESCAPE_CHAR),
             )
         )
-    # 部门管理员数据范围过滤：仅看范围内操作者产生的日志
+    # 部门管理员数据范围过滤：仅看范围内操作者产生的日志。
+    # 用子查询而非物化 id 集合，避免大部门触及 SQLite 绑定参数上限；
+    # actor IS NULL 的系统日志不在子查询结果中，自然对部门管理员隐藏。
     if scope is not None:
-        from app.core.deps import users_in_scope
-
-        scoped_actors = users_in_scope(db, scope)
-        if not scoped_actors:
-            return [], 0
-        stmt = stmt.where(AuditLog.actor.in_(scoped_actors))
-
-    from sqlalchemy import func
+        stmt = stmt.where(AuditLog.actor.in_(user_ids_subquery(scope)))
 
     total = db.execute(select(func.count()).select_from(stmt.subquery())).scalar() or 0
 
     rows = db.execute(stmt.order_by(AuditLog.id.desc()).offset((page - 1) * page_size).limit(page_size)).scalars().all()
-
-    from app.models.user import User
 
     # 一次批量取回本页涉及的操作者，消除逐行 db.get 的 N+1
     actor_ids = {r.actor for r in rows if r.actor}
@@ -146,15 +127,21 @@ def list_logs(
 
 # ---------- 草稿 ----------
 def save_draft(db: Session, user_id: int, form_key: str, payload: dict) -> dict:
-    row = db.execute(select(Draft).where(Draft.user_id == user_id, Draft.form_key == form_key)).scalar_one_or_none()
-    if row is None:
-        row = Draft(user_id=user_id, form_key=form_key, payload=payload, updated_at=_now())
-        db.add(row)
-    else:
-        row.payload = payload
-        row.updated_at = _now()
+    """保存草稿（单条 upsert）。
+
+    `drafts` 上有 UNIQUE(user_id, form_key)：原实现是「先 SELECT 判存在、再 INSERT/UPDATE」，
+    并发自动保存（多标签页 / 请求重试）会双双读到不存在、双双 INSERT，一方撞唯一约束抛
+    IntegrityError → 500。这里用 SQLite 原生 upsert 把读改写收敛成一条原子语句。
+    """
+    now = _now()
+    stmt = sqlite_insert(Draft).values(user_id=user_id, form_key=form_key, payload=payload, updated_at=now)
+    stmt = stmt.on_conflict_do_update(
+        index_elements=["user_id", "form_key"],
+        set_={"payload": payload, "updated_at": now},
+    )
+    db.execute(stmt)
     db.commit()
-    return {"success": True, "updated_at": row.updated_at}
+    return {"success": True, "updated_at": now}
 
 
 def load_draft(db: Session, user_id: int, form_key: str) -> dict:

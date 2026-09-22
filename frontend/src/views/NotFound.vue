@@ -8,7 +8,20 @@
 </template>
 
 <style scoped>
-.nf { display: flex; flex-direction: column; align-items: center; justify-content: center; min-height: 80vh; gap: 12px; }
-.nf h1 { font-size: 64px; color: var(--brand-primary); margin: 0; }
-.nf .sub { color: #909399; }
+.nf {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  min-height: 80vh;
+  gap: 12px;
+}
+.nf h1 {
+  font-size: 64px;
+  color: var(--brand-primary);
+  margin: 0;
+}
+.nf .sub {
+  color: var(--el-text-color-secondary);
+}
 </style>

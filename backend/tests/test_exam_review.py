@@ -15,6 +15,7 @@ from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import select
 
+from app.core.errors import DomainError
 from app.core.security import hash_password
 from app.database import db_session, init_db
 from app.models.exam import ExamDefinition, ExamQuestion
@@ -92,7 +93,7 @@ def test_submit_answer_same_version_one_succeeds_one_conflict():
         try:
             exam_service.submit_answer(db, user, sid, q.id, "B", v0)
             assert False, "同 version 重复提交应冲突"
-        except HTTPException as exc:
+        except (DomainError, HTTPException) as exc:
             assert exc.status_code == 409
 
 
@@ -185,13 +186,13 @@ def test_review_partial_score_out_of_range_rejected():
         try:
             review_service.review(db, review.id, "partial", 6.0, reviewer)
             assert False, "partial_score 超分应被拒"
-        except HTTPException as exc:
+        except (DomainError, HTTPException) as exc:
             assert exc.status_code == 400
         # 负分也应被拒
         try:
             review_service.review(db, review.id, "partial", -1.0, reviewer)
             assert False, "负 partial_score 应被拒"
-        except HTTPException as exc:
+        except (DomainError, HTTPException) as exc:
             assert exc.status_code == 400
         # 合法 partial（3 分）通过
         review_service.review(db, review.id, "partial", 3.0, reviewer)
@@ -225,7 +226,7 @@ def test_review_partial_requires_partial_score():
         try:
             review_service.review(db, review.id, "partial", None, reviewer)
             assert False, "partial 必须提供 partial_score"
-        except HTTPException as exc:
+        except (DomainError, HTTPException) as exc:
             assert exc.status_code == 400
 
 
@@ -371,7 +372,7 @@ def test_review_concurrent_no_double_increment():
             try:
                 review_service.review(db, review_id, "pass", None, rev)
                 results["ok"] += 1
-            except HTTPException as exc:
+            except (DomainError, HTTPException) as exc:
                 if exc.status_code == 400:
                     results["conflict"] += 1
 
@@ -457,7 +458,7 @@ def test_review_double_review_rejected():
         try:
             review_service.review(db, review.id, "pass", None, reviewer)
             assert False, "重复复核应被拒"
-        except HTTPException as exc:
+        except (DomainError, HTTPException) as exc:
             assert exc.status_code == 400
 
 
@@ -498,7 +499,7 @@ def test_review_out_of_scope_rejected():
         try:
             review_service.review(db, review.id, "pass", None, reviewer, scope)
             assert False, "范围外复核应被拒"
-        except HTTPException as exc:
+        except (DomainError, HTTPException) as exc:
             assert exc.status_code == 403
         # super_admin（scope=None）下应放行
         review_service.review(db, review.id, "pass", None, reviewer, None)

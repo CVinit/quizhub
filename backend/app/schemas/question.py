@@ -8,17 +8,21 @@ from pydantic import BaseModel, ConfigDict, Field, FiniteFloat
 
 
 class QuestionBankOut(BaseModel):
+    """题库响应。字段与前端 `QuestionBank` 类型一致（原先缺 practice_enabled，
+    直接挂到题库接口上会把该字段从响应里抹掉）。"""
+
     model_config = ConfigDict(from_attributes=True)
 
     id: int
     name: str
     group_id: int | None = None
+    practice_enabled: bool = True
 
 
 class QuestionBankCreate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    name: str = Field(max_length=100)
+    name: str = Field(min_length=1, max_length=100)
     group_id: int | None = None
     practice_enabled: bool = True
 
@@ -103,6 +107,10 @@ class UploadPreview(BaseModel):
     total: int
     type_dist: dict[str, int]
     errors: list[dict]
+    # 完整解析结果（内部使用）。`rows` 只是给前端的 20 行预览切片；导入必须用这份
+    # 完整数据，避免消费方重新解析同一份字节流而产生"两次解析口径不一致"的缺陷。
+    # exclude=True：即使被当作 response_model 也不会出现在响应里（防响应体膨胀）。
+    all_rows: list[UploadPreviewRow] = Field(default_factory=list, exclude=True)
 
 
 class UploadImportResult(BaseModel):

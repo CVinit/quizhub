@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
-
-from fastapi import HTTPException, status
+from fastapi import status
 from sqlalchemy import func, select
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Session
 
+from app.core.errors import DomainError
+from app.core.timeutil import utcnow_iso as _now
 from app.models.question import Question
 from app.models.record import PracticeRecord, QuestionState
 from app.services.grading import grade
@@ -16,10 +16,6 @@ from app.services.grading import grade
 PRACTICE_MODES = ("sequence", "random", "type", "wrong", "mark", "bank")
 # 单次练习返回题量上限，避免全量加载 100k 题库
 PRACTICE_LIMIT_MAX = 500
-
-
-def _now() -> str:
-    return datetime.now(timezone.utc).isoformat()
 
 
 def enabled_bank_ids(db: Session) -> list[int]:
@@ -45,7 +41,7 @@ def _assert_bank_practice_enabled(db: Session, bank_id: int) -> None:
 
     bank = db.get(QuestionBank, bank_id)
     if not bank or not bank.practice_enabled:
-        raise HTTPException(status.HTTP_403_FORBIDDEN, "该题库未开放练习")
+        raise DomainError(status.HTTP_403_FORBIDDEN, "该题库未开放练习")
 
 
 def _get_practice_question(db: Session, question_id: int) -> Question:
@@ -58,9 +54,9 @@ def _get_practice_question(db: Session, question_id: int) -> Question:
     """
     q = db.get(Question, question_id)
     if not q:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "题目不存在")
+        raise DomainError(status.HTTP_404_NOT_FOUND, "题目不存在")
     if q.bank_id is None:
-        raise HTTPException(status.HTTP_403_FORBIDDEN, "该题库未开放练习")
+        raise DomainError(status.HTTP_403_FORBIDDEN, "该题库未开放练习")
     _assert_bank_practice_enabled(db, q.bank_id)
     return q
 
@@ -107,7 +103,7 @@ def list_modes(db: Session, user_id: int, bank_id: int | None = None) -> dict:
 
     practiced = _count_states(QuestionState.status != "unanswered")
     wrong = _count_states(QuestionState.status == "wrong")
-    marked = _count_states(QuestionState.marked == True)  # noqa: E712
+    marked = _count_states(QuestionState.marked.is_(True))
 
     # 各题库及其题量：仅返回开放练习的题库，供范围选择器渲染
     bank_rows = db.execute(
@@ -142,7 +138,7 @@ def start_practice(
     为空时限定在全部「开放练习」的题库内（排除 practice_enabled=False 的题库）。
     """
     if mode not in PRACTICE_MODES:
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, f"模式必须是 {PRACTICE_MODES} 之一")
+        raise DomainError(status.HTTP_400_BAD_REQUEST, f"模式必须是 {PRACTICE_MODES} 之一")
     # 限制返回数量上限，避免无界加载
     if limit is None or limit > PRACTICE_LIMIT_MAX:
         limit = PRACTICE_LIMIT_MAX
@@ -156,31 +152,36 @@ def start_practice(
 
     rows: list[Question]
     if mode == "wrong":
-        ids = [
-            r[0]
-            for r in db.execute(
-                select(QuestionState.question_id)
-                .where(QuestionState.user_id == user_id, QuestionState.status == "wrong")
-                .limit(limit)
-            ).all()
-        ]
-        rows = _by_ids_with_bank(db, ids, scope_bank_ids)
+        # 题库范围过滤与 LIMIT 必须在同一条 SQL 内完成：先取 limit 条 state 再按题库
+        # 过滤，会在「最近 limit 条错题都在别的题库」时返回空/不足，且无 ORDER BY 时不稳定
+        stmt = (
+            select(Question)
+            .join(QuestionState, QuestionState.question_id == Question.id)
+            .where(
+                QuestionState.user_id == user_id,
+                QuestionState.status == "wrong",
+                Question.bank_id.in_(scope_bank_ids),
+            )
+            .order_by(QuestionState.id.desc())
+            .limit(limit)
+        )
+        rows = list(db.execute(stmt).scalars().all())
     elif mode == "mark":
-        ids = [
-            r[0]
-            for r in db.execute(
-                select(QuestionState.question_id)
-                .where(
-                    QuestionState.user_id == user_id,
-                    QuestionState.marked == True,  # noqa: E712
-                )
-                .limit(limit)
-            ).all()
-        ]
-        rows = _by_ids_with_bank(db, ids, scope_bank_ids)
+        stmt = (
+            select(Question)
+            .join(QuestionState, QuestionState.question_id == Question.id)
+            .where(
+                QuestionState.user_id == user_id,
+                QuestionState.marked.is_(True),
+                Question.bank_id.in_(scope_bank_ids),
+            )
+            .order_by(QuestionState.id.desc())
+            .limit(limit)
+        )
+        rows = list(db.execute(stmt).scalars().all())
     elif mode == "type":
         if not type_:
-            raise HTTPException(status.HTTP_400_BAD_REQUEST, "按题型练习需指定题型")
+            raise DomainError(status.HTTP_400_BAD_REQUEST, "按题型练习需指定题型")
         stmt = select(Question).where(Question.type == type_, Question.bank_id.in_(scope_bank_ids))
         rows = list(db.execute(stmt.order_by(Question.id).limit(limit)).scalars().all())
     elif mode == "random":
@@ -191,15 +192,22 @@ def start_practice(
         stmt = select(Question).where(Question.bank_id.in_(scope_bank_ids))
         rows = list(db.execute(stmt.order_by(Question.id).limit(limit)).scalars().all())
 
-    return [_to_dict(q) for q in rows]
-
-
-def _by_ids_with_bank(db: Session, ids: list[int], bank_ids: list[int]) -> list:
-    """按题目 id 取题目，限定在给定题库范围内（用于错题本/标记模式的范围筛选）。"""
-    if not ids or not bank_ids:
-        return []
-    stmt = select(Question).where(Question.id.in_(ids), Question.bank_id.in_(bank_ids))
-    return list(db.execute(stmt).scalars().all())
+    # 附带本人标记状态：答题页需要据此显示「标记/取消标记」，错题本与我的标记页
+    # 还需要备注原文。缺失时前端只能一律当作未标记，导致标记开关单向、备注被覆盖。
+    states = (
+        db.execute(
+            select(QuestionState).where(
+                QuestionState.user_id == user_id,
+                QuestionState.question_id.in_([q.id for q in rows]),
+            )
+        )
+        .scalars()
+        .all()
+        if rows
+        else []
+    )
+    state_by_qid = {st.question_id: st for st in states}
+    return [_to_dict(q, state_by_qid.get(q.id)) for q in rows]
 
 
 def answer_question(db: Session, user_id: int, question_id: int, user_answer, mode: str) -> dict:
@@ -245,7 +253,14 @@ def answer_question(db: Session, user_id: int, question_id: int, user_answer, mo
     # 简答 is_correct=None 时不动 status，等自评
     st.answered_at = now
 
-    db.commit()
+    # 练习记录 + 题目状态 + 当日统计聚合在同一事务内提交：
+    # 先 flush 让聚合查询能看到本条记录，refresh_user_daily 内部的 commit 一并落库。
+    # 若刷新失败则整体回滚，避免「记录已落库但接口 500 → 前端重试 → 同题重复计分」。
+    db.flush()
+    # 即时刷新本人当日预聚合：否则排行榜与「今日活跃」要等管理员手动刷新或进程重启才更新
+    from app.services import stats_service
+
+    stats_service.refresh_user_for_timestamps(db, user_id, [now])
     return {
         "is_correct": is_correct,
         "correct_answer": q.answer,
@@ -341,7 +356,7 @@ def short_eval(db: Session, user_id: int, question_id: int, mastered: bool) -> N
     """简答自评：掌握→correct 且移出错题本；需复习→wrong。"""
     q = _get_practice_question(db, question_id)
     if q.type != "简答题":
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "只有简答题可以自评")
+        raise DomainError(status.HTTP_400_BAD_REQUEST, "只有简答题可以自评")
     now = _now()
     # 更新最近的练习记录自评
     rec = db.execute(
@@ -351,9 +366,9 @@ def short_eval(db: Session, user_id: int, question_id: int, mastered: bool) -> N
         .limit(1)
     ).scalar_one_or_none()
     if not rec:
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "请先提交简答答案")
+        raise DomainError(status.HTTP_400_BAD_REQUEST, "请先提交简答答案")
     if rec.self_eval is not None:
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "该简答题已经自评")
+        raise DomainError(status.HTTP_400_BAD_REQUEST, "该简答题已经自评")
     rec.self_eval = mastered
     rec.is_correct = mastered
     db.execute(
@@ -373,10 +388,15 @@ def short_eval(db: Session, user_id: int, question_id: int, mastered: bool) -> N
     ).scalar_one()
     st.status = "correct" if mastered else "wrong"
     st.answered_at = now
-    db.commit()
+    # 与 answer_question 同口径：自评结果与统计聚合同事务提交，失败则整体回滚
+    db.flush()
+    # 自评会改变该题的 correct/wrong 归属，同步刷新本人当日聚合
+    from app.services import stats_service
+
+    stats_service.refresh_user_for_timestamps(db, user_id, [now])
 
 
-def _to_dict(q: Question) -> dict:
+def _to_dict(q: Question, state: QuestionState | None = None) -> dict:
     return {
         "id": q.id,
         "type": q.type,
@@ -389,4 +409,7 @@ def _to_dict(q: Question) -> dict:
         "tags": q.tags,
         "score": q.score,
         "group_id": q.group_id,
+        # 本人标记状态（无记录 = 未标记、无备注）
+        "marked": bool(state.marked) if state else False,
+        "marked_note": state.marked_note if state else "",
     }

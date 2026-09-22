@@ -38,6 +38,17 @@ def start(payload: PracticeStartIn, db: Session = Depends(get_db), user: User = 
 
 @router.post("/practice/answer")
 def answer(payload: PracticeAnswerIn, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    # 兜底限流（阈值宽松，不影响正常刷题）：练习作答每次新增一行 practice_records，
+    # 与答案体积上限一起把磁盘写入收敛到有界。重置用户由超管负责，故按 user 维度计数。
+    from app.core.limits import PRACTICE_ANSWER_LIMIT, PRACTICE_ANSWER_WINDOW_SEC
+    from app.core.rate_limit import check
+
+    check(
+        f"practice-answer:user:{user.id}",
+        PRACTICE_ANSWER_LIMIT,
+        PRACTICE_ANSWER_WINDOW_SEC,
+        "练习作答",
+    )
     return practice_service.answer_question(db, user.id, payload.question_id, payload.answer, payload.mode)
 
 

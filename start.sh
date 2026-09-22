@@ -18,6 +18,22 @@ fi
 echo "[2/3] 初始化后端依赖与数据库..."
 cd "$ROOT/backend"
 uv sync
+
+# JWT / 加密密钥：首次运行生成并落盘复用。
+# 原实现不加载该文件，导致（1）重启后登录态全部失效；（2）TRAINING_ENC_KEY 变化后
+# 已保存的 SMTP 密码无法解密，测试邮件与注册验证码都发不出去。
+KEY_FILE="$ROOT/backend/data/.dev-secrets.env"
+if [ ! -f "$KEY_FILE" ]; then
+  mkdir -p "$(dirname "$KEY_FILE")"
+  uv run python -c "import base64,secrets;print('TRAINING_SECRET_KEY='+secrets.token_urlsafe(48));print('TRAINING_ENC_KEY='+base64.urlsafe_b64encode(secrets.token_bytes(32)).decode())" > "$KEY_FILE"
+  chmod 600 "$KEY_FILE"
+  echo "        已生成密钥文件 $KEY_FILE（请勿删除，否则已保存的 SMTP 密码将无法解密）"
+fi
+set -a
+# shellcheck disable=SC1090
+. "$KEY_FILE"
+set +a
+
 uv run python scripts/init_db.py
 # 按文件名顺序执行全部迁移（幂等）；避免新增迁移脚本被遗漏导致缺列
 for m in $(ls scripts/migrate_*.py | sort); do

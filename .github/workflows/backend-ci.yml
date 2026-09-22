@@ -1,0 +1,50 @@
+name: backend-ci
+
+# 后端质量门禁：格式 / 静态检查 / 类型 / 测试与覆盖率。
+#
+# 背景：本仓库此前只有镜像构建 workflow，pytest/ruff/mypy 全靠人工在本地执行。
+# 结果是 `review_service` 判定「不通过」必然 500、`ruff format --check` 早已失败
+# 等问题长期无人拦截（见 docs/fix_changelog.md 的 2026-09-17 复核整改）。
+on:
+  push:
+    branches: [main]
+    paths:
+      - "backend/**"
+      - ".github/workflows/backend-ci.yml"
+  pull_request:
+    paths:
+      - "backend/**"
+      - ".github/workflows/backend-ci.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Install dependencies
+        run: uv sync --extra dev
+
+      - name: Format check (ruff format)
+        run: uv run ruff format --check app scripts tests
+
+      - name: Lint (ruff check)
+        run: uv run ruff check app scripts tests
+
+      - name: Type check (mypy)
+        run: uv run mypy app
+
+      - name: Tests + coverage gate
+        run: uv run pytest -q --cov=app --cov-report=term-missing --cov-fail-under=75

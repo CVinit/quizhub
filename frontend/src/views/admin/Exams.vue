@@ -25,7 +25,8 @@
       </el-table-column>
       <el-table-column label="时段" min-width="240">
         <template #default="{ row }">
-          {{ row.start_at ? fmt(row.start_at) : '不限' }} ~ {{ row.end_at ? fmt(row.end_at) : '不限' }}
+          {{ row.start_at ? formatDateTime(row.start_at) : '不限' }} ~
+          {{ row.end_at ? formatDateTime(row.end_at) : '不限' }}
         </template>
       </el-table-column>
       <el-table-column prop="duration_min" label="限时" width="80" />
@@ -33,16 +34,21 @@
       <el-table-column label="题量" width="80">
         <template #default="{ row }">{{ row.total_questions }}</template>
       </el-table-column>
-      <el-table-column label="操作" width="380" fixed="right">
+      <el-table-column label="操作" width="460" fixed="right">
         <template #default="{ row }">
-          <el-button size="small" @click="onEdit(row)">编辑</el-button>
-          <el-button size="small" type="success" v-if="row.status === 'draft'" @click="onPublish(row)">发布</el-button>
+          <el-button size="small" @click="onEdit(row as ExamBrief)">编辑</el-button>
+          <el-button size="small" type="success" v-if="row.status === 'draft'" @click="onPublish(row as ExamBrief)"
+            >发布</el-button
+          >
           <el-button size="small" @click="$router.push(`/admin/exam-records?exam=${row.id}`)">成绩</el-button>
-          <el-button size="small" type="warning" @click="$router.push(`/admin/review?exam=${row.id}`)">复核</el-button>
+          <el-button size="small" type="warning" @click="$router.push('/admin/review')">复核</el-button>
+          <el-button size="small" type="success" @click="onPublishResults(row as ExamBrief)">公布成绩</el-button>
           <!-- 归档：对用户隐藏但保留成绩（已有作答记录的考试不能删，只能归档） -->
-          <el-button size="small" v-if="row.status === 'archived'" @click="onUnarchive(row)">取消归档</el-button>
-          <el-button size="small" v-else @click="onArchive(row)">归档</el-button>
-          <el-button size="small" type="danger" @click="onDelete(row)">删除</el-button>
+          <el-button size="small" v-if="row.status === 'archived'" @click="onUnarchive(row as ExamBrief)"
+            >取消归档</el-button
+          >
+          <el-button size="small" v-else @click="onArchive(row as ExamBrief)">归档</el-button>
+          <el-button size="small" type="danger" @click="onDelete(row as ExamBrief)">删除</el-button>
         </template>
       </el-table-column>
     </el-table>
@@ -50,14 +56,23 @@
     <!-- 手机端：考试卡片 -->
     <div class="mobile-card-list" v-loading="loading" v-if="isMobile && rows.length">
       <div class="mc" v-for="row in rows" :key="row.id">
-        <div class="mc-title">{{ row.name }} <el-tag :type="statusTag(row.status)" size="small">{{ statusLabel(row.status) }}</el-tag></div>
-        <div class="mc-row"><span class="mc-label">时段</span>{{ row.start_at ? fmt(row.start_at) : '不限' }} ~ {{ row.end_at ? fmt(row.end_at) : '不限' }}</div>
-        <div class="mc-row"><span class="mc-label">限时/及格</span>{{ row.duration_min }}分钟 · {{ row.pass_score }}分 · {{ row.total_questions }}题</div>
+        <div class="mc-title">
+          {{ row.name }} <el-tag :type="statusTag(row.status)" size="small">{{ statusLabel(row.status) }}</el-tag>
+        </div>
+        <div class="mc-row">
+          <span class="mc-label">时段</span>{{ row.start_at ? formatDateTime(row.start_at) : '不限' }} ~
+          {{ row.end_at ? formatDateTime(row.end_at) : '不限' }}
+        </div>
+        <div class="mc-row">
+          <span class="mc-label">限时/及格</span>{{ row.duration_min }}分钟 · {{ row.pass_score }}分 ·
+          {{ row.total_questions }}题
+        </div>
         <div class="mc-actions">
           <el-button size="small" @click="onEdit(row)">编辑</el-button>
           <el-button size="small" type="success" v-if="row.status === 'draft'" @click="onPublish(row)">发布</el-button>
           <el-button size="small" @click="$router.push(`/admin/exam-records?exam=${row.id}`)">成绩</el-button>
-          <el-button size="small" type="warning" @click="$router.push(`/admin/review?exam=${row.id}`)">复核</el-button>
+          <el-button size="small" type="warning" @click="$router.push('/admin/review')">复核</el-button>
+          <el-button size="small" type="success" @click="onPublishResults(row)">公布成绩</el-button>
           <el-button size="small" v-if="row.status === 'archived'" @click="onUnarchive(row)">取消归档</el-button>
           <el-button size="small" v-else @click="onArchive(row)">归档</el-button>
           <el-button size="small" type="danger" @click="onDelete(row)">删除</el-button>
@@ -83,12 +98,21 @@
         <template v-if="editing.source === 'rule'">
           <!-- 先定来源范围，再定题型配比：配比编辑器据此显示“每个题型可用多少题” -->
           <el-form-item label="来源题库">
-            <el-select v-model="editing.rules.bank_ids" multiple filterable clearable placeholder="留空则不限（全部题库）" style="width: 100%">
+            <el-select
+              v-model="editing.rules.bank_ids"
+              multiple
+              filterable
+              clearable
+              placeholder="留空则不限（全部题库）"
+              style="width: 100%"
+            >
               <el-option v-for="b in banks" :key="b.id" :label="bankLabel(b)" :value="b.id" />
             </el-select>
           </el-form-item>
           <el-form-item label="题型配比">
-            <TypeQuotaEditor v-model="editing.rules.type_quota" :sources="examQuotaSources" />
+            <!-- 后端单题型配额上限 1000。不传 max-questions 时组件按 100 钳制，
+                 打开已有大配额（如单选题 150）的编辑弹窗就会被静默改小并保存丢失。 -->
+            <TypeQuotaEditor v-model="editing.rules.type_quota" :sources="examQuotaSources" :max-questions="1000" />
           </el-form-item>
           <el-form-item label="出题顺序">
             <el-select v-model="editing.rules.order_mode" style="width: 100%">
@@ -100,19 +124,43 @@
           </el-form-item>
         </template>
         <el-form-item label="指派分组">
-          <el-tree ref="groupTreeRef" :key="`gt-${editing.id}`" :data="groupTree" node-key="id"
+          <el-tree
+            ref="groupTreeRef"
+            :key="`gt-${dlgSeq}`"
+            :data="groupTree"
+            node-key="id"
             :props="{ label: 'name', children: 'children' }"
-            show-checkbox :default-checked-keys="editing.group_ids || []" @check="onGroupCheck" />
+            show-checkbox
+            :default-checked-keys="editing.group_ids || []"
+            @check="onGroupCheck"
+          />
         </el-form-item>
         <el-form-item label="开放时段">
           <div class="time-range">
-            <el-date-picker v-model="editing.start_at" type="datetime" placeholder="开始时间（留空不限）" format="YYYY-MM-DD HH:mm" value-format="YYYY-MM-DDTHH:mm:ss" />
-            <el-date-picker v-model="editing.end_at" type="datetime" placeholder="结束时间（留空不限）" format="YYYY-MM-DD HH:mm" value-format="YYYY-MM-DDTHH:mm:ss" />
+            <el-date-picker
+              v-model="editing.start_at"
+              type="datetime"
+              placeholder="开始时间（留空不限）"
+              format="YYYY-MM-DD HH:mm"
+              value-format="YYYY-MM-DDTHH:mm:ss"
+            />
+            <el-date-picker
+              v-model="editing.end_at"
+              type="datetime"
+              placeholder="结束时间（留空不限）"
+              format="YYYY-MM-DD HH:mm"
+              value-format="YYYY-MM-DDTHH:mm:ss"
+            />
           </div>
         </el-form-item>
-        <el-form-item label="限时(分钟)"><el-input-number v-model="editing.duration_min" :min="1" :max="600" /></el-form-item>
+        <el-form-item label="限时(分钟)"
+          ><el-input-number v-model="editing.duration_min" :min="1" :max="600"
+        /></el-form-item>
         <el-form-item label="及格线"><el-input-number v-model="editing.pass_score" :min="0" :max="100" /></el-form-item>
-        <el-form-item label="最大尝试次数"><el-input-number v-model="editing.max_attempts" :min="0" :max="10" /> <span class="tip">0 = 不限</span></el-form-item>
+        <el-form-item label="最大尝试次数"
+          ><el-input-number v-model="editing.max_attempts" :min="0" :max="10" />
+          <span class="tip">0 = 不限</span></el-form-item
+        >
         <el-form-item label="含简答题">
           <el-switch v-model="editing.need_review" /> <span class="tip">含简答时成绩需复核后公布</span>
         </el-form-item>
@@ -133,37 +181,82 @@
 
 <script setup lang="ts">
 import { computed, nextTick, onMounted, reactive, ref } from 'vue'
-import { ElMessage, ElMessageBox } from 'element-plus'
-import { examApi } from '@/api/exam'
+import { ElMessage, type TreeInstance } from 'element-plus'
+import { examApi, type ExamBrief, type ExamTemplate, type ExamWritePayload, type PaperConfig } from '@/api/exam'
 import { groupApi, type GroupNode } from '@/api/group'
+import { errorDetailOf, httpStatusOf } from '@/api/http'
 import { questionApi, type QuestionBank } from '@/api/question'
 import { useResponsive } from '@/composables/useResponsive'
+import { confirmBox } from '@/utils/dialog'
+import { formatDateTime, bankLabel } from '@/utils/format'
 import { DEFAULT_ORDER_MODE, ORDER_MODES } from '@/constants/paper'
+import type { TagType } from '@/constants/ui'
 
 const { isMobile } = useResponsive()
 
 const loading = ref(false)
 const saving = ref(false)
-const rows = ref<any[]>([])
-const templates = ref<any[]>([])
+const rows = ref<ExamBrief[]>([])
+const templates = ref<ExamTemplate[]>([])
 const groupTree = ref<GroupNode[]>([])
 const banks = ref<QuestionBank[]>([])
 // '' = 全部状态（含已归档）；其余值下推后端 status 参数
 const statusFilter = ref<string>('')
-const groupTreeRef = ref()
+const groupTreeRef = ref<TreeInstance>()
 const dlg = ref(false)
-const editing = reactive<any>({
-  id: 0, name: '', source: 'rule', paper_template_id: null,
-  rules: { type_quota: {}, bank_ids: [], order_mode: DEFAULT_ORDER_MODE }, group_ids: [],
-  start_at: null, end_at: null, duration_min: 90, pass_score: 60, max_attempts: 0,
-  need_review: false, show_score_immediately: true, show_analysis: false,
+/** 弹窗序号：新建时 id 恒为 0，用它强制重建分组树，避免连续新建时上一次勾选残留。 */
+const dlgSeq = ref(0)
+
+/** 发布/编辑弹窗的表单模型（source 仅前端用：区分规则组卷与套用模板）。 */
+interface ExamEditForm {
+  id: number
+  name: string
+  source: 'rule' | 'template'
+  paper_template_id: number | null
+  rules: PaperConfig
+  group_ids: number[]
+  start_at: string | null
+  end_at: string | null
+  duration_min: number
+  pass_score: number
+  max_attempts: number
+  need_review: boolean
+  show_score_immediately: boolean
+  show_analysis: boolean
+}
+
+const emptyExamForm = (): ExamEditForm => ({
+  id: 0,
+  name: '',
+  source: 'rule',
+  paper_template_id: null,
+  rules: { type_quota: {}, bank_ids: [], order_mode: DEFAULT_ORDER_MODE },
+  group_ids: [],
+  start_at: null,
+  end_at: null,
+  duration_min: 90,
+  pass_score: 60,
+  max_attempts: 0,
+  need_review: false,
+  show_score_immediately: true,
+  show_analysis: false,
 })
 
-const statusLabel = (s: string) => ({ draft: '草稿', published: '已发布', ongoing: '进行中', ended: '已结束', reviewing: '复核中', archived: '已归档' }[s] || s)
-const statusTag = (s: string) => ({ draft: 'info', published: 'success', ongoing: 'success', ended: 'info', reviewing: 'warning', archived: 'danger' }[s] || 'info')
-const fmt = (iso: string) => { if (!iso) return ''; const d = new Date(iso); return Number.isNaN(d.getTime()) ? iso : d.toLocaleString('zh-CN', { hour12: false }) }
-const bankLabel = (b: QuestionBank) =>
-  typeof b.question_count === 'number' ? `${b.name}（${b.question_count} 题）` : b.name
+const editing = reactive<ExamEditForm>(emptyExamForm())
+
+const statusLabel = (s: string) =>
+  ({ draft: '草稿', published: '已发布', ongoing: '进行中', ended: '已结束', reviewing: '复核中', archived: '已归档' })[
+    s
+  ] || s
+const STATUS_TAGS: Record<string, TagType> = {
+  draft: 'info',
+  published: 'success',
+  ongoing: 'success',
+  ended: 'info',
+  reviewing: 'warning',
+  archived: 'danger',
+}
+const statusTag = (s: string): TagType => STATUS_TAGS[s] || 'info'
 
 // 题型配比的来源条件：题库 + 指派分组，供配比编辑器统计“各题型可用题量”
 const examQuotaSources = computed(() => ({
@@ -171,37 +264,55 @@ const examQuotaSources = computed(() => ({
   group_ids: editing.group_ids || [],
 }))
 
-const onGroupCheck = () => { editing.group_ids = groupTreeRef.value?.getCheckedKeys(false) || [] }
+const onGroupCheck = () => {
+  const keys = groupTreeRef.value?.getCheckedKeys(false) ?? []
+  editing.group_ids = keys.map((k) => Number(k)).filter((n) => Number.isInteger(n))
+}
 
-const load = async () => {
-  loading.value = true
+/** 加载列表用的静态选项（模板/分组树/题库）：只在挂载时拉一次，不随状态筛选变化。 */
+const loadLookups = async () => {
   try {
-    // 状态筛选下推到后端；题库下拉始终取全部（含仅考试使用的题库）
-    const [exs, tps, gt, bks] = await Promise.all([examApi.listExams(statusFilter.value || undefined), examApi.listTemplates(), groupApi.tree(), questionApi.listBanks()])
-    rows.value = exs
+    // 题库下拉始终取全部（含仅考试使用的题库）
+    const [tps, gt, bks] = await Promise.all([examApi.listTemplates(), groupApi.tree(), questionApi.listBanks()])
     templates.value = tps
     groupTree.value = gt
     banks.value = bks
+  } catch {
+    // 加载失败：http 拦截器已提示；保留当前选项，避免弹窗下拉为空
+  }
+}
+
+/** 列表加载序号：快速切换状态筛选时先发的慢响应可能后到并覆盖新结果。 */
+let loadSeq = 0
+
+const load = async () => {
+  const seq = ++loadSeq
+  loading.value = true
+  try {
+    // 状态筛选下推到后端
+    const data = await examApi.listExams(statusFilter.value || undefined)
+    if (seq !== loadSeq) return
+    rows.value = data
+  } catch {
+    // 加载失败：http 拦截器已提示；保留当前列表，避免把失败误显示为“暂无考试”
   } finally {
-    loading.value = false
+    if (seq === loadSeq) loading.value = false
   }
 }
 
 const openCreate = () => {
-  Object.assign(editing, {
-    id: 0, name: '', source: 'rule', paper_template_id: null,
-    rules: { type_quota: {}, bank_ids: [], order_mode: DEFAULT_ORDER_MODE }, group_ids: [],
-    start_at: null, end_at: null, duration_min: 90, pass_score: 60, max_attempts: 0,
-    need_review: false, show_score_immediately: true, show_analysis: false,
-  })
+  Object.assign(editing, emptyExamForm())
+  // 新建时 editing.id 恒为 0，连续两次新建不会让 el-tree 重挂载，
+  // 上一次勾选的分组会残留显示。用弹窗序号强制重建。
+  dlgSeq.value += 1
   dlg.value = true
 }
 
-const onEdit = (row: any) => {
+const onEdit = (row: ExamBrief) => {
   // 管理端列表已返回 rules/bank_ids/group_ids 等配置（见后端 _exam_admin_brief）。
   // 深拷贝避免直接改动列表数据；逐项兜底以兼容早期未返回这些字段的响应。
   const src = row.rules && typeof row.rules === 'object' ? row.rules : {}
-  const r = JSON.parse(JSON.stringify(src))
+  const r = JSON.parse(JSON.stringify(src)) as PaperConfig
   if (!r.type_quota || typeof r.type_quota !== 'object') r.type_quota = {}
   if (!Array.isArray(r.bank_ids)) r.bank_ids = []
   // 历史考试未存 order_mode，回填默认值避免选择框空白
@@ -221,16 +332,21 @@ const onEdit = (row: any) => {
     need_review: !!row.need_review,
     show_score_immediately: row.show_score_immediately ?? true,
     show_analysis: !!row.show_analysis,
-  })
+  } satisfies Partial<ExamEditForm>)
+  dlgSeq.value += 1
+  dlg.value = true
   // 分组树需在弹窗渲染后回填勾选状态
   nextTick(() => groupTreeRef.value?.setCheckedKeys(editing.group_ids, false))
-  dlg.value = true
 }
 
 const save = async () => {
-  if (!editing.name) { ElMessage.warning('请填写考试名称'); return }
+  if (!editing.name) {
+    ElMessage.warning('请填写考试名称')
+    return
+  }
   if (editing.source === 'template' && !editing.paper_template_id) {
-    ElMessage.warning('请选择试卷模板'); return
+    ElMessage.warning('请选择试卷模板')
+    return
   }
   saving.value = true
   try {
@@ -238,7 +354,7 @@ const save = async () => {
     // 只在创建时携带；否则触发 422 校验错误。
     // 同时 duration_min/pass_score/max_attempts 为 NOT NULL 列，后端拒绝显式 null，
     // 这里用 ?? 兜底为默认值，避免把 null 发出去。
-    const payload: any = {
+    const buildPayload = (confirmReset: boolean): ExamWritePayload => ({
       name: editing.name,
       rules: editing.source === 'rule' ? editing.rules : {},
       paper_template_id: editing.source === 'template' ? editing.paper_template_id : null,
@@ -251,28 +367,54 @@ const save = async () => {
       need_review: !!editing.need_review,
       show_score_immediately: !!editing.show_score_immediately,
       show_analysis: !!editing.show_analysis,
+      ...(confirmReset ? { confirm_reset: true } : {}),
+    })
+
+    const submit = async (confirmReset: boolean) => {
+      const payload = buildPayload(confirmReset)
+      if (editing.id) {
+        await examApi.updateExam(editing.id, payload)
+        ElMessage.success('已保存')
+      } else {
+        await examApi.createExam({ ...payload, type: 'formal' })
+        ElMessage.success('已创建，可发布')
+      }
     }
-    if (editing.id) {
-      await examApi.updateExam(editing.id, payload)
-      ElMessage.success('已保存')
-    } else {
-      await examApi.createExam({ ...payload, type: 'formal' })
-      ElMessage.success('已创建，可发布')
+
+    try {
+      await submit(false)
+    } catch (err) {
+      // 改动了组卷来源且该考试已有作答：后端要求显式确认后才作废旧作答并重新固化。
+      // 这是破坏性操作，必须让管理员看到影响面再决定（而不是静默清空或静默失效）。
+      const detail = errorDetailOf(err) as { code?: string; msg?: string } | undefined
+      if (httpStatusOf(err) !== 409 || detail?.code !== 'exam_reset_required') {
+        // 其它失败：http 拦截器已提示，直接结束本次保存（不再向上抛，避免未处理的 rejection）
+        return
+      }
+      const confirmed = await confirmBox(
+        `${detail.msg ?? ''}确认后将删除这些作答与成绩，并按新配置重新组卷。`,
+        '需要作废已有作答',
+        { confirmButtonText: '作废并保存', cancelButtonText: '取消' },
+      )
+      if (!confirmed) return // 用户取消：保留编辑弹窗与已填内容，不产生任何改动
+      await submit(true)
     }
     dlg.value = false
     await load()
+  } catch {
+    // http 拦截器已提示；保留弹窗与已填内容，允许修正后重试
   } finally {
     saving.value = false
   }
 }
 
-const onDelete = async (row: any) => {
-  await ElMessageBox.confirm(
-    `确认删除考试「${row.name}」？删除后不可恢复。` +
-      `若该考试已有作答记录将无法删除，请改用「归档」。`,
+const onDelete = async (row: ExamBrief) => {
+  const ok = await confirmBox(
+    `确认删除考试「${row.name}」？删除后不可恢复。` + `若该考试已有作答记录将无法删除，请改用「归档」。`,
     '删除考试',
-    { type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消' },
+    { confirmButtonText: '删除', cancelButtonText: '取消' },
   )
+  if (!ok) return
   try {
     await examApi.deleteExam(row.id)
     ElMessage.success('已删除')
@@ -283,45 +425,105 @@ const onDelete = async (row: any) => {
 }
 
 // 归档：对用户隐藏（不再出现在可用列表），但保留考试定义与成绩记录
-const onArchive = async (row: any) => {
-  await ElMessageBox.confirm(
-    `确认归档考试「${row.name}」？归档后用户不再看到该考试，已有成绩仍可查询。`,
-    '归档考试',
-    { type: 'warning', confirmButtonText: '归档', cancelButtonText: '取消' },
+const onArchive = async (row: ExamBrief) => {
+  const ok = await confirmBox(`确认归档考试「${row.name}」？归档后用户不再看到该考试，已有成绩仍可查询。`, '归档考试', {
+    confirmButtonText: '归档',
+    cancelButtonText: '取消',
+  })
+  if (!ok) return
+  try {
+    await examApi.archiveExam(row.id)
+    ElMessage.success('已归档，用户不再可见')
+    await load()
+  } catch {
+    // http 拦截器已提示
+  }
+}
+
+const onUnarchive = async (row: ExamBrief) => {
+  const ok = await confirmBox(`确认取消归档考试「${row.name}」？取消后该考试将重新对指派分组可见。`, '取消归档', {
+    confirmButtonText: '取消归档',
+    cancelButtonText: '关闭',
+  })
+  if (!ok) return
+  try {
+    await examApi.unarchiveExam(row.id)
+    ElMessage.success('已取消归档')
+    await load()
+  } catch {
+    // http 拦截器已提示
+  }
+}
+
+/**
+ * 公布成绩。
+ *
+ * 含简答的考试（复核后）与关闭即时出分的考试，成绩必须先由管理员显式公布，
+ * 否则考生端永远显示「待复核」。此前前端只把「复核」按钮链到复核页，
+ * publish-results 接口从未被调用，成绩无从发布。
+ */
+const onPublishResults = async (row: ExamBrief) => {
+  const ok = await confirmBox(
+    `确认公布「${row.name}」的成绩？公布后考生可见本人得分与是否通过。`,
+    '公布成绩',
+    { confirmButtonText: '公布', cancelButtonText: '取消', type: 'warning' },
   )
-  await examApi.archiveExam(row.id)
-  ElMessage.success('已归档，用户不再可见')
-  await load()
+  if (!ok) return
+  try {
+    await examApi.publishResults(row.id)
+    ElMessage.success('已公布')
+  } catch {
+    // http 拦截器已提示（如仍有未复核的简答）
+  }
 }
 
-const onUnarchive = async (row: any) => {
-  await ElMessageBox.confirm(
-    `确认取消归档考试「${row.name}」？取消后该考试将重新对指派分组可见。`,
-    '取消归档',
-    { type: 'warning', confirmButtonText: '取消归档', cancelButtonText: '关闭' },
-  )
-  await examApi.unarchiveExam(row.id)
-  ElMessage.success('已取消归档')
-  await load()
+const onPublish = async (row: ExamBrief) => {
+  const ok = await confirmBox(`确认发布考试「${row.name}」？发布后对指派分组可见。`, '发布考试')
+  if (!ok) return
+  try {
+    await examApi.publishExam(row.id)
+    ElMessage.success('已发布')
+    await load()
+  } catch {
+    // http 拦截器已提示
+  }
 }
 
-const onPublish = async (row: any) => {
-  await ElMessageBox.confirm(`确认发布考试「${row.name}」？发布后对指派分组可见。`, '发布考试', { type: 'warning' })
-  await examApi.publishExam(row.id)
-  ElMessage.success('已发布')
-  await load()
-}
-
-onMounted(load)
+onMounted(() => {
+  loadLookups()
+  load()
+})
 </script>
 
 <style scoped>
-.toolbar { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; }
-.title { font-size: 18px; font-weight: 600; }
-.tip { color: #909399; font-size: 12px; margin-left: 8px; }
-.time-range { display: flex; gap: 4%; width: 100%; }
-.time-range .el-date-editor { flex: 1; min-width: 0; }
+.toolbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 16px;
+}
+.title {
+  font-size: 18px;
+  font-weight: 600;
+}
+.tip {
+  color: var(--el-text-color-secondary);
+  font-size: 12px;
+  margin-left: 8px;
+}
+.time-range {
+  display: flex;
+  gap: 4%;
+  width: 100%;
+}
+.time-range .el-date-editor {
+  flex: 1;
+  min-width: 0;
+}
 @media (max-width: 767px) {
-  .time-range { flex-direction: column; gap: 8px; }
+  .time-range {
+    flex-direction: column;
+    gap: 8px;
+  }
 }
 </style>

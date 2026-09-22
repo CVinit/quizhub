@@ -48,6 +48,38 @@ def test_parse_single_choice_row():
     assert row.valid is True
 
 
+def test_parse_single_choice_rejects_multi_letter_answer():
+    """单选题答案必须是单个字母（与手动创建路径同口径），否则会存下永远判错的题。"""
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "单选题"
+    ws.append(["题干", "选项", "答案", "解析", "难度", "知识点标签", "分值", "所属分组ID"])
+    ws.append(["HTTP 默认端口？", "21\n80\n443\n8080", "AB", "", 2, "网络", 2, ""])
+    buf = BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    result = parse_workbook(buf)
+    assert result.total == 1
+    assert result.rows[0].valid is False
+    assert "单选题答案必须是一个选项字母" in result.rows[0].error
+
+
+def test_parse_multi_choice_accepts_multi_letter_answer():
+    """多选题仍应接受多字母答案（且排序归一）。"""
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "多选题"
+    ws.append(["题干", "选项", "答案", "解析", "难度", "知识点标签", "分值", "所属分组ID"])
+    ws.append(["哪些是传输层协议？", "TCP\nUDP\nIP\nHTTP", "BA", "", 2, "网络", 2, ""])
+    buf = BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    result = parse_workbook(buf)
+    row = result.rows[0]
+    assert row.valid is True
+    assert row.answer == "AB"
+
+
 def test_parse_judgement_row():
     wb = Workbook()
     ws = wb.active

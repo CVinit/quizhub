@@ -244,3 +244,384 @@
 - 新增 `tests/test_review_remediation.py`（18 项）：邮箱大小写登录、重复账号拦截、关闭题库统计拒绝、mock 按用户隔离、复核封顶与 objective_score 同步、四类外键级联与 SET NULL、时间戳多格式归属、时区换算、`_recover_stuck_scoring` 的作用域/脏数据/合法待复核三种保护。
 - 更新 `tests/test_authz.py` 两处断言：原断言依赖 `reset_password` 回传明文，改为校验落库哈希与 `token_version`。
 - 全量 **154 测试通过**；`ruff check` / `ruff format --check` / `mypy` 全部通过。
+
+### 2026-09-17 线上问题修复：SMTP 邮件收不到 + 注册无法选分组
+
+#### 问题 1：填入 SMTP 配置后，测试邮件与注册邮件都收不到
+
+**根因（已复现）**：`smtp_password` 行存的是 `enc:` 密文，但 `encrypted` 标记位是 `0`。
+`get_settings` 旧实现只信标记位，直接把**密文本身**当明文密码交给 `mail_service`，
+SMTP 认证必然失败；而 `/system/smtp/test` 又把发送放进 `BackgroundTasks` 并立即返回
+"已加入发送队列"，后台异常被吞掉，管理员看到成功提示却收不到邮件。
+
+脏数据来源：`migrate_2026_08_28` 清理遗留 `plain:` 行时把敏感项置为 `encrypted=0`，
+而旧版 `update_settings` 更新已有行时只写 `value`、不回写 `encrypted`，
+管理员随后在设置页重填密码，就留下"密文 + 标记 0"的行。
+
+| 编号 | 位置 | 修复 |
+| --- | --- | --- |
+| MAIL-1 | `services/system_service.update_settings` | 更新已有行时同步回写 `encrypted`（与 `category`）标记，从根上杜绝标记漂移 |
+| MAIL-2 | `services/system_service.get_settings` | 新增 `_decrypt_row_value`：标记为加密**或**值以 `enc:` 开头都解密，兼容历史脏数据 |
+| MAIL-3 | `scripts/migrate_2026_09_17.py`（新增） | 一次性修复：`enc:` 行置 `encrypted=1`、非密文的加密行置 0、遗留 `plain:` 行清空；自动备份、幂等 |
+| MAIL-4 | `api/system.py` `/system/smtp/test` | 改为**同步发送**：只有真正投递成功才返回成功，失败返回 400 + SMTP 原始错误（认证失败/连接失败/发件人被拒） |
+| MAIL-5 | `services/mail_service.py` | 新增 `MailError`；发送失败统一抛错；新增 `send_safely` 后台包装，注册验证码发送失败会写入日志而非静默消失 |
+| MAIL-6 | `services/auth_service.py` | 验证码/重发邮件的后台任务改用 `send_safely`，SMTP 配置错误可被管理员从日志发现 |
+
+运维提示：既有库启动时会被 `migrate_2026_09_17.py` 自动修复；若 `TRAINING_ENC_KEY`
+与写入密码时不一致（例如容器重建后换了密钥），需在设置页重新保存 SMTP 密码。
+
+部署脚本：`start.sh` / `start.ps1` 此前**不加载** `backend/data/.dev-secrets.env`
+（只有 `start-embed.ps1` 加载），重启后 `TRAINING_ENC_KEY` 丢失会让已保存的 SMTP 密码
+再次解密失败、`TRAINING_SECRET_KEY` 变化导致登录态全部失效。现改为首次运行自动生成
+密钥文件、每次启动注入进程环境，与内嵌版脚本行为一致。
+
+#### 管理后台菜单与测试数据清理（2026-09-17 后续）
+
+- **遗留菜单项**：管理后台侧栏的「模拟考试设置」`MockConfig.vue` 与路由早已删除，但
+  `AdminLayout.vue` 的桌面侧栏与手机端抽屉两处菜单未同步清理，点击会落到 404。
+  已移除两处菜单项，并修正 `exam_service.py` 顶部过时的 "mock-config" 描述。
+- **测试数据清理**（开发库，清理前已 `.backup` 备份）：
+  删除 6 个测试用户、研发部分组、6 个测试题库及其题目、全部模拟考试定义与名为
+  t/网络安全期末考/…-测试 的正式考试，以及会话/成绩/练习记录/每日统计/题目状态/
+  简答复核/标签/验证码/草稿，并清掉已失效的 `settings.mock_config` 死配置；
+  保留超管 `admin@example.com`、分组「省集约化平台维护网格/资源池/核心网/业务平台」、
+  题库与已发布正式考试「202609 IPTV技能提升培训考试」。清理后 `PRAGMA foreign_key_check` 无异常。
+
+#### 问题 2：分组已创建，但注册页无法选择
+
+**根因**：注册分组是 fail-closed 白名单（`register_allowed_group_ids`，空表示不允许自选），
+但管理端只能手填分组 ID，分组管理页也不显示 ID，管理员实际无法配置。
+
+| 编号 | 位置 | 修复 |
+| --- | --- | --- |
+| REG-1 | `views/admin/Settings.vue` | 「允许公开注册加入的分组」改为**分组树下拉多选**（多选 + 父子独立勾选），保存为逗号分隔 ID，不再手填 |
+| REG-2 | `views/admin/Groups.vue` | 表格与移动端卡片补充分组 **ID** 列，便于人工核对 |
+| REG-3 | `views/auth/Register.vue` | 无可选分组时下拉禁用并提示"由管理员后续分配"，不再显示一个无解释的空选择框 |
+| REG-4 | `api/auth.py` `/auth/register-groups` | 无任何可选分组时 `required` 恒为 `false`，避免"必选却无选项"的死表单；语义仍为 fail-closed |
+
+#### 测试
+
+- 新增 `tests/test_smtp_and_register_groups.py`（12 项）：标记不一致时仍能解密、重写敏感值回写标记、
+  SMTP 测试回显真实失败/成功前确实发送、无发件人报错、后台发送包装落日志、
+  注册分组白名单过滤、空白名单 fail-closed 且不产生必选死表单、迁移修复与幂等。
+- 全量 **196 测试通过**；`ruff check` / `mypy` 通过；前端 `vue-tsc` + `vite build` 通过。
+
+---
+
+### 全量后端复审整改（2026-09-16）：Critical 修复 + CI 质量门禁 + 覆盖率
+
+本轮对 `backend/` 做全量复审（静态逐文件阅读 + **可执行复现验证**）。3 个 Critical
+均先在真实执行下复现、再修复，并补齐回归测试；同时把质量门禁接进 CI。
+
+#### 一、Critical（阻断级）
+
+| 编号 | 位置 | 问题与修复 |
+| --- | --- | --- |
+| E1 | `services/review_service.py` | **简答判「不通过」必然 500**：`delta = eqs if verdict == "pass" else partial_score` 在 `fail` 时 `delta=None`，SQL 中 `min(total_score, score + NULL)` 得 NULL，写入 NOT NULL 的 `exam_results.score` 抛 IntegrityError。修复：pass/partial/fail 三分支显式取增量（fail=0.0）。<br>**复现证据**：修复前 `NOT NULL constraint failed: exam_results.score`；修复后 fail 复核 200 且分数不变 |
+| E2 | `services/question_service.py` | **删除题目会静默破坏已固化考试**：`exam_questions.question_id` 是 `ON DELETE CASCADE`，`delete_bank` 有 409 拦截而 `delete_question` 没有。修复：与 `delete_bank` 同口径——被考试引用则 409，并清理该题的练习记录/题目状态。<br>**复现证据**：修复前固化行随题目一并消失（`[1] → []`） |
+| E3 | `api/system.py` + `main.py` | **Logo 存储型 XSS + 内存放大**：允许上传 `.svg`，而 `/files` 是同源公开静态读取且全站无安全响应头，浏览器直接导航该 URL 即执行内嵌脚本；上传侧先 `await file.read()` 再校验大小。修复：不再接受 `.svg`；先看声明大小再分块累计；回源显式声明媒体类型 + `nosniff`；新增全局安全响应头中间件并拦截 `/files/**/*.svg` 历史遗留文件 |
+
+#### 二、建议项（本轮一并修复）
+
+| 编号 | 位置 | 修复 |
+| --- | --- | --- |
+| S1 | `services/auth_service.py` + `api/auth.py` | `send_code` 对已注册邮箱 400、未注册 200，状态码即注册邮箱枚举 oracle（与"统一提示"注释意图相悖）。改为已注册时静默成功（不发信）；`.lower()` 统一换成 `normalize_email()` |
+| S2 | `main.py` | 未匹配的 `/api/*` 返回 200 + `{"detail":"Not Found"}` → 改 404，并按路径段匹配 `api/` 前缀 |
+| S3 | `core/like.py`（新增）+ `audit_service` + `question_service` | 题目搜索的 LIKE 通配符未转义（搜 `_`/`%` 可匹配全表）。抽出公共 `like_pattern()` 与审计搜索统一口径 |
+| S4 | `models/exam.py` + `question_service` + `group_service` | `EXAM_STATUS` 遗漏实际写入的 `"archived"`；`QUESTION_TYPE`/`GROUP_TYPE` 在模型与服务两处重复。收敛为单一来源 |
+| S5 | `api/audit.py` | 草稿 `payload`/`form_key` 无任何上限。加 64KB / 64 字符限制（413 / 422） |
+| S6 | `utils/user_excel.py` | 角色/状态校验形同虚设：`_norm_role` 对未知值已兜底为 `user`，使 `role not in ROLES` 恒假，未知角色被静默降级。改为用原始值查映射表，非法值报错 |
+| S7 | `services/exam_service.py` | `/mock/preview` 未传 `size` 直接 400，而 `/mock/start` 默认 30，两侧口径不一致。默认值收敛到 `build_mock_spec` |
+| S8 | `core/security.py` | `ACCESS_TOKEN_EXPIRE_MINUTES` 定义后从未使用（硬编码 7 天）。改为引用配置 |
+
+#### 三、质量门禁与测试
+
+- 新增 `.github/workflows/backend-ci.yml`：`ruff format --check` → `ruff check` → `mypy` → `pytest --cov-fail-under=75`。
+  此前 CI 只构建镜像，测试/静态检查全靠人工，E1/E2 与格式问题因此长期无人拦截。
+- `pyproject.toml` dev extras 增加 `pytest-cov`，并更新 `uv.lock`。
+- 修复 HEAD 上 `ruff format --check` 失败的 2 个文件（`scripts/migrate_2026_08_28.py`、`tests/test_migration_robustness.py`）。
+- 新增 9 个测试文件、120 个用例：
+
+| 测试文件 | 覆盖重点 |
+| --- | --- |
+| `test_review_verdicts.py` | E1 回归：pass/partial/fail 分数、满分封顶、`objective_score` 同步、重复复核、范围、公布流程 |
+| `test_question_service_crud.py` | 题库/题目 CRUD、答案形状校验、白名单写入、E2 回归、LIKE 转义、数据范围 |
+| `test_logo_security.py` | E3 回归：svg 拒绝与拦截、nosniff、超大上传、安全响应头、未知 api 404 |
+| `test_api_admin_routes.py` | 管理端 users/questions/groups/system 的 HTTP 契约与权限守卫 |
+| `test_api_user_routes.py` | 练习/草稿/榜单 + 模拟考试与正式考试（含简答 fail 复核）端到端 |
+| `test_auth_service_flows.py` | 注册闭环、验证码防枚举回归、登录/改密各失败分支 |
+| `test_import_and_user_excel.py` | 题库/学生导入的预览→确认、confirm_token IDOR、逐行校验 |
+| `test_stats_rank.py` | 排行四维度 × 两 scope、连续天数边界、预聚合幂等、面板口径 |
+| `test_group_and_practice.py` | 分组成环与删除守卫、练习判分/自评/标记/进度 |
+| `test_preview_cache_and_mail.py` | 缓存容量/TTL/单次消费、SMTP SSL/STARTTLS/匿名中继/错误包装 |
+
+- 覆盖率 **65% → 88%**（≥ 75% 门禁）；测试数 **196 → 316**。
+- 主要模块覆盖率变化：`import_service` 20%→87%、`user_excel` 21%→93%、
+  `question_service` 41%→92%、`group_service` 38%→99%、`preview_cache` 36%→100%、
+  `mail_service` 44%→100%、`auth_service` 47%→92%、`stats_service` 58%→97%、
+  `review_service` 81%→97%、`api/exams` 57%→92%。
+- 全量校验：`ruff format --check` / `ruff check` / `mypy` 全清；`pytest` 316 通过。
+
+#### 四、已知待办（复审已确认，本轮未处理）
+
+- `services/exam_service.py` 1360 行超长文件，建议按职责拆分（session / mock / admin / result）。
+- `stats_service.rank` 仍有 N+1 与全表载入（已补测试，尚未重构）。
+- 考试指派给父部门不会覆盖其子分组成员（子树语义与部门管理范围不一致，需产品确认）。
+- `update_exam` 在题目已固化后仍可改组卷配置（改动静默失效）；`pass_score` 可在成绩公布后被修改。
+- dept_admin 可禁用/重置其子树内同级管理员的密码（含自身），需确认是否有意为之。
+
+---
+
+### 语义类问题落地（2026-09-16）：考试指派子树 / 已固化考试改卷 / 管理员层级
+
+上一节列出的三项「需产品确认」语义问题已确认口径并实施。
+
+| 编号 | 位置 | 口径与实现 |
+| --- | --- | --- |
+| SEM-1 | `core/deps.subtree_map`（新增）+ `exam_service` | **考试指派到父分组须覆盖子分组成员**。原实现只与用户直属分组求交集，把考试指派给「研发部」对挂在「研发部/一班」的人不生效。新增一次性构建的 `subtree_map(db)`（单条查询、迭代展开、成环安全），`_user_can_access_exam` 改为按展开后的指派集合判定，`publish_exam` 的通知收件人同一口径。只向下展开，不向上（指派给子分组不会让父分组成员可见）；空指派仍对全员开放 |
+| SEM-2 | `schemas/exam.py` + `exam_service.update_exam` + `frontend/src/views/admin/Exams.vue` | **已固化考试的组卷来源变更：重新固化并作废已有作答**。服务端按值比较 `rules`/`manual_questions`/`paper_template_id` 是否真的变化；若该考试已有固化题目或作答，未带 `confirm_reset` 时返回 409（`detail.code = "exam_reset_required"` + 影响面计数），确认后按外键顺序清理简答复核 → 成绩 → 会话 → 固化题目，下次开考自动按新配置重新固化。前端捕获该 409 后弹出「作废并保存」二次确认再重试；取消则保留编辑内容。此外 `pass_score` 变更会重算已公布成绩的 `passed`（保持超时即不及格语义），且不构成来源变更、不作废作答 |
+| SEM-3 | `services/user_service.py` | **仅超级管理员可操作管理员账号**。新增 `_check_manage_permission`：非超级管理员对 `dept_admin`/`super_admin` 目标执行 approve / disable / enable / reset-password / update / assign-groups 一律 403。此前同级 dept_admin（同子树内）可互相禁用、重置密码，也可把自己锁死 |
+
+**统计一致性**：作废成绩后调用新增的 `stats_service.refresh_for_timestamps`，按被删成绩的业务日期重算
+`stats_user_daily`，避免排行榜/概览在下次刷新前继续展示已作废的分数。
+
+**测试**（新增 3 个文件、17 项）：
+- `tests/test_exam_assignment_subtree.py`：父/祖父分组指派覆盖子分组（`user_groups` 与 `dept_group_id` 两条路径）、
+  只向下不向上、无关分组仍 403、发布通知收件人口径、空指派全员可见。
+- `tests/test_exam_frozen_reset.py`：非来源变更不重置、未确认 409 且零破坏、确认后计数与重新固化、
+  简答复核一并清理、作废后当日统计重算、及格线重算但不作废作答、HTTP 层确认与审计留痕。
+- `tests/test_admin_role_hierarchy.py`：同级管理员四种操作 403、自我禁用/审批管理员 403、
+  仍可管理普通用户、超管可管理 dept_admin、HTTP 层守卫。
+
+**验证**：全量 **333 测试通过**，覆盖率 **88.59%**；`ruff format --check` / `ruff check` / `mypy` 全清；
+前端 `vue-tsc` 通过。
+
+---
+
+### 内部重构（2026-09-16）：超长服务拆分 + 排行榜 N+1 消除
+
+纯内部重构，不改动任何对外行为与接口；以 338 项回归测试作为行为不变的保证。
+
+| 编号 | 范围 | 重构内容 |
+| --- | --- | --- |
+| REF-1 | `services/exam_service.py`（1510 行 → 门面 138 行） | 按职责拆分为 `app/services/exam/` 包：`common`（时间窗/超时/可见性/摘要）、`sessions`（可用列表、开考、卷面固化、断点续答）、`scoring`（逐题乐观锁、交卷判分、成绩读取、卡死回收）、`mock`（模拟考试自助组卷）、`templates`（试卷模板）、`admin`（管理端 CRUD/范围校验/归档发布/作废重固化）。`exam_service` 保留为门面模块，显式重导出全部符号（含 `_count_attempts`、`_recover_stuck_scoring`、`MOCK_MAX_QUESTIONS` 等被 api/测试引用的私有名与常量），**调用方零改动** |
+| REF-2 | `services/stats_service.py`（567 行 → 门面 58 行） | 同上拆分为 `app/services/stats/` 包：`common`（业务时区/日期换算）、`aggregate`（每日预聚合与按时间戳重算）、`panel`（用户面板/管理端概览）、`rank`（排行榜） |
+| REF-3 | `stats_service.rank` | **消除 N+1 与全表载入**：原实现对每个上榜用户各做一次 `db.get(User)`、streak 维度每人再查一次、分组维度每人再查 `user_groups` 与 `groups`，即 O(用户数) 次 round-trip。改为批量 `_user_labels` / `_streaks` / `_rank_by_group`，查询数固定为 3~4 条；并加 `order_by(user_id)` 让并列名次确定（原来依赖未定义的 `group_by` 顺序）。名称/未分组/连续天数语义与原实现逐条对齐（含空名回退 email、删除分组显示「未分组」） |
+
+拆分依据是"同一变更原因放一起"：考试域按「用户侧会话 / 判分结算 / 模拟考 / 模板 / 管理端」切分，
+统计域按「换算 / 聚合 / 面板 / 排行」切分。跨模块依赖为单向 DAG
+（`common ← scoring ← sessions ← mock`），无循环导入。
+
+**测试**：
+- 新增 `tests/test_exam_templates.py`（4 项）补齐拆分后最薄弱的模板模块：预览不落库、范围过滤、
+  CRUD、被考试引用时 409 删除保护。
+- 新增 `tests/test_stats_rank.py::test_rank_query_count_does_not_grow_with_users`：
+  用 `before_cursor_execute` 事件统计 SQL 条数，12 个用户下两次 `rank` 合计 ≤ 8 条，
+  作为 N+1 回退的硬性守卫。
+- 全量 **338 测试通过**（重构前后断言完全未改），覆盖率 **88.59% → 89.14%**；
+  `ruff format --check` / `ruff check` / `mypy` 全清。
+- 所有生产文件均已 ≤ 500 行（最大 `services/exam/admin.py` 479 行，原单体 1510 行）。
+
+---
+
+## 前端代码审核与整改（2026-09-17）
+
+> 范围：`frontend/src/**`（54 个 `.vue`/`.ts`，约 5.1k 行）
+> 依据：frontend-code-review 检查表（代码质量 / 性能 / 业务逻辑 / 安全 / 可访问性）
+> 验证方式：`npm run format:check` + `npm run lint` + `npm run typecheck` + `npm run build`
+> ＋ Playwright 运行时冒烟 17 项（布局/菜单/守卫/答题页/考试中心，`/api` 打桩）
+
+### P0（阻断级）
+
+| 编号 | 问题 | 修复 | 验证 |
+| --- | --- | --- | --- |
+| FE-P0-1 | `npm run lint` 必然失败：扁平配置下仍传 `--ext`，脚本 exit 2 | `package.json` 改为 `eslint src`，并补 `format` / `format:check` / `typecheck`；`@eslint/js`、`vue-eslint-parser` 由隐式传递依赖改为显式 devDependencies；新增 `.github/workflows/frontend-ci.yml` 门禁 | `npm run lint` exit 0（0 error / 0 warning） |
+| FE-P0-2 | 6 个 ESLint error；`Answer.vue` 仍用有偏洗牌 `sort(() => Math.random()-0.5)`，而 `utils/array.ts#shuffle` 0 调用 | 补齐未用变量/导入；改用 `shuffle()`；删除死代码 `useDraft.ts` / `Placeholder.vue` / `examApi.result` / `practiceApi.progress` / `QuestionType` | eslint 0 问题 |
+| FE-P0-3 | `auth` store 中 `JSON.parse(localStorage)` 遇脏数据抛异常 → 整站白屏 | 抽出 `readStoredUser()`：try/catch + 清缓存回退未登录 | 手工注入非法 JSON 后可正常进入登录页 |
+| FE-P0-4 | 15 处 `ElMessageBox.confirm/prompt` 未 catch，用户“取消”被记为事件处理器异常；`validate()` 未 catch 同理 | 新增 `utils/dialog.ts`（`confirmBox`/`promptBox`/`alertBox`）与 `utils/form.ts`（`validateForm`），全部调用点改造 | eslint/tsc 通过；冒烟无 console error |
+| FE-P0-5 | `onMounted(load)` / 提交接口失败产生未处理 Promise 拒绝，失败被误显示为“暂无数据” | 13 处 `load()` 补 catch 并保留原列表；`Panel` 改 `Promise.allSettled` + 显式错误提示；`Answer.submit/submitDrag` 加 try/catch 与 `submitting` 防重复提交 | 冒烟页面均正常渲染 |
+| FE-P0-6 | `ExamRecords` 从 `?exam=ID` 进入后筛选无法清空（query 在 `load()` 内回填） | query 仅在 `onMounted` 读取一次 | 代码路径确认 |
+| FE-P0-7 | `ExamTaking` 交卷确认的“已作答 N 题”把 `null`/`''` 记为已答，与答题卡口径不一致 | 抽出 `hasAnswer()`，答题卡着色与交卷确认共用 | 代码路径确认 |
+| FE-P0-8 | 超时自动交卷失败后重启计时器（`remaining` 已为 0），会变成每秒重试一次交卷 | `doSubmit` 失败时仅在 `remaining > 0` 时恢复倒计时 | 代码路径确认 |
+
+### P1（功能与一致性）
+
+| 编号 | 问题 | 修复 |
+| --- | --- | --- |
+| FE-P1-1 | 新增的 `AdminMenu.vue` / `UserMenu.vue` 从未被引用，两个布局仍各抄一份菜单 | 布局改用公共组件（水平/抽屉共用，`mode`/`rankVisible` 等以 props 开关）；退出登录移出 `el-menu`（`router` 模式会把 index 当路由） |
+| FE-P1-2 | `QUESTION_TYPES` 在 6 处硬编码 | 统一 `@/constants/question` |
+| FE-P1-3 | 筛选后未回到第 1 页（Users/Audit），出现“筛选无效”空列表 | 新增 `onFilterChange()`（`page=1` + 查询），筛选控件改指向它 |
+| FE-P1-4 | `useTheme` 与 `site` store 各自解析 `/system/site`，首屏重复请求 | 数据加载统一走 store（`inflight` 去重），`useTheme` 只做 store → DOM/标题 同步 |
+
+### P2（类型、可访问性、工程化）
+
+| 编号 | 问题 | 修复 |
+| --- | --- | --- |
+| FE-P2-1 | 82 处 `no-explicit-any`；`api.get/post/...` 默认 `any`，类型在 API 边界失效 | `api` 泛型默认改 `unknown`；补齐 `ExamBrief/ExamTemplate/ExamResultRow/ReviewItem/QuestionItem/UploadPreview/RankRow/AuditLogRow/OverviewData` 等领域类型；新增 `httpStatusOf`/`errorDetailOf` 取代 `catch (err: any)` → **0 处 any** |
+| FE-P2-2 | 可点击 `<div>`（选项/答题卡/拖拽项/快捷入口/模式卡/更多）无法键盘操作，全项目 0 个 `role`/`aria-label` | 改为 `<button type="button">` 或补 `role`/`tabindex`/`aria-*` 与 Enter/Space 处理；`Answer` 全局快捷键忽略按钮焦点，避免 Enter 先提交旧答案；拖拽列表 `:key` 加索引防重复项错乱 |
+| FE-P2-3 | 37 个文件不符合 Prettier；空 `@media` 块；生成声明 `auto-imports.d.ts`/`components.d.ts` 未纳入 tsconfig | 全量 `prettier --write`；删除空 media query；tsconfig include `*.d.ts`（顺带修复 40 处模板级类型问题：`el-tag` type 联合、`el-option` 不接受 null、`el-menu-item` 必须有 index、`TypeQuotaEditor` 可选 prop 等） |
+| FE-P2-4 | 上传仅靠 `accept` 属性，无显式校验 | Logo 校验类型与 2MB（与后端 `_LOGO_MAX_BYTES` 对齐）；xlsx 校验扩展名与非空（体积上限由后端可配置项 `upload_max_size_mb` 判定，前端不硬编码） |
+
+**结果**：`format:check` / `lint`（0 问题）/ `typecheck` / `build` 全绿；Playwright 冒烟 17/17 通过。
+
+---
+
+## 前端答题链路拆分（2026-09-17 续）
+
+> 背景：Prettier 展开长行后 `Answer.vue`(885) / `ExamTaking.vue`(767) / `Users.vue`(614) 触发
+> 「生产文件 600+ 行」红线，且练习页与考试页各写了一套六题型渲染 + 答题卡，行为已经开始漂移。
+> 本次按「交互表面 / 页面布局 / 页面状态」三层拆分，**不改对外行为**（提交时机、负载、
+> 判分回显口径全部保持一致）。
+
+| 编号 | 新增/调整 | 内容 |
+| --- | --- | --- |
+| REF-FE-1 | 新增 `components/QuestionBody.vue`（319 行） | 六题型作答区（单选/多选/判断选项、填空、简答、拖拽）从两页抽出：只渲染 + 上抛事件（`pick`/`toggle-multi`/`update-blank`/`update:shortAns`/`blur`/`drag-start`/`pick-source`/`drop`/`unassign`），不持有答案状态、不调接口；判分着色（`showResult`+`correctAnswer`）与锁定态（`locked`）由 props 控制 |
+| REF-FE-2 | 新增 `components/AnswerCard.vue`（约 200 行） | 答题卡（题号网格 + 图例 + 折叠 + 底部插槽）抽出：状态配色经 `cellClass(index)` 注入（练习=对/错/待自评，考试=已答/未答/当前，后者不泄题），交卷按钮走默认插槽；宽度/吸顶/移动端排序留在各页容器（`.side`），组件只管外观 |
+| REF-FE-3 | 新增 `components/QuestionResult.vue`（约 85 行） | 判分回显（结果提示 + 正确答案多态展示 + 解析 + 简答自评）抽出，三处 computed 随之迁移 |
+| REF-FE-4 | 新增 `composables/useAnswerKeyboard.ts` | 练习页键盘快捷键（A–J/数字选择、Enter 提交/下一题、←→ 切题、焦点在输入框/按钮时忽略）抽出为可复用 composable |
+| REF-FE-5 | 新增 `components/UserImportDialog.vue`（约 190 行）+ `constants/user.ts` | 批量导入用户三步流程（下载模板→上传预览→确认导入）连同其状态/校验抽出，父页只保留 `v-model` 与 `@imported` 刷新；角色/状态文案与配色集中到 `constants/user.ts`，消除页面与弹窗各写一份 |
+
+**行为一致性保障**：考试页文本题仍是「失焦才保存」（`QuestionBody` 新增 `blur` 事件，
+避免逐字符触发带乐观锁的写请求）；练习页提交后才着色、简答自评后解锁、
+拖拽「点击放入第一个空位」等交互逐项保持。
+
+**结果**：
+- 文件行数：`Answer.vue` 885 → 498、`ExamTaking.vue` 767 → 530、`Users.vue` 614 → 452；
+  全项目 **0 个文件超过 600 行**（最大 530）。
+- `format:check` / `lint`（0 问题）/ `typecheck` / `build` 全绿。
+- Playwright 冒烟：布局 17/17 ＋ 答题链路 20/20（含键盘选择、单选提交负载、填空数组负载、
+  拖拽放置、考试页自动保存含 `version` 乐观锁、简答失焦保存、答题卡状态着色、无 console error）。
+
+---
+
+## 后端第三轮审查 Critical 修复（2026-09-18）
+
+> 范围：`backend/app` 全面审查后确认的 6 个 Critical，按「①及格线 → ②统计口径 → ③公布范围 → ④倒计时 → ⑤分组树 → ⑥邮件 PII」顺序修复。
+> 验证：`ruff check` / `ruff format --check` / `mypy app` 全绿；`pytest` 379 passed（新增 11 条回归）；总覆盖率 89%（CI 门禁 75%）。
+
+| 编号 | 问题 | 修复 | 验证 |
+| --- | --- | --- | --- |
+| CRIT-1 | 及格判定用「原始分」比较「百分制及格线」：`Question.score` 默认 2 分/题，30 题满分仅 60，导致 10/20/30 题卷子满分也永远不及格 | 新增 `grading.is_passed(score, total_score, pass_score, overtime)` 统一百分制判定；`scoring.submit_exam`、`admin._recompute_published_pass`、`review_service.publish_results`（SQL 侧归一化）三处接入；`ExamCreateIn/ExamUpdateIn.pass_score` 加 `le=100`；`system_service` 校验 `default_pass_score ∈ [0,100]` | `test_review_critical_fixes.py::test_is_passed_uses_percentage`、`test_small_mock_paper_can_pass_with_default_pass_line`、`test_formal_exam_below_pass_line_is_failed`；`test_exam_frozen_reset` 按百分制重写 |
+| CRIT-2 | 统计聚合不过滤 `published`/考试类型：待复核成绩与模拟考提前进排行榜，违反 mock-exam-redesign 规格 | `stats/aggregate.py` 两处考试聚合加 `JOIN exam_definitions` + `type='formal'` + `published=1`（条件抽为 `_countable_exam_conditions()` 防漂移）；`publish_results` 提交后重算受影响日期聚合（补上规格要求的「公布即刷统计」） | `test_review_fixes.py::test_mock_exam_result_does_not_enter_daily_stats_or_rank`、`test_unpublished_formal_result_does_not_enter_daily_stats`、`test_review_critical_fixes.py::test_refresh_daily_ignores_mock_and_unpublished_results` |
+| CRIT-3 | `publish_results` 只校验考试指派分组，未按考生数据范围过滤，部门管理员可公布并邮件通知范围外考生 | 成绩查询补 `ExamResult.user_id.in_(user_ids_subquery(scope))`，与 `exam/admin.py:list_results` 口径一致 | `test_review_critical_fixes.py::test_publish_results_only_publishes_in_scope_users` |
+| CRIT-4 | `remaining_sec` 仅开考写入一次，断点续考重置整场倒计时，服务端却按真实起点判超时置 0 分 | 新增 `_remaining_seconds()`：按 `started_at + duration_min`（与 `end_at` 取小）实时换算；已结束会话固定 0（列保留为脏数据兜底） | `test_review_critical_fixes.py::test_remaining_seconds_is_recomputed_from_started_at` |
+| CRIT-5 | `build_tree` 在未建全的 `nodes` 上判定父节点，子节点 `sort` 小于祖先时同一分组输出两次 | 两遍构建：先存原始 `parent_id`，构建 children 后再把 scope 外/自引用节点规范化成根 | `test_review_critical_fixes.py::test_build_tree_does_not_duplicate_when_child_sorts_before_parent`、`test_group_and_practice`（作用域收窄） |
+| CRIT-6 | 邮件发送失败日志与 `MailError` 内嵌 smtplib 异常原文，泄露收/发件人邮箱（PII） | 新增 `_redact()`，`send_safely` 与 `_send` 的异常包装统一脱敏邮箱片段，保留异常类型与 SMTP 错误码等诊断信息 | `test_review_critical_fixes.py::test_redact_masks_email_addresses`、`test_mail_error_and_log_do_not_leak_recipient` |
+
+**运维注意**：及格线口径由「原始分」统一为「百分制」。历史数据中若某考试的 `pass_score` 是按原始分（等于卷面满分）录入的，需要管理员在「考试管理 → 编辑」中按百分比重新确认；当前开发库 `pass_score=80 / 满分 100` 两种口径等价，无需调整。
+
+## 后端第三轮审查 Suggestions 整改（2026-09-18 续）
+
+> 范围：审查报告 🟡 Suggestions 前 10 项（安全/正确性优先），按 ①rank 范围 → ②超管并发 → ③分组归属 → ④错题口径 → ⑤写路径原子性 → ⑥~⑩ 的顺序实施。
+> 验证：`ruff check` / `ruff format --check` / `mypy app` 全绿；`pytest` **390 passed**（新增 11 条回归）；覆盖率 89%（CI 门禁 75%）。
+
+| 编号 | 问题 | 修复 | 验证 |
+| --- | --- | --- | --- |
+| S1 | `rank()` 无调用者数据范围：部门管理员可看到其它部门用户与分组名；streak 查询可能超出 SQLite 绑定参数上限 | `rank()` 新增 `dept_scope` 参数，用户维度用 `user_ids_subquery` 过滤、分组榜限定 `allowed_group_ids`；`_streaks` 按 500 分块查询；`api/panel.py` 对 dept_admin 传入 `dept_scope_ids`（super_admin 全量，普通用户保留全局榜，代码注释说明与规格的差异） | `test_review_suggestions_batch.py::test_rank_respects_dept_scope_for_self_and_group_boards` |
+| S2 | 「最后一个超管」保护是读-改-写，两个并发请求可各自认为对方可用 → 0 个可用超管、管理入口永久锁死 | 新增 `_other_active_super_admin_exists()`（EXISTS 子查询），`set_status` / `delete_user` / `update_user`（降级）改为条件 UPDATE/DELETE + `rowcount` 判定；删除失败整体回滚，保留预检用于友好报错 | `test_review_suggestions_batch.py::test_last_active_super_admin_is_protected`、`test_atomic_guard_blocks_even_when_precheck_is_stale` |
+| S3 | 统计分组归属只看 `user_groups`，只有 `dept_group_id` 的用户永远显示「未分组」并从分组榜消失 | `refresh_daily` / `refresh_user_daily` 改用 `COALESCE(min(user_groups.group_id), users.dept_group_id)`（LEFT JOIN users） | `test_review_suggestions_batch.py::test_stats_group_attribution_falls_back_to_dept_group_id` |
+| S4 | `wrong_count = count(*) - sum(is_correct)` 把简答未自评（NULL）全部算成错题，且与面板口径矛盾 | 改用三态 `iif` 聚合：`answer_count` 只计已判题、`correct_count`/`wrong_count` 分别计 True/False，保证 `answer_count == correct + wrong` | `test_review_suggestions_batch.py::test_wrong_count_excludes_pending_short_answers` |
+| S5 | 练习记录先 commit，统计刷新失败则接口 500 但记录已落库 → 前端重试重复计分 | `answer_question` / `short_eval` 去掉提前 commit，改 `flush()` + 让 `refresh_user_daily` 的 commit 一并提交（刷新失败整体回滚）；`submit_exam` 的派生统计刷新包 try/except，避免已交卷被报 500 | `test_review_suggestions_batch.py::test_practice_answer_rolls_back_when_stats_refresh_fails` |
+| S6 | `assign_groups` 先删后插且不校验分组存在/去重：非法 id 会 500 且既有分组已被清空 | 校验（存在性 400、去重、范围 403）全部前置到删除之前 | `test_review_suggestions_batch.py::test_assign_groups_rejects_unknown_group_without_wiping_existing_links` |
+| S7 | `import_users` 每行 2 次 SELECT（5000 行 ≈ 1 万次查询），且批量 flush 在逐行容错之外，唯一约束竞态会整批 500 | 邮箱与分组 id 改为一次性预取；逐行插入用 SAVEPOINT 隔离，冲突只让该行失败并进入 errors；错误列表按行号排序 | `test_review_suggestions_batch.py::test_import_users_isolates_existing_email_and_ignores_unknown_group` |
+| S8 | 用户 Excel 预览对每行做 bcrypt（5000 行 ≈ 26 分钟 CPU，占满线程池）；超长口令会让整份预览 400 且不指向具体行 | 按口令去重后只哈希一次（复用同一次 bcrypt）；`_parse_row` 增加 72 字节行级校验 | `test_review_suggestions_batch.py::test_user_preview_hashes_distinct_passwords_once_and_reports_long_password` |
+| S9 | `_check_manage_permission` 在操作者记录缺失时 fail-open | 改为 `actor_user is None or (...)` → 403 | `test_review_suggestions_batch.py::test_manage_permission_fails_closed_when_actor_missing` |
+| S10 | 用户列表关键词 LIKE 未转义（`%`/`_` 当通配符），范围过滤把用户 id 物化成 Python 集合后拼 `IN(...)` | 复用 `core/like.py` 的 `like_pattern` + `escape`；范围过滤改用 `user_ids_subquery` | `test_review_suggestions_batch.py::test_list_users_escapes_like_wildcards_and_scopes_via_subquery` |
+
+**遗留（未在本轮处理，见审查报告"其余次级项"）**：考试列表逐场 COUNT 的 N+1、`list_results` 全表载入、`paper_service` 全表抽样、`publish_exam` 逐收件人邮件任务、考试时段字符串未校验、`type_stats` 全表扫描、应用级 logging 未配置、`stats_user_daily` 可空列唯一约束与冗余索引、Excel 实体展开（defusedxml）、导入 token 先消费后校验等。
+
+## 后端第三轮审查遗留项清理（2026-09-18 再续）
+
+> 范围：审查报告「其余次级项 / Nits」全量清理，按「快速修正 → 行为与完整性 → 性能」三组实施。
+> 验证：`ruff check` / `ruff format --check` / `mypy app` 全绿；`pytest` **414 passed**（新增 24 条回归）；覆盖率 89.6%（CI 门禁 75%）；`migrate_2026_09_18.py --dry-run` 在开发库通过。
+
+### 一、快速修正（正确性 / 可运维性）
+
+| 项 | 问题 | 修复 |
+| --- | --- | --- |
+| 应用日志 | 全应用未配置 logging，`logger.info` 被无 handler 的 root 直接丢弃，warning/error 走 `lastResort` 无格式输出 | 新增 `app/core/logconfig.py`：`configure_logging()` 幂等安装 root stdout handler（仅在 root 无 handler 时，避免与 pytest/uvicorn 冲突），`quizhub` 级别由 `TRAINING_LOG_LEVEL` 控制（默认 INFO）；`create_app()` 调用 |
+| stats 索引与唯一性 | `uq_user_daily(user_id,date,group_id)` 含可空列，NULL 互不相等 → 未分组用户无唯一保护，重复刷新会双行并被 `SUM` 重复计分；`user_id`/`date` 单列索引被其他索引前缀覆盖，属冗余写放大 | 模型加部分唯一索引 `uq_user_daily_ungrouped (user_id,date) WHERE group_id IS NULL`；去掉两处 `index=True`；新增 `scripts/migrate_2026_09_18.py`（合并存量未分组重复行、建索引、删冗余索引，支持 `--dry-run`，幂等） |
+| 弃用常量 | 11 处 `HTTP_413_REQUEST_ENTITY_TOO_LARGE`（Starlette 已弃用，测试告警） | 统一为 `HTTP_413_CONTENT_TOO_LARGE`（7 处代码调用点） |
+| 死代码 | `auth_service._now` / `_is_code_valid` 无调用方；`question_service.list_banks` 局部重复导入 `func` | 删除 |
+| 哨兵值 | `stats/rank.since = "0000-00-00"` 非法日期仅靠字典序；`if current_user_id:` 假设 id 非 0 | 改 `_MIN_DATE = "0000-01-01"` 常量与 `is not None` |
+| 时区单一来源 | `stats/common.py` 重复实现 `ZoneInfo + 回退 UTC`，与 `core/timeutil` 可能分歧 | 改为 `_TZ = business_tz()`，删除重复实现 |
+| 组卷返回契约 | `max_questions` 截断后 `scores` 未裁剪，含未入选题目 | 同步重建 `scores` |
+| 系统接口 | `api/system.py` 直接调用私有 `mail_service._send`；`api/users.py` import 分支冗余 | 新增公有 `send_test_mail` 语义保留调用（改用返回值校验）；合并冗余 if/else（见下条） |
+
+### 二、行为与完整性
+
+| 项 | 问题 | 修复 |
+| --- | --- | --- |
+| 清空部门归属 | `UserUpdate.dept_group_id=null` 与「未传」不可区分，管理员无法取消用户部门 | `user_service.update_user` 新增 `clear_dept_group` 参数；路由按 `model_fields_set` 判定显式 null |
+| 导入 token 先消费后校验 | `do_import` / `consume_preview` 先 `take()` 再校验范围/角色，校验失败会作废上传者本人的预览 | `BoundedTTLCache.peek()` 新增；`import_service.do_import` 与 `user_excel.peek_preview` 改为「peek → 归属/范围/角色校验 → take」 |
+| 跨用户 mock 开考 | `start_exam` 只对 `type=formal` 做指派校验，任何人枚举 `exam_id` 即可启动他人模拟考 | `type=mock` 且 `created_by != user.id` → 404 |
+| scoring 回收绕过 | 用户侧无条件把 `scoring` 改回 `in_progress`，绕过 30 分钟超时守卫 | 交由 `_recover_stuck_scoring` 判定；未回收则 409「结算中」 |
+| 考试时段校验 | `start_at/end_at` 为自由字符串，非法值或 end<=start 可落库，直到考生访问才 400 | schema 校验可解析性与成对先后；`admin._validate_exam_window` 结合库中另一侧校验（覆盖单侧更新） |
+| Excel 健壮性 | `难度="inf"` 触发 `OverflowError` → 500；`分值` 负数/非有限由 Pydantic 在整文件层面拒绝且不指向行；表头从不校验（列序调换会静默错位）；邮箱仅判 `@`（CRLF 可入库） | `_to_int` 捕获 `OverflowError`；新增 `_parse_score` 行级校验；`headers_match` 校验首行（题库与用户导入共用）；邮箱拒绝 CR/LF 并改用 `normalize_email` |
+| 导入截断标志 | `truncated` 恒为 False（`_full_rows` 已提前截断），超限静默丢行 | `_full_rows` 返回 `(rows, hit_limit)`；`truncated = hit_limit or total >= PARSE_ROW_MAX` |
+| fail-open 默认值 | `preview/do_import/consume_preview` 的 `user_id: int = 0` + `if user_id and owner` 使漏传即关闭 IDOR 校验 | `user_id` 改为必填，归属校验改为严格相等 |
+
+### 三、性能
+
+| 项 | 问题 | 修复 |
+| --- | --- | --- |
+| 考试列表 N+1 | `_exam_brief` 逐场 `COUNT(exam_questions)`（最多 500–2000 次/请求），注释声称已消除 N+1 但实际未消除 | 新增 `_exam_question_counts()`：已固化题数一次 GROUP BY、模板一次 IN 查询；`list_exams` / `list_available` 改为「先筛可见集合，再批量算题数」 |
+| `list_results` 范围过滤 | 部门管理员把整张 `exam_definitions` 载入 Python 过滤，并拼出无界 `IN (...)` | 用 JSON1 在 SQL 内判定「有指派且全部分组都在 scope 内」 |
+| `type_stats` | 无标签筛选时把整表 `(id,type,tags)` 拉进 Python 计数 | 无标签时下推为 `GROUP BY type` 聚合；有标签时保留 Python 过滤（JSON 无集合包含语义） |
+| `publish_exam` 通知 | 物化全部活跃用户并逐人挂一个后台任务（任务数与内存随人数线性增长） | 只取邮箱列 + 单个 `send_exam_publish_many` 任务（内部汇总失败数） |
+| 组卷候选集 | 无 bank/group 筛选时把整张题库表载入内存抽样 | 新增 `_CANDIDATE_MAX = 20000` 与 `LIMIT`；超限返回明确 400（不做静默截断） |
+
+### 有意不改（附理由）
+
+- `stats_service.__all__` 仍导出 `_TZ`/`_streaks` 等私有名：门面模块的定位就是保持 api 层与测试的既有导入路径（`__all__` 不参与属性访问），收敛导出反而要加 `noqa` 或破坏兼容，收益为负。
+- `generate_paper(scope=None)` 仍默认「不限制」：三处调用点（mock/sessions/预览）的规则在写库前已按调用者范围校验，改为必填需同步改动全部调用点与测试，风险大于收益；已用 docstring 明确 `None` 语义。
+
+---
+
+## 后端全面评审（/backend-code-review，2026-09-20）
+
+> 范围：`backend/`（FastAPI + 同步 SQLAlchemy 2.0 + SQLite）
+> 验证：`ruff check` + `ruff format --check` + `mypy app` 全绿；`pytest` 463 通过；覆盖率 90%（CI 门槛 75%）
+
+### 一、Critical（已修复）
+
+| 编号 | 问题 | 修复 | 回归测试 |
+| --- | --- | --- | --- |
+| CRIT-1 | `migrate_2026_09_16.migrate_email_collation` 用 `PRAGMA writable_schema` 只改表定义、不重建索引，`PRAGMA integrity_check` 报 "row N missing from index" / "non-unique entry"，邮箱唯一约束与等值查询不可靠 | 删除 `writable_schema` 路径，统一走表重建（按共有列拷贝），原样恢复迁移前索引；`main()` 增加 `integrity_check == ok` 断言（否则 exit 2） | `test_migration_robustness.py::test_email_collation_rebuild_keeps_indexes_consistent` / `..._is_idempotent` |
+| CRIT-2 | WAL 模式下 `shutil.copy2` 只复制主库文件，未 checkpoint 的已提交事务不在备份中；`prune_backups` 还会把坏备份当最新保留 | 改用 SQLite 在线备份 API（`src.backup(dst)`）+ `integrity_check` 校验；校验失败丢弃备份且不触发清理；非 SQLite 源降级返回 None | `test_db_backup_wal.py`（含 WAL 未 checkpoint 数据可恢复、非 DB 源降级） |
+| CRIT-3 | `stats.aggregate.refresh_daily` 读快照 → 全量 DELETE → 重建，pysqlite 下 SELECT 走自动提交，会覆盖并发 `refresh_user_daily` 已提交的当日行（丢失更新） | 会话干净时在读快照前 `BEGIN IMMEDIATE` 取写锁，使读-删-写成为串行化写事务 | `test_stats_refresh_locking.py`（写锁 + 聚合口径回环） |
+
+### 二、Suggestions（已修复）
+
+| 编号 | 问题 | 修复 |
+| --- | --- | --- |
+| SUG-1 | `dept_scope_ids` 用 `subtree_ids` 逐节点查询（42 个调用点，大部门下每请求上百次查询） | 复用 `subtree_map`（单次查询全量映射） |
+| SUG-2 | Excel 导入放行多字母单选题答案，与手动创建路径 `_validate_answer_shape` 口径不一致（存下永远判错的题） | `_parse_row` 对单选题增加 `len(ans) != 1` 行级错误 |
+| SUG-3 | SMTP 未配置时 `_send` 静默返回，而 `/auth/send-code` 返回成功，新部署无法注册且无可见错误 | `ensure_configured()` + `_send` fail-closed 抛 `MailError`；`send_code`/`resend` 在写验证码前转 503 |
+| SUG-4 | `rank?dimension=streak&range=all` 把全量历史 `(user_id, date)` 载入内存（单进程 DoS 面） | 新增 `_streak_candidates`：候选集收敛到「今日/昨日有作答」（连胜 > 0 的必要条件） |
+| SUG-5 | `update_exam` 作废成绩 commit 后刷新统计，刷新失败返回 500（实际已生效，管理员会重试） | 派生统计失败降级为 WARNING 日志（与题目删除路径同口径） |
+| SUG-6 | `import_service._ensure_unique_tags` 缺 SAVEPOINT，并发导入撞标签唯一约束导致整批 500 | 改为 `begin_nested()` + `IntegrityError` 静默跳过（与 `question_service._ensure_tags` 同口径） |
+| SUG-7 | `publish_results` 逐考生挂一个后台任务，任务数随人数线性增长 | 新增 `send_review_done_many`，收敛为单个后台任务 |
+| SUG-8 | `update_settings` 逐 key 点查（一次保存最多 22 次 SELECT） | 按分类一次性取回既有行（并对历史 category 脏数据按 key 兜底） |
+| SUG-9 | `user_service.py`（583 行）/ `exam/admin.py`（529 行）超 500 行红线 | 实测排除导入/注释/docstring 后为 446 / 380 有效代码行，未触发规则阈值，故不做拆分（避免大面积搬移风险） |
+| SUG-10 | 服务层 169 处直接 `raise fastapi.HTTPException`，领域逻辑耦合传输层 | 新增 `app/core/errors.py::DomainError`（同形状 `status_code`/`detail`），169 处全部迁移；`main.py` 注册异常处理器统一映射为 `{"detail": ...}`，API 契约不变 |
+
+### 三、Nits（已修复）
+
+| 编号 | 问题 | 修复 |
+| --- | --- | --- |
+| NIT-1 | CORS 来源未 strip，含空格时静默失效 | 逐项 strip 并过滤空项；`allow_credentials` 改用 strip 后列表判断 |
+| NIT-2 | `rank_visible` 写入大小写不敏感、读取敏感（存 "TRUE" 会被读成 false） | 写入归一为小写（`BOOL_SETTING_KEYS`），读取端统一 `.lower()` |
+| NIT-3 | `upload_allowed_ext` 校验条件含恒真子句 | 简化为 `any(ext != ".xlsx" ...)` |
+| NIT-4 | `_is_overtime` 对历史脏时间戳抛 400，阻断交卷 | 降级为 WARNING + 按未超时处理（与 `_remaining_seconds` 同口径） |
+| NIT-5 | `send_code` docstring 承诺的「已注册」提示实际难以到达 | 更正注释，说明该提示仅在竞态下出现，属防枚举的预期代价 |
+| NIT-6 | `smtp_host` 未限制目标，配合 `/system/smtp/test` 构成超管侧 SSRF 探测 | 新增 `_reject_internal_host`：拒绝回环/链路本地/组播/未指定地址（不拦私网，避免破坏内网中继） |
+| NIT-7 | `user.delete` 审计明细记录邮箱，与全站 PII 脱敏口径不一致 | 改为只记 `role` 等非 PII 字段 |
+| NIT-8 | `create_user` 路由在服务层提交后二次 commit 补部门归属，无审计且非原子 | 归属作为 `create_user(dept_group_id=...)` 入参与创建同事务写入 |
+
+### 新增/调整测试
+
+- 新增 `tests/test_db_backup_wal.py`、`tests/test_stats_refresh_locking.py`。
+- `tests/test_migration_robustness.py` 增加 users NOCASE 重建的两条回归；`tests/test_excel.py` 增加单选/多选答案形状两条。
+- 因行为按设计变更而调整（原测试固化了旧行为）：`test_send_returns_early_when_host_missing` → `test_send_raises_when_host_missing`；`test_mail_fallback_...` → 经 `send_safely` 验证失败路径不泄露 PII；`test_backup_database_prunes_old_auto_backups` 改用真实 SQLite 库。
+- 领域错误迁移后，测试断言统一为 `pytest.raises((DomainError, HTTPException))` / `except (DomainError, HTTPException)`，兼容依赖层仍抛 `HTTPException` 的场景。

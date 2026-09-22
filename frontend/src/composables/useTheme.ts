@@ -1,5 +1,4 @@
-import { onMounted } from 'vue'
-import { api } from '@/api/http'
+import { onMounted, watch } from 'vue'
 import { useSiteStore } from '@/stores/site'
 import router from '@/router'
 
@@ -13,46 +12,48 @@ const hexToRgb = (color: string) => ({
 const mix = (c: { r: number; g: number; b: number }, target: 'white' | 'black', p: number) => {
   const t = target === 'white' ? { r: 255, g: 255, b: 255 } : { r: 0, g: 0, b: 0 }
   const ch = (a: number, b: number) => Math.round(a + (b - a) * p)
-  return `#${[ch(c.r, t.r), ch(c.g, t.g), ch(c.b, t.b)]
-    .map((v) => v.toString(16).padStart(2, '0'))
-    .join('')}`
+  return `#${[ch(c.r, t.r), ch(c.g, t.g), ch(c.b, t.b)].map((v) => v.toString(16).padStart(2, '0')).join('')}`
 }
 
-/** 从后端读取站点信息：注入主题色、站点名、Logo（写入 site store 共享）。 */
-export function useTheme() {
-  const apply = (color: string) => {
-    if (!color || !/^#[0-9a-fA-F]{6}$/.test(color)) return
-    const rgb = hexToRgb(color)
-    const root = document.documentElement
-    root.style.setProperty('--brand-primary', color)
-    root.style.setProperty('--brand-primary-light', mix(rgb, 'white', 0.2))
-    root.style.setProperty('--brand-primary-dark', mix(rgb, 'black', 0.2))
-    root.style.setProperty('--brand-primary-light-9', mix(rgb, 'white', 0.9))
-    root.style.setProperty('--el-color-primary', color)
-    // Element Plus 的各级浅色/深色
-    for (let i = 1; i <= 9; i++) {
-      root.style.setProperty(`--el-color-primary-light-${i}`, mix(rgb, 'white', i / 10))
-      root.style.setProperty(`--el-color-primary-dark-${i}`, mix(rgb, 'black', i / 10))
-    }
+/** 注入 Element Plus 主题色及其浅色/深色梯度。 */
+const apply = (color: string) => {
+  if (!color || !/^#[0-9a-fA-F]{6}$/.test(color)) return
+  const rgb = hexToRgb(color)
+  const root = document.documentElement
+  root.style.setProperty('--brand-primary', color)
+  root.style.setProperty('--brand-primary-light', mix(rgb, 'white', 0.2))
+  root.style.setProperty('--brand-primary-dark', mix(rgb, 'black', 0.2))
+  root.style.setProperty('--brand-primary-light-9', mix(rgb, 'white', 0.9))
+  root.style.setProperty('--el-color-primary', color)
+  // Element Plus 的各级浅色/深色
+  for (let i = 1; i <= 9; i++) {
+    root.style.setProperty(`--el-color-primary-light-${i}`, mix(rgb, 'white', i / 10))
+    root.style.setProperty(`--el-color-primary-dark-${i}`, mix(rgb, 'black', i / 10))
   }
+}
 
-  const loadFromServer = async () => {
-    try {
-      const data = await api.get<{ site_name: string; brand_color: string; site_logo: string; rank_visible: boolean }>('/system/site')
-      const site = useSiteStore()
-      site.site_name = data.site_name || '培训考试平台'
-      site.site_logo = data.site_logo || ''
-      site.brand_color = data.brand_color || '#E60012'
-      site.rank_visible = data.rank_visible !== false
-      site.loaded = true
-      if (data.brand_color) apply(data.brand_color)
-      // 站点名就绪后按 `页面名 · 站点名` 重新刷新标题（router.afterEach 已先写入默认名）
-      if (data.site_name) {
-        const page = router.currentRoute.value.meta.title as string | undefined
-        document.title = page ? `${page} · ${site.site_name}` : site.site_name
-      }
-    } catch { /* 忽略，用默认主题 */ }
-  }
+/**
+ * 从后端读取站点信息并注入主题色、站点名、Logo。
+ *
+ * 数据加载统一委托 site store（含并发去重），本 composable 只负责“store 值 → DOM/标题”
+ * 的同步，避免站点字段的默认值与兜底逻辑在两处各写一份。
+ */
+export function useTheme() {
+  const site = useSiteStore()
+
+  /** 拉取站点信息（委托 store；并发调用共享同一次请求）。 */
+  const loadFromServer = () => site.load()
+
+  // brand_color 就绪（或被设置页更新）后即时生效
+  watch(() => site.brand_color, apply, { immediate: true })
+  // 站点名就绪后按 `页面名 · 站点名` 刷新标题（router.afterEach 已先写入默认名）
+  watch(
+    () => site.site_name,
+    (name) => {
+      const page = router.currentRoute.value.meta.title as string | undefined
+      document.title = page ? `${page} · ${name}` : name
+    },
+  )
 
   onMounted(loadFromServer)
   return { apply, loadFromServer }

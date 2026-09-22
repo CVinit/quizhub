@@ -83,6 +83,9 @@ class ExamSession(PKMixin, TimestampMixin):
 
 class ExamResult(PKMixin, TimestampMixin):
     __tablename__ = "exam_results"
+    # 每日统计刷新按 created_at 范围过滤（stats/aggregate.refresh_daily），
+    # 而该列来自 TimestampMixin（无索引），不补索引会全表扫描成绩表。
+    __table_args__ = (Index("ix_exam_results_created_at", "created_at"),)
 
     exam_definition_id: Mapped[int] = mapped_column(
         Integer, ForeignKey("exam_definitions.id", ondelete="CASCADE"), index=True, nullable=False
@@ -121,7 +124,8 @@ class ShortAnswerReview(PKMixin):
     question_id: Mapped[int] = mapped_column(Integer, ForeignKey("questions.id", ondelete="CASCADE"), nullable=False)
     user_answer: Mapped[str] = mapped_column(Text, default="", nullable=False)
     reference_answer: Mapped[str] = mapped_column(Text, default="", nullable=False)
-    verdict: Mapped[str | None] = mapped_column(String, nullable=True)  # REVIEW_VERDICT
+    # index=True：管理端复核队列按 verdict IS NULL / = ? 过滤（review_service）
+    verdict: Mapped[str | None] = mapped_column(String, nullable=True, index=True)  # REVIEW_VERDICT
     partial_score: Mapped[float | None] = mapped_column(Float, nullable=True)
     reviewer: Mapped[int | None] = mapped_column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
     reviewed_at: Mapped[str | None] = mapped_column(String, nullable=True)

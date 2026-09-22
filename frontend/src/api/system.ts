@@ -25,7 +25,7 @@ export const systemApi = {
   listSettings: (category?: string) => api.get<SettingItem[]>('/system/settings', { params: { category } }),
   updateSettings: (category: string, updates: Record<string, string>) =>
     api.put('/system/settings', { category, updates }),
-  smtpTest: (to_email: string) => api.post('/system/smtp/test', { to_email }),
+  smtpTest: (to_email: string) => api.post<{ message?: string }>('/system/smtp/test', { to_email }),
   // Logo 上传：返回 { url }（公开可读路径）
   uploadLogo: (file: File) => {
     const fd = new FormData()

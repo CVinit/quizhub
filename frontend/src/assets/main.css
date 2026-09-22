@@ -21,8 +21,8 @@
 body {
   margin: 0;
   font-family: 'PingFang SC', 'Microsoft YaHei', Helvetica, Arial, sans-serif;
-  background: #f5f7fa;
-  color: #303133;
+  background: var(--el-fill-color-light);
+  color: var(--el-text-color-primary);
 }
 
 a { text-decoration: none; }
@@ -39,11 +39,6 @@ a { text-decoration: none; }
 /* 主题色覆盖：Element Plus 主色由 CSS 变量驱动（与上方 :root 合并声明） */
 
 /* ========== 响应式断点：mobile <768 / tablet 768-1199 / desktop >=1200 ========== */
-
-/* 平板及以下：收紧布局内边距 */
-@media (max-width: 1199px) {
-  /* 由各布局组件自行处理侧栏折叠，这里仅提供全局字号/间距微调 */
-}
 
 /* 手机端全局适配 */
 @media (max-width: 767px) {
@@ -104,7 +99,7 @@ a { text-decoration: none; }
   .mobile-table-hidden { display: none !important; }
   .mobile-card-list { display: flex; flex-direction: column; gap: 12px; }
   .mobile-card-list .mc {
-    background: #fff; border: 1px solid #ebeef5; border-radius: 8px;
+    background: var(--el-bg-color); border: 1px solid var(--el-border-color-lighter); border-radius: 8px;
     padding: 12px 14px; word-break: break-all;
   }
   .mobile-card-list .mc-row {
@@ -112,7 +107,7 @@ a { text-decoration: none; }
     gap: 8px; font-size: 13px;
   }
   .mobile-card-list .mc-row + .mc-row { margin-top: 6px; }
-  .mobile-card-list .mc-label { color: #909399; flex-shrink: 0; }
+  .mobile-card-list .mc-label { color: var(--el-text-color-secondary); flex-shrink: 0; }
   .mobile-card-list .mc-actions { margin-top: 10px; display: flex; gap: 8px; flex-wrap: wrap; }
   .mobile-card-list .mc-title { font-weight: 600; font-size: 14px; margin-bottom: 8px; word-break: break-all; }
 

@@ -79,14 +79,17 @@ class BoundedTTLCache(Generic[T]):
                 return None
             return payload, owner
 
-    def peek_owner(self, key: str) -> float | None:
-        """只读取归属标识而不消费，用于越权检查前判断。
+    def peek(self, key: str) -> tuple[T, float] | None:
+        """只读取条目而不消费（TTL 内有效）。
+
+        供「先校验、后消费」的流程使用：调用方可在真正 take() 之前完成
+        归属/数据范围校验，避免一次非法请求就把上传者本人的预览作废。
 
         Args:
             key: 缓存键。
 
         Returns:
-            归属标识；不存在或已过期返回 None。
+            (payload, owner) 元组；不存在或已过期返回 None。
         """
         now = time.monotonic()
         with self._lock:
@@ -96,7 +99,19 @@ class BoundedTTLCache(Generic[T]):
             if now - entry[2] > self._ttl:
                 self._store.pop(key, None)
                 return None
-            return entry[1]
+            return entry[0], entry[1]
+
+    def peek_owner(self, key: str) -> float | None:
+        """只读取归属标识而不消费，用于越权检查前判断。
+
+        Args:
+            key: 缓存键。
+
+        Returns:
+            归属标识；不存在或已过期返回 None。
+        """
+        entry = self.peek(key)
+        return None if entry is None else entry[1]
 
     def discard(self, key: str) -> None:
         """显式丢弃条目（用于失败路径，避免敏感数据滞留）。"""

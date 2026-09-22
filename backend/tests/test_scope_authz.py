@@ -15,6 +15,7 @@ import pytest
 from fastapi import HTTPException
 
 from app.core.deps import dept_scope_ids
+from app.core.errors import DomainError
 from app.database import db_session, init_db
 from app.models.group import Group
 from app.models.user import User
@@ -69,17 +70,40 @@ def test_dept_admin_scope_excludes_other_dept():
 
 
 def test_dept_admin_cannot_reparent_into_out_of_scope():
-    """dept_admin 不可把分组挂到自身子树外的父分组（防扩张数据范围）。"""
+    """dept_admin 不可把分组挂到自身子树外的父分组（防扩张数据范围）。
+
+    必须调用**真实路由**：原实现自己在 `pytest.raises` 里抛 HTTPException，
+    等于只断言"Python 能抛异常"，删掉生产守卫该用例依然通过（api/groups.py 的
+    守卫零覆盖）。
+    """
     init_db()
+    from app.api import groups as groups_api
+    from app.schemas.group import GroupUpdate
+
     with db_session() as db:
-        dept_admin, super_admin, rd, mk, rd_team = _setup_org(db)
+        dept_admin, _super_admin, _rd, mk, rd_team = _setup_org(db)
         scope = dept_scope_ids(db, dept_admin)
-        # 模拟路由层守卫：把 rd_team 挂到 mk（市场部，scope 外）应被拒
-        assert mk.id not in scope
-        # 等价于 api/groups.update 的守卫逻辑
-        if scope is not None and mk.id not in scope:
-            with pytest.raises(HTTPException):
-                raise HTTPException(403, "无权挂到该父分组")
+        assert mk.id not in scope, "前提：市场部不在 dept_admin 子树内"
+
+        with pytest.raises((DomainError, HTTPException)) as exc:
+            groups_api.update(rd_team.id, GroupUpdate(parent_id=mk.id), db, dept_admin)
+
+    assert exc.value.status_code == 403
+    # 目标分组不得被改动
+    with db_session() as db:
+        assert db.get(Group, rd_team.id).parent_id != mk.id
+
+
+def test_dept_admin_can_reparent_within_scope():
+    """对照：子树内改父分组必须放行（防止守卫被写成一律拒绝）。"""
+    init_db()
+    from app.api import groups as groups_api
+    from app.schemas.group import GroupUpdate
+
+    with db_session() as db:
+        dept_admin, _super_admin, rd, _mk, rd_team = _setup_org(db)
+        groups_api.update(rd_team.id, GroupUpdate(parent_id=rd.id), db, dept_admin)
+        assert db.get(Group, rd_team.id).parent_id == rd.id
 
 
 # ---------- 用户导入越权 ----------
@@ -204,7 +228,7 @@ def test_update_exam_out_of_scope_rejected():
         dept_admin, super_admin, rd, mk, rd_team = _setup_org(db)
         scope = dept_scope_ids(db, dept_admin)
         e_out = _seed_formal_exam(db, super_admin, group_ids=[mk.id], status="draft")
-        with pytest.raises(HTTPException) as exc:
+        with pytest.raises((DomainError, HTTPException)) as exc:
             exam_service.update_exam(db, e_out.id, {"name": "改"}, scope)
         assert exc.value.status_code == 403
 
@@ -217,7 +241,7 @@ def test_create_exam_out_of_scope_group_ids_rejected():
         from app.schemas.exam import ExamCreateIn
 
         payload = ExamCreateIn(name="x", type="formal", group_ids=[mk.id], duration_min=60, pass_score=60)
-        with pytest.raises(HTTPException) as exc:
+        with pytest.raises((DomainError, HTTPException)) as exc:
             exam_service.create_exam(db, payload, dept_admin, scope)
         assert exc.value.status_code == 403
 
@@ -228,7 +252,7 @@ def test_publish_exam_out_of_scope_rejected():
         dept_admin, super_admin, rd, mk, rd_team = _setup_org(db)
         scope = dept_scope_ids(db, dept_admin)
         e_out = _seed_formal_exam(db, super_admin, group_ids=[mk.id], status="draft")
-        with pytest.raises(HTTPException) as exc:
+        with pytest.raises((DomainError, HTTPException)) as exc:
             exam_service.publish_exam(db, e_out.id, scope)
         assert exc.value.status_code == 403
 

@@ -7,9 +7,9 @@ import os
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException, Request, status
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 
 from app.api import audit as audit_router
@@ -21,9 +21,17 @@ from app.api import questions as questions_router
 from app.api import records as records_router
 from app.api import system as system_router
 from app.api import users as users_router
+from app.core.errors import DomainError
+from app.core.logconfig import configure_logging
+from app.core.rate_limit import get_client_ip
+from app.core.request_context import set_request_ip
 from app.database import init_db
 
 logger = logging.getLogger("quizhub")
+
+# 公开静态目录下禁止回源的扩展名：SVG 可内嵌 <script>，与站点同源直接导航即执行
+# （存储型 XSS）。上传侧已不接受 .svg，这里再兜住历史遗留文件。
+_PUBLIC_BLOCKED_SUFFIXES = (".svg",)
 
 
 @asynccontextmanager
@@ -42,13 +50,49 @@ async def lifespan(app: FastAPI):
 
 
 def create_app() -> FastAPI:
+    # 统一日志出口：否则 logger.info 会被无 handler 的 root 丢弃
+    configure_logging()
     app = FastAPI(title="培训考试平台 API", version="0.1.0", lifespan=lifespan)
 
+    @app.exception_handler(DomainError)
+    async def _domain_error(_request: Request, exc: DomainError):
+        """把服务层的领域错误统一映射为 HTTP 响应。
+
+        服务层不再依赖 `fastapi.HTTPException`；响应体与 FastAPI 内建处理器保持一致
+        （`{"detail": ...}`），因此前端与既有 API 契约不变。
+        """
+        return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
+
+    @app.middleware("http")
+    async def _security_headers(request: Request, call_next):
+        """统一安全响应头，并拦截公开目录中的可执行静态文件。
+
+        原实现无任何安全响应头：`/files` 与 logo 回源是无嗅探保护的同源静态读取，
+        配合可上传的 SVG 即构成存储型 XSS 面。这里集中兜底（含历史遗留文件）。
+
+        同时把客户端 IP 写入请求上下文：审计日志在服务层调用，拿不到 Request，
+        原先 `audit_service.log(ip=...)` 的形参没有任何调用方传入、该列恒为空。
+        """
+        set_request_ip(get_client_ip(request))
+        path = request.url.path.lower()
+        if path.startswith("/files/") and path.endswith(_PUBLIC_BLOCKED_SUFFIXES):
+            return PlainTextResponse("Not Found", status_code=404)
+        response = await call_next(request)
+        response.headers.setdefault("X-Content-Type-Options", "nosniff")
+        response.headers.setdefault("X-Frame-Options", "SAMEORIGIN")
+        response.headers.setdefault("Referrer-Policy", "same-origin")
+        return response
+
+    # 逗号分隔的来源需逐个 strip：否则 `https://a.com, https://b.com` 的第二项带前导空格，
+    # Starlette 精确匹配失败、该来源被静默拒绝。
+    cors_origins = [origin.strip() for origin in os.getenv("TRAINING_CORS_ORIGINS", "*").split(",") if origin.strip()]
+    if not cors_origins:
+        cors_origins = ["*"]
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=os.getenv("TRAINING_CORS_ORIGINS", "*").split(","),
+        allow_origins=cors_origins,
         # 通配符来源时禁止凭据，避免反射 Origin 的跨域已认证请求攻击
-        allow_credentials=os.getenv("TRAINING_CORS_ORIGINS", "*") != "*",
+        allow_credentials="*" not in cors_origins,
         allow_methods=["*"],
         allow_headers=["*"],
     )
@@ -89,16 +133,18 @@ def create_app() -> FastAPI:
 
         @app.get("/{full_path:path}")
         def _spa(full_path: str):
-            if full_path.startswith("api"):
-                return {"detail": "Not Found"}
+            # 未匹配的 /api 路径必须 404：原实现返回 200 + {"detail": "Not Found"}，
+            # 会让客户端与探活/监控把不存在的接口当成成功响应。
+            if full_path == "api" or full_path.startswith("api/"):
+                raise HTTPException(status.HTTP_404_NOT_FOUND, "Not Found")
             # 拒绝显式相对路径片段
             if ".." in full_path.split("/"):
-                return {"detail": "Not Found"}
+                raise HTTPException(status.HTTP_404_NOT_FOUND, "Not Found")
             target = (dist / full_path).resolve()
             try:
                 target.relative_to(dist_resolved)
             except ValueError:
-                return {"detail": "Not Found"}
+                raise HTTPException(status.HTTP_404_NOT_FOUND, "Not Found") from None
             if target.is_file():
                 return FileResponse(target)
             return FileResponse(dist / "index.html")

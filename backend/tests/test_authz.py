@@ -9,6 +9,7 @@ from __future__ import annotations
 import secrets
 
 from app.core.deps import dept_scope_ids, user_in_scope
+from app.core.errors import DomainError
 from app.database import db_session, init_db
 from app.models.group import Group, UserGroup
 from app.models.user import User
@@ -112,13 +113,13 @@ def test_dept_admin_cannot_reset_super_admin_password():
         try:
             user_service.reset_password(db, dept_admin.id, super_admin.id, "newpass123", scope)
             assert False, "dept_admin 不应能重置超管密码"
-        except HTTPException as exc:
+        except (DomainError, HTTPException) as exc:
             assert exc.status_code == 403
         # 重置市场部用户密码也必须被拒
         try:
             user_service.reset_password(db, dept_admin.id, out_user.id, "newpass123", scope)
             assert False, "dept_admin 不应能重置其他部门用户密码"
-        except HTTPException as exc:
+        except (DomainError, HTTPException) as exc:
             assert exc.status_code == 403
 
 
@@ -148,7 +149,7 @@ def test_dept_admin_cannot_disable_out_of_scope_user():
         try:
             user_service.set_status(db, dept_admin.id, out_user.id, False, scope)
             assert False, "dept_admin 不应能禁用其他部门用户"
-        except HTTPException as exc:
+        except (DomainError, HTTPException) as exc:
             assert exc.status_code == 403
 
 

@@ -23,6 +23,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from app.config import DB_PATH
+from app.core.db_backup import backup_database
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 logger = logging.getLogger("quizhub.migrate")
@@ -75,12 +76,17 @@ def main() -> None:
     if not DB_PATH.exists():
         logger.error("[migrate] 数据库不存在：%s，请先运行 init_db.py", DB_PATH)
         sys.exit(1)
+    # 与其它迁移保持一致：先备份再写，且备份数量有上限（见 app/core/db_backup.py）
+    backup_database(DB_PATH)
     logger.info("[migrate] 开始迁移：%s", DB_PATH)
     conn = sqlite3.connect(str(DB_PATH))
     try:
         migrate_bank_practice_enabled(conn)
         if args.archive_exam:
             archive_exams(conn, args.archive_exam)
+    except Exception as exc:  # noqa: BLE001  迁移脚本需给出明确失败信号
+        logger.exception("[migrate] 迁移失败：%s", exc)
+        sys.exit(1)
     finally:
         conn.close()
     logger.info("[migrate] 迁移完成")

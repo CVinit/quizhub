@@ -10,7 +10,8 @@ import { computed, ref, watch } from 'vue'
 import { useSiteStore } from '@/stores/site'
 
 const props = withDefaults(defineProps<{ size?: number; radius?: number }>(), {
-  size: 30, radius: 6,
+  size: 30,
+  radius: 6,
 })
 
 const site = useSiteStore()
@@ -27,24 +28,42 @@ const char = computed(() => site.logoChar)
 const markStyle = computed(() => ({ width: `${props.size}px`, height: `${props.size}px` }))
 const imgStyle = computed(() => ({ maxWidth: '100%', maxHeight: '100%' }))
 const fallbackStyle = computed(() => ({
-  width: '100%', height: '100%',
+  width: '100%',
+  height: '100%',
   borderRadius: `${props.radius}px`,
   fontSize: `${Math.round(props.size * 0.55)}px`,
 }))
 
-const onErr = () => { failed.value = site.site_logo }
-watch(() => site.site_logo, () => { failed.value = '' })
+const onErr = () => {
+  failed.value = site.site_logo
+}
+watch(
+  () => site.site_logo,
+  () => {
+    failed.value = ''
+  },
+)
 
 // 确保 store 已加载（在未经过 App.vue useTheme 的场景也安全）
 site.load()
 </script>
 
 <style scoped>
-.logo-mark { display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0; }
-.logo-img { object-fit: contain; }
+.logo-mark {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+.logo-img {
+  object-fit: contain;
+}
 .logo-fallback {
-  display: inline-flex; align-items: center; justify-content: center;
-  background: var(--brand-primary); color: #fff;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--brand-primary);
+  color: var(--el-color-white);
   font-weight: 700;
 }
 </style>

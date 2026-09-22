@@ -92,6 +92,12 @@ class CaptchaStore:
         for k in expired:
             del self._store[k]
 
+    def reset(self) -> None:
+        """清空全部验证码（测试隔离用：单例状态会跨用例累积）。"""
+        with self._lock:
+            self._store.clear()
+            self._last_gc = 0.0
+
 
 store = CaptchaStore()
 

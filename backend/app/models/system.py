@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from sqlalchemy import ForeignKey, Integer, String, Text, UniqueConstraint
+from sqlalchemy import ForeignKey, Index, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy.types import JSON
 
@@ -21,13 +21,15 @@ class Setting(PKMixin):
 
 class AuditLog(PKMixin, TimestampMixin):
     __tablename__ = "audit_logs"
+    # 审计表只增不减，而管理端按 created_at 范围过滤 + count，不建索引会退化为全表扫描
+    __table_args__ = (Index("ix_audit_logs_created_at", "created_at"),)
 
     # 审计日志需长期留存以追溯：删除操作者时置空而非级联删除（保留操作痕迹）
     actor: Mapped[int | None] = mapped_column(
         Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
     )
     action: Mapped[str] = mapped_column(String, nullable=False, index=True)
-    target_type: Mapped[str] = mapped_column(String, default="", nullable=False)
+    target_type: Mapped[str] = mapped_column(String, default="", nullable=False, index=True)
     target_id: Mapped[str] = mapped_column(String, default="", nullable=False)
     detail: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     ip: Mapped[str] = mapped_column(String, default="", nullable=False)

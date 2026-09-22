@@ -1,4 +1,4 @@
-import { api } from '@/api/http'
+import { api, downloadBlob } from '@/api/http'
 
 export interface UserItem {
   id: number
@@ -18,6 +18,15 @@ export interface UserPage {
   items: UserItem[]
 }
 
+/** 用户列表查询参数（空值由调用方省略，不传空字符串）。 */
+export interface UserListParams {
+  page?: number
+  page_size?: number
+  keyword?: string
+  role?: UserItem['role']
+  status?: UserItem['status']
+}
+
 export interface UserCreatePayload {
   email: string
   name?: string
@@ -28,6 +37,16 @@ export interface UserCreatePayload {
 }
 
 export type UserCreateResult = UserItem
+
+/**
+ * 用户更新载荷：与后端 UserUpdate（extra="forbid"）逐字段对齐。
+ * 不能用 Partial<UserItem>——那会放行 id/email/status/email_verified/groups，提交即 422。
+ */
+export interface UserUpdatePayload {
+  name?: string
+  role?: UserItem['role']
+  dept_group_id?: number | null
+}
 
 export interface UserImportPreviewRow {
   row_index: number
@@ -55,29 +74,18 @@ export interface UserImportResult {
 }
 
 export const userApi = {
-  list: (params: Record<string, any>) => api.get<UserPage>('/admin/users', { params }),
+  list: (params: UserListParams) => api.get<UserPage>('/admin/users', { params }),
   create: (data: UserCreatePayload) => api.post<UserCreateResult>('/admin/users', data),
-  update: (id: number, data: Partial<UserItem>) => api.put(`/admin/users/${id}`, data),
+  update: (id: number, data: UserUpdatePayload) => api.put(`/admin/users/${id}`, data),
   approve: (id: number) => api.post(`/admin/users/${id}/approve`),
   disable: (id: number) => api.post(`/admin/users/${id}/disable`),
   enable: (id: number) => api.post(`/admin/users/${id}/enable`),
   remove: (id: number) => api.delete(`/admin/users/${id}`),
   resetPassword: (id: number, new_password: string) =>
     api.post<{ success: boolean }>(`/admin/users/${id}/reset-password`, { new_password }),
-  assignGroups: (id: number, group_ids: number[]) =>
-    api.post(`/admin/users/${id}/groups`, { group_ids }),
+  assignGroups: (id: number, group_ids: number[]) => api.post(`/admin/users/${id}/groups`, { group_ids }),
   // 批量导入用户
-  downloadImportTemplate: async () => {
-    const blob = await api.get<Blob>('/admin/users/import/template', { responseType: 'blob' })
-    const url = URL.createObjectURL(blob)
-    const a = document.createElement('a')
-    a.href = url
-    a.download = '用户导入模板.xlsx'
-    document.body.appendChild(a)
-    a.click()
-    document.body.removeChild(a)
-    URL.revokeObjectURL(url)
-  },
+  downloadImportTemplate: () => downloadBlob('/admin/users/import/template', '用户导入模板.xlsx'),
   importPreview: (file: File) => {
     const fd = new FormData()
     fd.append('file', file)

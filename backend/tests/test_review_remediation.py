@@ -20,6 +20,7 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 
 from app.core.email import normalize_email
+from app.core.errors import DomainError
 from app.core.security import hash_password
 from app.database import SessionLocal
 from app.models.exam import ExamDefinition, ExamQuestion
@@ -126,12 +127,12 @@ def test_list_modes_rejects_disabled_bank():
         )
         db.commit()
 
-        with pytest.raises(HTTPException) as exc:
+        with pytest.raises((DomainError, HTTPException)) as exc:
             practice_service.list_modes(db, user.id, bank_id=bank.id)
         assert exc.value.status_code == 403
 
         # 开考接口行为一致，二者不应出现口径差异
-        with pytest.raises(HTTPException) as exc2:
+        with pytest.raises((DomainError, HTTPException)) as exc2:
             practice_service.start_practice(db, user.id, "sequence", None, 10, bank_id=bank.id)
         assert exc2.value.status_code == 403
 

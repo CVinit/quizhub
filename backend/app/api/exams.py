@@ -14,7 +14,8 @@ from app.schemas.exam import (
     ExamAnswerIn,
     ExamCreateIn,
     ExamUpdateIn,
-    MockConfigIn,
+    MockPaperIn,
+    MockStartIn,
     PaperPreviewIn,
     PaperTemplateIn,
     ReviewIn,
@@ -31,9 +32,42 @@ def available(db: Session = Depends(get_db), user: User = Depends(get_current_us
     return exam_service.list_available(db, user)
 
 
+@router.get("/exams/mock/banks")
+def mock_banks(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    """模拟考试可选题库（用户端）。
+
+    只返回「允许用户练习」的题库及各题型题量；模拟考试为练习性质，
+    不得让用户练到已关闭练习的题库。用户需据此自由设置题库范围与题型比例。
+    """
+    return exam_service.mock_banks(db)
+
+
+@router.post("/exams/mock/preview")
+def preview_mock(payload: MockPaperIn, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    """预览模拟考试组卷结果（不落库），供设置对话框实时提示题量与题型分布。"""
+    return exam_service.preview_mock_paper(
+        db,
+        payload.bank_ids,
+        payload.size,
+        payload.type_quota,
+        payload.allocation,
+        payload.objective_only,
+    )
+
+
 @router.post("/exams/mock/start")
-def start_mock(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
-    return exam_service.start_mock_exam(db, user)
+def start_mock(payload: MockStartIn, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    """按用户开考前设置组卷并开考（完全用户自助，后台无模拟考试配置）。"""
+    return exam_service.start_mock_exam(
+        db,
+        user,
+        bank_ids=payload.bank_ids,
+        size=payload.size,
+        type_quota=payload.type_quota,
+        allocation=payload.allocation,
+        objective_only=payload.objective_only,
+        show_analysis=payload.show_analysis,
+    )
 
 
 @router.post("/exams/{exam_id}/start")
@@ -120,6 +154,9 @@ def update_exam(
 ):
     res = exam_service.update_exam(db, exam_id, payload.model_dump(exclude_unset=True), dept_scope_ids(db, user))
     audit_log(db, user.id, "exam.update", "exam", exam_id, payload.model_dump(exclude_unset=True))
+    if res.get("reset"):
+        # 作废作答是破坏性操作，单独留一条可检索的审计记录
+        audit_log(db, user.id, "exam.reset_attempts", "exam", exam_id, res["reset"])
     return res
 
 
@@ -169,17 +206,6 @@ def list_results(
 ):
     """成绩列表。outcome 省略时返回全部（及格/不及格/待复核/已公布）。"""
     return exam_service.list_results(db, exam_id, dept_scope_ids(db, user), limit, outcome)
-
-
-# ---------- 管理端：模拟考试设置（全局配置，仅超级管理员）----------
-@router.get("/admin/mock-config")
-def get_mock_config(db: Session = Depends(get_db), _user: User = Depends(require_super)):
-    return exam_service.get_mock_config_full(db)
-
-
-@router.put("/admin/mock-config")
-def save_mock_config(payload: MockConfigIn, db: Session = Depends(get_db), _user: User = Depends(require_super)):
-    return exam_service.save_mock_config(db, payload.config)
 
 
 # ---------- 管理端：简答复核 ----------

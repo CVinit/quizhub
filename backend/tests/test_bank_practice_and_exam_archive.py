@@ -15,6 +15,7 @@ import pytest
 from fastapi import HTTPException
 from sqlalchemy import select
 
+from app.core.errors import DomainError
 from app.core.security import hash_password
 from app.database import db_session, init_db
 from app.models.exam import ExamDefinition, ExamQuestion
@@ -120,7 +121,7 @@ def test_order_mode_grouped_orders_by_canonical_type():
 def test_order_mode_invalid_rejected():
     init_db()
     with db_session() as db:
-        with pytest.raises(HTTPException) as exc:
+        with pytest.raises((DomainError, HTTPException)) as exc:
             generate_paper(db, {"type_quota": {}, "order_mode": "bogus"})
         assert exc.value.status_code == 400
 
@@ -190,7 +191,7 @@ def test_practice_start_rejects_disabled_bank_explicitly():
         db.add(user)
         db.commit()
 
-        with pytest.raises(HTTPException) as exc:
+        with pytest.raises((DomainError, HTTPException)) as exc:
             practice_service.start_practice(db, user.id, "sequence", None, None, bank_id=bank.id)
         assert exc.value.status_code == 403
 
@@ -285,7 +286,7 @@ def test_answer_rejects_question_from_disabled_bank():
         db.add(user)
         db.commit()
 
-        with pytest.raises(HTTPException) as exc:
+        with pytest.raises((DomainError, HTTPException)) as exc:
             practice_service.answer_question(db, user.id, q.id, "A", "sequence")
         assert exc.value.status_code == 403
         # 未写入任何练习记录
@@ -306,11 +307,11 @@ def test_mark_and_short_eval_reject_disabled_bank():
         db.add(user)
         db.commit()
 
-        with pytest.raises(HTTPException) as exc:
+        with pytest.raises((DomainError, HTTPException)) as exc:
             practice_service.toggle_mark(db, user.id, q.id, True, "")
         assert exc.value.status_code == 403
 
-        with pytest.raises(HTTPException) as exc:
+        with pytest.raises((DomainError, HTTPException)) as exc:
             practice_service.short_eval(db, user.id, q.id, True)
         assert exc.value.status_code == 403
 
@@ -413,7 +414,7 @@ def test_bank_delete_blocked_when_questions_used_by_exam():
         db.add(ExamQuestion(exam_definition_id=e.id, question_id=q.id, seq=0, score=2, shuffle_map=None))
         db.commit()
 
-        with pytest.raises(HTTPException) as exc:
+        with pytest.raises((DomainError, HTTPException)) as exc:
             question_service.delete_bank(db, bank.id, None)
         assert exc.value.status_code == 409
         assert db.get(QuestionBank, bank.id) is not None
@@ -458,7 +459,7 @@ def test_archive_exam_hides_from_users_but_keeps_records():
         db.commit()
 
         # 有作答记录 -> 不能删除
-        with pytest.raises(HTTPException) as exc:
+        with pytest.raises((DomainError, HTTPException)) as exc:
             exam_service.delete_exam(db, e.id, None)
         assert exc.value.status_code == 409
 
@@ -563,6 +564,6 @@ def test_dept_admin_cannot_archive_foreign_exam():
         db.add(e)
         db.commit()
 
-        with pytest.raises(HTTPException) as exc:
+        with pytest.raises((DomainError, HTTPException)) as exc:
             exam_service.archive_exam(db, e.id, {rd.id})
         assert exc.value.status_code == 403

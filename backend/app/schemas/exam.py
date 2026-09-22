@@ -2,15 +2,52 @@
 
 from __future__ import annotations
 
-from typing import Any
+from datetime import datetime
+from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, FiniteFloat, ValidationInfo, field_validator
+from pydantic import BaseModel, ConfigDict, Field, FiniteFloat, ValidationInfo, field_validator, model_validator
+
+from app.core.limits import validate_answer_size
+from app.core.timeutil import business_tz
+
+
+def _parse_exam_time(value: str, field_name: str) -> datetime:
+    """解析考试时段字符串为带时区的 datetime。
+
+    无偏移值来自管理端日期选择器（value-format 不带时区），语义是**业务本地时间**，
+    与 `exam.common._parse_time` 保持同一口径；无法解析则抛 ValueError（→ 422）。
+    """
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        raise ValueError(f"{field_name} 必须是 ISO-8601 时间（如 2026-09-18T09:00）") from None
+    return parsed.replace(tzinfo=business_tz()) if parsed.tzinfo is None else parsed
+
+
+def _validated_exam_time(value: str | None, field_name: str | None) -> str | None:
+    if value is None or value == "":
+        return value
+    _parse_exam_time(value, field_name or "时间")
+    return value
+
+
+def _validate_window(start_at: str | None, end_at: str | None) -> None:
+    """成对出现时校验先后顺序；单侧由服务层结合库中另一侧校验。"""
+    if not start_at or not end_at:
+        return
+    if _parse_exam_time(end_at, "end_at") <= _parse_exam_time(start_at, "start_at"):
+        raise ValueError("考试结束时间必须晚于开始时间")
 
 
 class ExamAnswerIn(BaseModel):
     question_id: int
     answer: Any = None
     version: int = Field(ge=1)
+
+    @field_validator("answer")
+    @classmethod
+    def _limit_answer_size(cls, value: Any) -> Any:
+        return validate_answer_size(value)
 
 
 class ExamCreateIn(BaseModel):
@@ -24,11 +61,21 @@ class ExamCreateIn(BaseModel):
     start_at: str | None = None
     end_at: str | None = None
     duration_min: int = Field(90, ge=1, le=1440)
-    pass_score: FiniteFloat = Field(60, ge=0)
+    pass_score: FiniteFloat = Field(60, ge=0, le=100)
     max_attempts: int = Field(0, ge=0)
     show_score_immediately: bool = True
     show_analysis: bool = False
     need_review: bool = False
+
+    @field_validator("start_at", "end_at")
+    @classmethod
+    def _check_time_format(cls, value: str | None, info: ValidationInfo) -> str | None:
+        return _validated_exam_time(value, info.field_name)
+
+    @model_validator(mode="after")
+    def _check_time_window(self) -> ExamCreateIn:
+        _validate_window(self.start_at, self.end_at)
+        return self
 
 
 class ExamUpdateIn(BaseModel):
@@ -45,14 +92,17 @@ class ExamUpdateIn(BaseModel):
     group_ids: list[int] | None = None
     start_at: str | None = None
     end_at: str | None = None
-    duration_min: int | None = Field(None, ge=1)
-    pass_score: FiniteFloat | None = Field(None, ge=0)
+    duration_min: int | None = Field(None, ge=1, le=1440)
+    pass_score: FiniteFloat | None = Field(None, ge=0, le=100)
     max_attempts: int | None = Field(None, ge=0)
     show_score_immediately: bool | None = None
     show_analysis: bool | None = None
     need_review: bool | None = None
     manual_questions: list[int] | None = None
     paper_template_id: int | None = None
+    # 组卷来源（rules/manual_questions/paper_template_id）变更且该考试已有作答时，
+    # 必须显式传 true 才会作废旧作答并重新固化；否则服务端返回 409 影响面提示。
+    confirm_reset: bool = False
 
     @field_validator("duration_min", "pass_score", "max_attempts", mode="before")
     @classmethod
@@ -69,6 +119,17 @@ class ExamUpdateIn(BaseModel):
         if v is None or not isinstance(v, dict):
             raise ValueError("rules 必须是对象")
         return v
+
+    @field_validator("start_at", "end_at")
+    @classmethod
+    def _check_time_format(cls, value: str | None, info: ValidationInfo) -> str | None:
+        return _validated_exam_time(value, info.field_name)
+
+    @model_validator(mode="after")
+    def _check_time_window(self) -> ExamUpdateIn:
+        # 只校验同时提交的两侧；单侧更新由 exam/admin._validate_exam_window 结合库中值校验
+        _validate_window(self.start_at, self.end_at)
+        return self
 
 
 class PaperTemplateIn(BaseModel):
@@ -103,12 +164,50 @@ class PaperPreviewIn(BaseModel):
         return self.model_dump(exclude_none=True)
 
 
+class MockPaperIn(BaseModel):
+    """模拟考试组卷设置（预览与开考共用）。
+
+    模拟考试为完全用户自助：题库范围、题量、题型比例均由用户开考前指定，
+    后台不再提供模拟考试配置。所有字段可选并带默认值，缺省即"全库 / 30 题 / 自动分配"。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    bank_ids: list[int] | None = None
+    size: int | None = Field(None, ge=1)
+    type_quota: dict[str, int] | None = None
+    allocation: str = Field("auto", pattern="^(auto|manual)$")
+    objective_only: bool = False
+
+    @field_validator("type_quota")
+    @classmethod
+    def _check_quota(cls, v: dict[str, int] | None) -> dict[str, int] | None:
+        """题型数量必须是非负整数；题型名白名单在服务层校验（与 QUESTION_TYPES 同源）。"""
+        if v is None:
+            return None
+        for key, num in v.items():
+            if isinstance(num, bool) or not isinstance(num, int) or num < 0:
+                raise ValueError(f"题型数量必须是非负整数：{key}")
+        return v
+
+    @field_validator("bank_ids")
+    @classmethod
+    def _check_bank_ids(cls, v: list[int] | None) -> list[int] | None:
+        if v is None:
+            return None
+        for bid in v:
+            if isinstance(bid, bool) or not isinstance(bid, int) or bid <= 0:
+                raise ValueError("题库 id 必须是正整数")
+        return v
+
+
+class MockStartIn(MockPaperIn):
+    """模拟考试开考入参：在组卷设置基础上增加交卷后是否回显解析。"""
+
+    show_analysis: bool = True
+
+
 class ReviewIn(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    verdict: str  # pass/fail/partial
+    verdict: Literal["pass", "fail", "partial"]
     partial_score: FiniteFloat | None = Field(None, ge=0)
-
-
-class MockConfigIn(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    config: dict
