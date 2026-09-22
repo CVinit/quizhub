@@ -200,13 +200,7 @@ export const examApi = {
   previewMock: (spec: Omit<MockPaperSpec, 'show_analysis'>) => api.post<MockPreview>('/exams/mock/preview', spec),
   startMock: (spec: MockPaperSpec) => api.post<ExamSessionDetail>('/exams/mock/start', spec),
   start: (examId: number) => api.post<ExamSessionDetail>(`/exams/${examId}/start`),
-  answer: (
-    sid: number,
-    question_id: number,
-    answer: QuestionAnswer,
-    version: number,
-    opts?: { quiet?: boolean },
-  ) =>
+  answer: (sid: number, question_id: number, answer: QuestionAnswer, version: number, opts?: { quiet?: boolean }) =>
     api.post<{ version: number }>(
       `/exams/session/${sid}/answer`,
       { question_id, answer, version },

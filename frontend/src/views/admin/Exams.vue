@@ -463,11 +463,11 @@ const onUnarchive = async (row: ExamBrief) => {
  * publish-results 接口从未被调用，成绩无从发布。
  */
 const onPublishResults = async (row: ExamBrief) => {
-  const ok = await confirmBox(
-    `确认公布「${row.name}」的成绩？公布后考生可见本人得分与是否通过。`,
-    '公布成绩',
-    { confirmButtonText: '公布', cancelButtonText: '取消', type: 'warning' },
-  )
+  const ok = await confirmBox(`确认公布「${row.name}」的成绩？公布后考生可见本人得分与是否通过。`, '公布成绩', {
+    confirmButtonText: '公布',
+    cancelButtonText: '取消',
+    type: 'warning',
+  })
   if (!ok) return
   try {
     await examApi.publishResults(row.id)

@@ -470,17 +470,17 @@ onBeforeRouteLeave(async () => {
   if (submitted.value) return true
   await flushCurrentAnswer()
   if (unsavedCount.value > 0) {
-    return confirmBox(
-      `还有 ${unsavedCount.value} 题未能保存，离开后这些作答会丢失。确定离开吗？`,
-      '离开考试',
-      { type: 'warning', confirmButtonText: '仍然离开', cancelButtonText: '继续作答' },
-    )
+    return confirmBox(`还有 ${unsavedCount.value} 题未能保存，离开后这些作答会丢失。确定离开吗？`, '离开考试', {
+      type: 'warning',
+      confirmButtonText: '仍然离开',
+      cancelButtonText: '继续作答',
+    })
   }
-  return confirmBox(
-    '考试尚未交卷。已保存的作答可稍后继续（计时不停）。确定离开吗？',
-    '离开考试',
-    { type: 'warning', confirmButtonText: '离开', cancelButtonText: '继续作答' },
-  )
+  return confirmBox('考试尚未交卷。已保存的作答可稍后继续（计时不停）。确定离开吗？', '离开考试', {
+    type: 'warning',
+    confirmButtonText: '离开',
+    cancelButtonText: '继续作答',
+  })
 })
 
 // 浏览器关闭/刷新提示
