@@ -1,4 +1,4 @@
-# 培训考试平台 一键启动（Windows / PowerShell）
+﻿# 培训考试平台 一键启动（Windows / PowerShell）
 # 等价于 start.sh。需预装：Python 3.10+、uv、Node.js 18+、pnpm（或 npm）。
 #
 # 用法：

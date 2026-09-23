@@ -1,4 +1,4 @@
-# 培训考试平台 一键启动（使用项目内嵌 Python，无需 uv / 系统 Python / 虚拟环境）
+﻿# 培训考试平台 一键启动（使用项目内嵌 Python，无需 uv / 系统 Python / 虚拟环境）
 #
 # 用法：
 #   PowerShell：  ./start-embed.ps1
@@ -37,14 +37,24 @@ Get-Content -LiteralPath $keyFile | ForEach-Object {
     }
 }
 
+# 运行时必需的依赖（pyproject 之外还需 tzdata，否则内嵌 Python 无法解析
+# Asia/Shanghai 时区，业务时间会静默回退 UTC 导致整体偏移 8 小时）
+$extraDeps = @("tzdata")
+
 Write-Host "[1/4] 检查后端依赖..."
-& $py -c "import fastapi, uvicorn, sqlalchemy, pydantic, jose, bcrypt, openpyxl, cryptography, email_validator" 2>$null
+& $py -c "import fastapi, uvicorn, sqlalchemy, pydantic, pydantic_settings, jose, bcrypt, multipart, openpyxl, cryptography, email_validator, tzdata" 2>$null
 if ($LASTEXITCODE -ne 0) {
     Write-Host "        依赖缺失，正在从 PyPI 安装到内嵌目录（首次较慢）..."
     $depsJson = & $py -c "import sys,tomllib;print(' '.join(tomllib.load(open(sys.argv[1],'rb'))['project']['dependencies']))" (Join-Path $backend "pyproject.toml")
-    $deps = @($depsJson -split '\s+' | Where-Object { $_ })
+    $deps = @($depsJson -split '\s+' | Where-Object { $_ }) + $extraDeps
     & $py -m pip install --no-warn-script-location @deps
     if ($LASTEXITCODE -ne 0) { Write-Host "[错误] 后端依赖安装失败" -ForegroundColor Red; exit 1 }
+} else {
+    # 即便核心依赖齐全，也确保 tzdata 已就位（早期版本可能缺失）
+    & $py -c "import tzdata" 2>$null
+    if ($LASTEXITCODE -ne 0) {
+        & $py -m pip install --no-warn-script-location @extraDeps
+    }
 }
 
 Write-Host "[2/4] 准备前端静态资源..."
