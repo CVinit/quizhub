@@ -17,6 +17,7 @@ from app.schemas.question import (
     QuestionBankOut,
     QuestionBankUpdate,
     QuestionCreate,
+    QuestionListOut,
     QuestionOut,
     QuestionUpdate,
 )
@@ -77,7 +78,7 @@ def delete_bank(bank_id: int, db: Session = Depends(get_db), user: User = Depend
 
 
 # ---------- 题目 CRUD ----------
-@router.get("/questions")
+@router.get("/questions", response_model=QuestionListOut)
 def list_questions(
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),

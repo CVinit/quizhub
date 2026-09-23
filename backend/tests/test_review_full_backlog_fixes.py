@@ -351,7 +351,7 @@ def test_malformed_zip_is_rejected_as_value_error():
     with pytest.raises(ValueError):
         excel_utils.parse_workbook(BytesIO(content))
     with pytest.raises(ValueError):
-        user_excel.preview(None, content, 1)
+        user_excel.preview(content, 1)
 
 
 # ---------- C5 单次解析 ----------

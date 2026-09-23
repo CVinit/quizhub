@@ -275,7 +275,7 @@ def test_user_preview_peek_then_consume_survives_role_rejection():
         admin = _mk_user(db, "super_admin")
         db.commit()
         content = user_excel.build_template().getvalue()
-        preview = user_excel.preview(db, content, user_id=admin.id)
+        preview = user_excel.preview(content, user_id=admin.id)
         token = preview["confirm_token"]
 
         # 路由先 peek 做角色校验（此模板含部门管理员行）——peek 不消费
@@ -327,7 +327,7 @@ def test_user_preview_rejects_email_with_newline():
         admin = _mk_user(db, "super_admin")
         db.commit()
         content = _user_workbook([["a@example.com\nBcc: evil@example.com", "甲", "普通用户", "pass1234", "正常", ""]])
-        preview = user_excel.preview(db, content, user_id=admin.id)
+        preview = user_excel.preview(content, user_id=admin.id)
         assert preview["valid_count"] == 0
         assert any("换行" in item["error"] for item in preview["errors"])
 

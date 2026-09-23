@@ -9,13 +9,12 @@ from __future__ import annotations
 
 import uuid
 from io import BytesIO
-from typing import Any
+from typing import Any, TypedDict
 
 from fastapi import status
 from openpyxl import Workbook
 from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
-from sqlalchemy.orm import Session
 
 from app.core.email import normalize_email
 from app.core.errors import DomainError
@@ -24,6 +23,15 @@ from app.core.security import hash_password
 from app.utils.excel import MAX_CELL_CHARS, headers_match, open_workbook, validate_workbook_archive
 
 HEADERS = ["邮箱", "姓名", "角色", "初始密码", "状态", "分组ID"]
+
+
+class UserRowError(TypedDict):
+    """用户导入预览的错误项（行号 + 邮箱 + 文案）。"""
+
+    row: int
+    email: str
+    error: str
+
 
 # 角色中文 → 英文，便于导入时归一化
 ROLE_CN = {
@@ -183,7 +191,7 @@ def _parse_row(row: tuple, r_idx: int) -> dict:
     }
 
 
-def preview(db: Session, content: bytes, user_id: int) -> dict:
+def preview(content: bytes, user_id: int) -> dict:
     """解析上传工作簿，暂存有效行，返回预览 + confirm_token。
 
     user_id 必传：预览条目与之绑定，确认导入时校验调用者一致（防 IDOR）。
@@ -192,7 +200,7 @@ def preview(db: Session, content: bytes, user_id: int) -> dict:
     buf = BytesIO(content)
     wb = open_workbook(buf)
     rows: list[dict] = []
-    errors: list[dict] = []
+    errors: list[UserRowError] = []
     truncated = False
     try:
         if "用户" in wb.sheetnames:

@@ -7,7 +7,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, FiniteFloat, ValidationInfo, field_validator, model_validator
 
-from app.core.limits import MAX_ID_LIST_LEN, validate_answer_size
+from app.core.limits import MAX_ID_LIST_LEN, validate_answer_size, validate_json_size
 from app.core.timeutil import business_tz
 from app.schemas._patch import reject_explicit_null
 
@@ -73,6 +73,12 @@ class ExamCreateIn(BaseModel):
     def _check_time_format(cls, value: str | None, info: ValidationInfo) -> str | None:
         return _validated_exam_time(value, info.field_name)
 
+    @field_validator("rules")
+    @classmethod
+    def _limit_rules_size(cls, value: dict) -> dict:
+        """组卷配置也是可写 JSON blob：限制体积，避免任意大对象落库。"""
+        return validate_json_size(value, label="rules")
+
     @model_validator(mode="after")
     def _check_time_window(self) -> ExamCreateIn:
         _validate_window(self.start_at, self.end_at)
@@ -127,10 +133,10 @@ class ExamUpdateIn(BaseModel):
     @field_validator("rules", mode="before")
     @classmethod
     def _rules_must_be_object(cls, v: Any) -> Any:
-        """rules 必须是对象（组卷配置）；拒绝 null/数组等非对象值。"""
+        """rules 必须是对象（组卷配置）；拒绝 null/数组等非对象值，并限制体积。"""
         if v is None or not isinstance(v, dict):
             raise ValueError("rules 必须是对象")
-        return v
+        return validate_json_size(v, label="rules")
 
     @field_validator("start_at", "end_at")
     @classmethod
@@ -150,6 +156,12 @@ class PaperTemplateIn(BaseModel):
     mode: str = Field("mock", pattern="^(mock|formal)$")
     config: dict
     group_ids: list[int] | None = Field(None, max_length=MAX_ID_LIST_LEN)
+
+    @field_validator("config")
+    @classmethod
+    def _limit_config_size(cls, value: dict) -> dict:
+        """模板配置同样是可写 JSON blob：限制体积。"""
+        return validate_json_size(value, label="config")
 
 
 class PaperPreviewIn(BaseModel):

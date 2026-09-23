@@ -315,7 +315,7 @@ def test_user_preview_hashes_distinct_passwords_once_and_reports_long_password()
                 ["c@example.com", "丙", "普通用户", "x" * 80, "正常", ""],
             ]
         )
-        preview = user_excel.preview(db, content, user_id=admin.id)
+        preview = user_excel.preview(content, user_id=admin.id)
         # 超长口令是行级错误，不应让整份预览 400
         assert preview["valid_count"] == 2
         assert any("72" in item["error"] for item in preview["errors"])

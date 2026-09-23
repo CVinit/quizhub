@@ -19,14 +19,14 @@ from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
 from openpyxl.utils.exceptions import InvalidFileException
 
-from app.schemas.question import UploadPreview, UploadPreviewRow
+from app.schemas.question import RowError, UploadPreview, UploadPreviewRow
 
 # openpyxl 在「合法 zip 但非工作簿」时抛出的异常集合。这些都不是 ValueError，
 # 路由只捕获 ValueError → 会变成 500，因此统一包装。
 _WORKBOOK_OPEN_ERRORS = (KeyError, OSError, BadZipFile, InvalidFileException, ParseError)
 
 
-def open_workbook(buf: BytesIO):
+def open_workbook(buf: BytesIO) -> Workbook:
     """打开 xlsx 工作簿，并把 openpyxl 的解析异常统一转换为 ValueError。
 
     `validate_workbook_archive` 只校验 zip 结构与解压体积：一个合法 zip 若缺少
@@ -226,7 +226,7 @@ def parse_workbook(buf: BytesIO) -> UploadPreview:
     buf.seek(0)
     wb = open_workbook(buf)
     rows: list[UploadPreviewRow] = []
-    errors: list[dict] = []
+    errors: list[RowError] = []
     type_dist: dict[str, int] = {}
 
     matched_sheet = False

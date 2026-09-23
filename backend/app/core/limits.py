@@ -17,9 +17,39 @@ MAX_ANSWER_BYTES = 16 * 1024
 # 且 `RegisterIn.group_ids` 走公开注册接口（无需登录）。超限由 Pydantic 拦成 422。
 MAX_ID_LIST_LEN = 200
 
+# 单个 JSON 字段（组卷 rules、题目 options/left_items/right_items/answer）的体积上限。
+# 作答路径已有 16KB 上限，但题库创建/考试规则此前无任何限制：可写入任意大的 JSON blob，
+# 造成 SQLite 体积膨胀与后续读取的内存峰值。
+MAX_JSON_BYTES = 64 * 1024
+
+# 单条系统设置值的字符上限与单次提交的设置项数量上限（防止把设置表当存储用）
+MAX_SETTING_VALUE_CHARS = 4096
+MAX_SETTING_KEYS = 50
+
 # 练习作答属于高频核心操作，限流阈值只用于兜底防刷，不能影响正常刷题节奏。
 PRACTICE_ANSWER_LIMIT = 600
 PRACTICE_ANSWER_WINDOW_SEC = 300
+
+
+def validate_json_size(value: Any, *, label: str = "内容", limit_bytes: int = MAX_JSON_BYTES) -> Any:
+    """校验任意可序列化值的 JSON 体积；超限抛 ValueError（由 Pydantic 转成 422）。
+
+    Args:
+        value: 待校验的值（None 直接放行）。
+        label: 错误文案中的字段名。
+        limit_bytes: 允许的最大字节数。
+
+    Returns:
+        原值。
+
+    Raises:
+        ValueError: 序列化后超过 `limit_bytes`。
+    """
+    if value is None:
+        return value
+    if len(json.dumps(value, ensure_ascii=False).encode("utf-8")) > limit_bytes:
+        raise ValueError(f"{label}不能超过 {limit_bytes // 1024}KB")
+    return value
 
 
 def validate_answer_size(value: Any) -> Any:

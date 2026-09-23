@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, TypedDict
 
 from pydantic import BaseModel, ConfigDict, Field, FiniteFloat, ValidationInfo, field_validator
 
-from app.core.limits import MAX_ID_LIST_LEN
+from app.core.limits import MAX_ID_LIST_LEN, validate_json_size
 from app.schemas._patch import reject_explicit_null
 
 
@@ -72,6 +72,12 @@ class QuestionCreate(BaseModel):
     score: FiniteFloat = Field(2, ge=0)
     group_id: int | None = None
 
+    @field_validator("options", "left_items", "right_items", "answer")
+    @classmethod
+    def _limit_json_size(cls, v: Any, info: ValidationInfo) -> Any:
+        """限制单个 JSON 字段体积（见 core.limits.MAX_JSON_BYTES）。"""
+        return validate_json_size(v, label=str(info.field_name))
+
 
 class QuestionUpdate(BaseModel):
     """题目更新入参（PATCH 语义：未传字段不修改）。
@@ -96,11 +102,29 @@ class QuestionUpdate(BaseModel):
     score: FiniteFloat | None = Field(None, ge=0)
     group_id: int | None = None
 
+    @field_validator("options", "left_items", "right_items", "answer")
+    @classmethod
+    def _limit_json_size(cls, v: Any, info: ValidationInfo) -> Any:
+        """限制单个 JSON 字段体积（见 core.limits.MAX_JSON_BYTES）。"""
+        return validate_json_size(v, label=str(info.field_name))
+
     @field_validator("question", "analysis", "difficulty", "score", mode="before")
     @classmethod
     def _reject_explicit_null(cls, v: Any, info: ValidationInfo) -> Any:
         """这些字段对应 NOT NULL 列，拒绝显式 null，避免落库时 500。"""
         return reject_explicit_null(v, info)
+
+
+class RowError(TypedDict):
+    """Excel 解析错误项（与前端预览表格的列约定一致）。
+
+    定义在 schemas 层供 `utils/excel.py` 复用：utils 依赖 schemas（UploadPreview*），
+    反向 import 会成环。
+    """
+
+    sheet: str
+    row: int
+    error: str
 
 
 class UploadPreviewRow(BaseModel):
@@ -123,7 +147,7 @@ class UploadPreview(BaseModel):
     rows: list[UploadPreviewRow]
     total: int
     type_dist: dict[str, int]
-    errors: list[dict]
+    errors: list[RowError]
     # 完整解析结果（内部使用）。`rows` 只是给前端的 20 行预览切片；导入必须用这份
     # 完整数据，避免消费方重新解析同一份字节流而产生"两次解析口径不一致"的缺陷。
     # exclude=True：即使被当作 response_model 也不会出现在响应里（防响应体膨胀）。
@@ -133,3 +157,16 @@ class UploadPreview(BaseModel):
 class UploadImportResult(BaseModel):
     success: int
     failed: int
+
+
+class QuestionListOut(BaseModel):
+    """题目分页列表响应。
+
+    列表接口此前直接返回 ORM 实例（无 response_model）：字段集随模型演进自动变化，
+    与同文件 create/update 受 `QuestionOut` 约束的做法不一致。
+    """
+
+    total: int
+    page: int
+    page_size: int
+    items: list[QuestionOut]

@@ -188,7 +188,7 @@ def test_user_template_preview_and_consume_strips_plaintext_password():
         db.commit()
 
         content = user_excel.build_template().getvalue()
-        preview = user_excel.preview(db, content, user_id=admin.id)
+        preview = user_excel.preview(content, user_id=admin.id)
 
         # 模板首行示例口令为空 → invalid；次行为部门管理员
         assert preview["valid_count"] == 1
@@ -222,7 +222,7 @@ def test_user_excel_row_validation_errors(row, expected_error):
         db.commit()
 
         content = _user_workbook([row])
-        preview = user_excel.preview(db, content, user_id=admin.id)
+        preview = user_excel.preview(content, user_id=admin.id)
 
         assert preview["valid_count"] == 0
         assert len(preview["errors"]) == 1
@@ -236,7 +236,7 @@ def test_user_excel_normalizes_role_status_and_group_ids():
         db.commit()
 
         content = _user_workbook([["a@example.com", "甲", "部门管理员", "Abc12345", "待审批", "3，5, 999999"]])
-        preview = user_excel.preview(db, content, user_id=admin.id)
+        preview = user_excel.preview(content, user_id=admin.id)
         rows = user_excel.consume_preview(preview["confirm_token"], admin.id)
 
         assert rows[0]["role"] == "dept_admin"
@@ -261,7 +261,7 @@ def test_user_excel_preview_guards_unknown_token_and_owner():
         assert unknown.value.status_code == 400
 
         content = _user_workbook([["b@example.com", "乙", "普通用户", "Abc12345", "正常", ""]])
-        preview = user_excel.preview(db, content, user_id=admin.id)
+        preview = user_excel.preview(content, user_id=admin.id)
         with pytest.raises((DomainError, HTTPException)) as idor:
             user_excel.consume_preview(preview["confirm_token"], admin.id + 999)
         assert idor.value.status_code == 403
@@ -273,4 +273,4 @@ def test_user_excel_rejects_invalid_archive():
         admin = _admin(db)
         db.commit()
         with pytest.raises(ValueError):
-            user_excel.preview(db, b"definitely-not-xlsx", user_id=admin.id)
+            user_excel.preview(b"definitely-not-xlsx", user_id=admin.id)

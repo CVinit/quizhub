@@ -223,7 +223,7 @@ async def import_preview(
         # 解析 xlsx 并对每行做 bcrypt（单次约 300ms，行数上限 5000）是纯 CPU 工作：
         # 直接在 async 路由内调用会独占事件循环数分钟，阻塞所有并发请求。
         # 丢进线程池执行，保持事件循环可用。
-        return await run_in_threadpool(user_excel.preview, db, content, user.id)
+        return await run_in_threadpool(user_excel.preview, content, user.id)
     except ValueError as exc:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
 

@@ -197,7 +197,7 @@ def test_user_preview_marks_truncation(monkeypatch):
             ["b@quizhub.com", "乙", "普通用户", "pw123456", "正常", ""],
         ]
     )
-    preview = user_excel.preview(None, content, user_id=1)
+    preview = user_excel.preview(content, user_id=1)
     assert preview["truncated"] is True
     assert preview["valid_count"] == 1
     assert any("上限" in item["error"] for item in preview["errors"])
@@ -210,7 +210,7 @@ def test_user_preview_reports_missing_sheet():
     buf = BytesIO()
     wb.save(buf)
 
-    preview = user_excel.preview(None, buf.getvalue(), user_id=1)
+    preview = user_excel.preview(buf.getvalue(), user_id=1)
     assert preview["valid_count"] == 0
     assert any("用户" in item["error"] for item in preview["errors"])
 
