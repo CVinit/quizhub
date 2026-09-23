@@ -179,11 +179,33 @@ def register(
 
 
 def _consume_code(db: Session, email: str, code: str) -> bool:
-    ev = _latest_unused(db, email)
-    if not ev or datetime.fromisoformat(ev.expire_at) < datetime.now(timezone.utc):
+    """按 (email, code) 消费验证码；失败计数记在「被尝试的那条」上。
+
+    原实现只看最新一条：用户先收到验证码 A、又请求到 B、却输入 A 时，被消耗的是 B 的
+    5 次尝试机会，而 A 永远不可用。这里按提交的验证码定位待用记录。
+    """
+    ev = (
+        db.execute(
+            select(EmailVerification)
+            .where(
+                EmailVerification.email == email,
+                EmailVerification.code == code,
+                EmailVerification.used == False,  # noqa: E712
+                EmailVerification.attempts < MAX_VERIFY_ATTEMPTS,
+            )
+            .order_by(EmailVerification.id.desc())
+        )
+        .scalars()
+        .first()
+    )
+    if ev is None:
+        # 没有匹配的待用验证码：把失败记到最新一条待用记录上（限制穷举次数），
+        # 但不消费它 —— 用户仍可用正确的验证码完成注册。
+        latest = _latest_unused(db, email)
+        if latest is not None:
+            _record_code_failure(db, latest.id)
         return False
-    if ev.code != code:
-        _record_code_failure(db, ev.id)
+    if datetime.fromisoformat(ev.expire_at) < datetime.now(timezone.utc):
         return False
     consumed = cast(
         CursorResult,

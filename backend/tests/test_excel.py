@@ -110,3 +110,11 @@ def test_parse_fill_row():
     result = parse_workbook(buf)
     assert result.total == 1
     assert result.rows[0].type == "填空题"
+
+
+def test_parse_options_supports_pipe_separator():
+    """单行用 | 分隔（无 A. 前缀）时按 | 拆分：原实现把判断放在「结果非空」之后，分支不可达。"""
+    from app.utils.excel import _parse_options
+
+    assert _parse_options("甲|乙") == ["甲", "乙"]
+    assert _parse_options("A.甲\nB.乙") == ["甲", "乙"]

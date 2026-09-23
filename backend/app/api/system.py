@@ -211,6 +211,9 @@ def update_settings(payload: SettingsUpdateIn, db: Session = Depends(get_db), us
         system_service.update_settings(db, payload.category, payload.updates)
     except ValueError as exc:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
+    except RuntimeError as exc:
+        # 未配置 TRAINING_ENC_KEY 时保存加密设置会抛 RuntimeError：给可操作提示而不是 500
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, str(exc)) from exc
     audit_log(db, user.id, "settings.update", "setting", payload.category, {"keys": list(payload.updates.keys())})
     return {"success": True}
 

@@ -248,3 +248,21 @@ def test_upload_preview_rejects_overlong_bank_name(api):
     files = {"file": ("q.xlsx", buf.getvalue(), "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")}
     resp = api.post("/api/admin/upload/preview", files=files, data={"bank_name": "库" * 101}, headers=headers)
     assert resp.status_code == 422, resp.text
+
+
+# ---------- 8. 未配置 ENC_KEY 时保存加密设置 ----------
+def test_settings_save_without_enc_key_returns_503(api):
+    """未配置 TRAINING_ENC_KEY 时保存敏感设置给 503 + 可操作提示，而不是 500。"""
+    init_db()
+    with db_session() as db:
+        admin = _mk_user(db, "enc@quizhub.com")
+        db.commit()
+        headers = _headers(admin)
+
+    resp = api.put(
+        "/api/system/settings",
+        headers=headers,
+        json={"category": "smtp", "updates": {"smtp_password": "secret"}},
+    )
+    assert resp.status_code == 503, resp.text
+    assert "TRAINING_ENC_KEY" in resp.json()["detail"]

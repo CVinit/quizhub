@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import secrets
+from datetime import datetime, timedelta, timezone
 
 import pytest
 from fastapi import BackgroundTasks, HTTPException
@@ -337,3 +338,32 @@ def test_change_password_bumps_token_version():
         db.refresh(user)
         assert user.token_version == before + 1
         assert verify_password("newpass1", user.password_hash)
+
+
+def test_consume_code_uses_submitted_code():
+    """先发 A 再发 B，提交 A 应消费 A。
+
+    原实现只看最新一条：A 永远不可用，且错误提交会消耗 B 的尝试次数（用户被迫重新获取验证码）。
+    """
+    init_db()
+    with db_session() as db:
+        email = "code@quizhub.com"
+        expire = (datetime.now(timezone.utc) + timedelta(minutes=5)).isoformat()
+        first = EmailVerification(email=email, code="111111", expire_at=expire)
+        second = EmailVerification(email=email, code="222222", expire_at=expire)
+        db.add_all([first, second])
+        db.commit()
+        first_id, second_id = first.id, second.id
+
+        assert auth_service._consume_code(db, email, "111111") is True
+        db.expire_all()
+        assert db.get(EmailVerification, first_id).used is True
+        assert db.get(EmailVerification, second_id).used is False
+
+        # 错误验证码：失败计数记在最新一条待用记录上，且不消费它
+        assert auth_service._consume_code(db, email, "999999") is False
+        db.expire_all()
+        assert db.get(EmailVerification, second_id).attempts == 1
+        assert db.get(EmailVerification, second_id).used is False
+        # 正确的验证码仍可用（失败计数不会让用户失去这次机会）
+        assert auth_service._consume_code(db, email, "222222") is True

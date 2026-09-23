@@ -56,15 +56,6 @@ _DECOMPRESS_CHUNK = 1 << 20
 MAX_CELL_CHARS = 10000
 # 模板内置示例行的题干前缀：解析时跳过，避免用户不删示例行就把示例题当真实题目导入。
 EXAMPLE_PREFIX = "【示例】"
-TYPE_TO_SHEET = {
-    "单选题": "单选题",
-    "多选题": "多选题",
-    "判断题": "判断题",
-    "填空题": "填空题",
-    "简答题": "简答题",
-    "拖拽题": "拖拽题",
-}
-
 # 各 Sheet 表头
 HEADERS = {
     "单选题": ["题干", "选项", "答案", "解析", "难度", "知识点标签", "分值", "所属分组ID"],
@@ -444,18 +435,21 @@ def _parse_row(sheet_name: str, row: tuple, r_idx: int) -> UploadPreviewRow:
 
 
 def _parse_options(text: str) -> list[str]:
-    """解析 'A.xxx\\nB.xxx' 或 'xxx|yyy' 为列表。"""
+    """解析 'A.xxx\nB.xxx' 或 'xxx|yyy' 为列表。
+
+    单行且用 `|` 分隔（无 `A.` 前缀）时按 `|` 拆分：原实现把该判断放在「结果非空」之后，
+    分支永远不可达，`甲|乙` 会被当成一个含竖线的选项（docstring 承诺的行为不生效）。
+    """
     text = text.replace("\\n", "\n")
     parts = [p.strip() for p in text.split("\n") if p.strip()]
+    if len(parts) == 1 and "|" in parts[0]:
+        return [p.strip() for p in parts[0].split("|") if p.strip()]
     result: list[str] = []
     for p in parts:
         if len(p) >= 2 and p[0].isalpha() and p[1] in ".、:：":
             result.append(p[2:].strip())
         else:
             result.append(p)
-    # 若没有 A. 前缀且用 | 分隔
-    if not result and "|" in text:
-        result = [p.strip() for p in text.split("|") if p.strip()]
     return result
 
 
