@@ -5,7 +5,7 @@
 > 基线提交：`main` @ `c9b59f5`（审查前工作区干净）
 > 审查方式：core/api/schema 人工逐行 + services/utils 分 8 片并行深审 + 测试覆盖映射；
 > 关键结论用仓库自带 `.venv` + 隔离临时库实弹复现（脚本为临时文件，未入库）
-> 整改状态：**16 项已落地**（第二节）+ 3 条产品决策已执行（第三节），全部改动均补回归测试并通过门禁
+> 整改状态：**17 项已落地**（第二节）+ 3 条产品决策已执行（第三节），全部改动均补回归测试并通过门禁
 
 ---
 
@@ -13,8 +13,8 @@
 
 - 分片代理原始结论：**59** 条（P0 12 / P1 31 / P2 16）；另有 schemas+api 补充 14 条（第六节）、测试覆盖 15 条（第五节）。
 - 本轮人工复核：**25** 条（实弹复现或逐行源码确认，见各条「复核」标注）。
-- 本轮已落地：**16 项修复**（第二节）+ **3 条产品决策**（第三节）+ 1 个数据迁移脚本；新增回归测试 39 例（`test_review_2026_09_23_fixes.py` 26、`test_review_2026_09_23_p1_fixes.py` 7、`test_mock_cleanup_and_rank_removal.py` 5、`test_stats_refresh_locking.py` +1）；随排行榜下线移除 11 例。
-- 待处理：**0 项**（3.1 的口径问题已随本轮修复；3.2 为可选清理建议）。
+- 本轮已落地：**17 项修复**（第二节）+ **3 条产品决策**（第三节）+ 1 个数据迁移脚本；新增回归测试 52 例（`test_review_2026_09_23_fixes.py` 26、`test_http_auth_rate_limit_and_concurrency.py` 13、`test_review_2026_09_23_p1_fixes.py` 7、`test_mock_cleanup_and_rank_removal.py` 5、`test_stats_refresh_locking.py` +1）；随排行榜下线移除 11 例。
+- 待处理：**0 项**（3.1 的口径问题已修复；3.2 与第五节的剩余测试缺口为可选后续项）。
 
 
 门禁现状：`ruff check app tests scripts`、`ruff format --check`、`mypy app`、`pytest -q` 全绿；
@@ -24,7 +24,7 @@
 
 ---
 
-## 二、已修复项（16 项，含复现证据）
+## 二、已修复项（17 项，含复现证据）
 
 > 改动集中在三类：①校验口径与消费口径不一致；②错误降级约定漏路径；③产品决策的落地与清理。
 > 每项都补了回归测试。
@@ -142,6 +142,20 @@
 - 改动：`services/auth_service.login` 的 5 个失败分支与 `change_password` 失败分支补 WARNING（只记原因 + user_id + 来源 IP，不记邮箱）；改密成功记 INFO（token_version 变更会让其它会话失效）；`core/rate_limit._deny` 补 WARNING，键经 `_mask_key()` 处理（保留 `login:account` 维度前缀，标识替换为 sha256 前 8 位）。
 - 问题（整改前）：认证路径零日志 —— 撞库/账号枚举在服务端不留痕，用户「莫名被踢下线」也无从排查；限流拒绝同样只返回 429。
 - 测试：同上文件 `::test_login_failure_is_logged_without_email`、`::test_rate_limit_denial_is_logged_with_masked_key`（断言日志含原因/维度，且**不含邮箱**）。
+
+### 17. P1 加固批次：入参上限、上传读取共用实现、草稿预检与限流、utils 分层
+
+- `core/limits.py` 新增 `MAX_ID_LIST_LEN = 200`，应用到所有 list 型入参（`RegisterIn.group_ids`、
+  `ExamCreateIn` / `ExamUpdateIn`、`PaperTemplateIn`、`PaperPreviewIn`、`MockPaperIn.bank_ids`、
+  `UserGroupAssign`、`UserCreateIn`、题目 `tags`）：这些列表会原样拼进 SQL 的 `IN (...)`，
+  无上限时单个请求即可撞上 SQLite 绑定参数上限（`too many SQL variables` → 500），
+  且 `RegisterIn.group_ids` 走公开注册接口；现在超限由 Pydantic 拦成 422。
+- 新增 `core/uploads.py:read_limited()`：题库导入与用户导入原先各抄一份「Content-Length 预检 +
+  1MB 分块累计」（已分叉），现共用同一实现（Content-Length 与累计读取双重校验）。
+- `PUT /drafts/{form_key}`：先按 Content-Length 预检超大 body（原来只在请求体解析完成后校验体积，
+  挡不住解析期内存峰值），并补用户维度限流（120 次/分钟）。
+- `utils/user_excel.py` 不再 `raise fastapi.HTTPException`，统一改抛 `DomainError`
+  （与 `import_service.do_import` 同口径，响应体形状不变），utils 层不再抛传输层异常。
 
 ---
 
@@ -756,6 +770,16 @@ except RuntimeError as exc:
 
 ## 五、测试覆盖映射与测试反模式
 
+
+> **本轮（2026-09-23 第二轮加固）已补的缺口**：认证路由 HTTP 层（登录失败 401、图形验证码错误 400、
+> 弱口令 422、注册分组 fail-closed）、限流（路由层 429 + Retry-After、XFF 信任开关）、
+> 考试真并发（同 version 并发提交恰好一方 409、并发交卷只结算一次）、开考幂等与
+> `max_attempts` / 时段窗口拦截、上传读取上限（`core/uploads.py`）、草稿体积与限流。
+> 见 `backend/tests/test_http_auth_rate_limit_and_concurrency.py`（13 例）。
+> **仍待补**：管理端各路由的守卫矩阵、Excel 导入的 HTTP 层 200/413、审计日志 scope 过滤、
+> 并发禁用超管、把「断言 SQL 文本」改为行为断言。
+
+
 ### 分片 B：测试覆盖映射与测试反模式（代理原始结论）
 
 现状：`backend/tests` 45 个文件、463 用例全绿（102s，无 skip/xfail）。覆盖面偏「已修复缺陷的回归」，主链路仍有关键空洞。
@@ -939,7 +963,7 @@ cd backend
 ./.venv/bin/ruff check app tests scripts      # All checks passed!
 ./.venv/bin/ruff format --check app tests scripts
 ./.venv/bin/mypy app                          # Success: no issues found in 70 source files
-./.venv/bin/python -m pytest -q               # 491 passed（本轮新增 39 例、随排行下线移除 11 例；两轮整改前 463）
+./.venv/bin/python -m pytest -q               # 504 passed（新增 52 例、随排行下线移除 11 例；整改前 463）
 
 cd ../frontend
 npx vue-tsc --noEmit                          # 通过（无输出）
