@@ -29,7 +29,7 @@ from app.models.group import Group
 from app.models.question import Question, QuestionBank
 from app.models.record import ExamResult, ExamSession
 from app.models.user import User
-from app.services import exam_service, user_service
+from app.services import exam_service, mail_service, review_service, user_service
 
 
 @pytest.fixture
@@ -404,3 +404,168 @@ def test_concurrent_cross_disable_of_super_admins_keeps_one_active():
             select(func.count()).select_from(User).where(User.role == "super_admin", User.status == "active")
         ).scalar_one()
         assert active == 1, "并发互禁不得把最后一个可用超管也禁掉"
+
+
+# ---------- 8. 账号失效（禁用/删除）后旧 token 立即不可用 ----------
+def test_disabled_and_deleted_user_tokens_are_rejected(api):
+    """token_version 之外的两条失效路径：账号被禁用 / 被删除后，旧 token 必须立刻失效。"""
+    user = _seed_user(email="gone@quizhub.com")
+    headers = _headers(user)
+    assert api.get("/api/auth/me", headers=headers).status_code == 200
+
+    with db_session() as db:
+        db.get(User, user.id).status = "disabled"
+        db.commit()
+    assert api.get("/api/auth/me", headers=headers).status_code == 403
+
+    with db_session() as db:
+        db.get(User, user.id).status = "active"
+        db.commit()
+    assert api.get("/api/auth/me", headers=headers).status_code == 200
+
+    with db_session() as db:
+        db.delete(db.get(User, user.id))
+        db.commit()
+    assert api.get("/api/auth/me", headers=headers).status_code == 403
+
+
+# ---------- 9. 并发公布成绩：只结算一次、只发一次通知 ----------
+def _seed_unpublished_formal_result() -> int:
+    """建一场正式考试 + 一条未公布成绩（无简答待复核），返回 exam_id。"""
+    init_db()
+    with db_session() as db:
+        group = Group(name="研发部", type="部门")
+        db.add(group)
+        db.flush()
+        student = User(
+            email="stu@quizhub.com",
+            password_hash="x",
+            name="考生",
+            role="user",
+            status="active",
+            email_verified=True,
+            dept_group_id=group.id,
+        )
+        db.add(student)
+        db.flush()
+        exam = ExamDefinition(
+            name="正式考试",
+            type="formal",
+            rules={},
+            manual_questions=[],
+            group_ids=[group.id],
+            duration_min=60,
+            pass_score=60,
+            max_attempts=0,
+            show_score_immediately=True,
+            show_analysis=False,
+            need_review=False,
+            status="published",
+            created_by=student.id,
+        )
+        db.add(exam)
+        db.flush()
+        db.add(
+            ExamResult(
+                exam_definition_id=exam.id,
+                user_id=student.id,
+                score=80,
+                total_score=100,
+                passed=True,
+                published=False,
+                need_review=False,
+            )
+        )
+        db.commit()
+        return exam.id
+
+
+def test_concurrent_publish_results_settles_once_and_mails_once():
+    """并发公布：条件 UPDATE + RETURNING 保证只有一个请求占用，邮件任务也只入队一次。"""
+    exam_id = _seed_unpublished_formal_result()
+    outcomes: list[dict] = []
+    mail_tasks: list[object] = []
+    barrier = threading.Barrier(2)
+
+    def worker() -> None:
+        class _BG:
+            def add_task(self, fn, *args):  # noqa: ANN002, ANN003
+                mail_tasks.append(fn)
+
+        with SessionLocal() as db:
+            barrier.wait(timeout=5)
+            outcomes.append(review_service.publish_results(db, exam_id, None, _BG()))
+
+    threads = [threading.Thread(target=worker) for _ in range(2)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=30)
+
+    assert sum(item["published"] for item in outcomes) == 1, outcomes
+    assert len(mail_tasks) == 1, "公布通知邮件只能入队一次"
+
+
+# ---------- 10. 并发开考：只创建一个会话 ----------
+def test_concurrent_start_exam_returns_single_session():
+    """并发开考必须落到同一个会话：唯一索引冲突时回退返回既有会话，而不是 500。"""
+    ids = _seed_started_exam(start=False)
+    payloads: list[object] = []
+    barrier = threading.Barrier(2)
+
+    def worker() -> None:
+        with SessionLocal() as db:
+            user = db.get(User, ids["user_id"])
+            barrier.wait(timeout=5)
+            try:
+                payloads.append(exam_service.start_exam(db, user, ids["exam_id"]))
+            except DomainError as exc:
+                payloads.append(exc.status_code)
+
+    threads = [threading.Thread(target=worker) for _ in range(2)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=30)
+
+    assert all(isinstance(p, dict) for p in payloads), payloads
+    assert len({p["session_id"] for p in payloads}) == 1, payloads
+    with db_session() as db:
+        assert db.execute(select(func.count()).select_from(ExamSession)).scalar_one() == 1
+
+
+# ---------- 11. 认证路由其余端点 ----------
+def test_register_rejects_weak_password(api):
+    resp = api.post(
+        "/api/auth/register",
+        json={"email": "new@quizhub.com", "password": "123", "name": "n", "code": "123456", "group_ids": []},
+    )
+    assert resp.status_code == 422, resp.text
+
+
+def test_register_with_unknown_code_returns_400(api):
+    resp = api.post(
+        "/api/auth/register",
+        json={"email": "new@quizhub.com", "password": "pw123456", "name": "n", "code": "000000", "group_ids": []},
+    )
+    assert resp.status_code == 400, resp.text
+    assert "验证码" in resp.json()["detail"]
+
+
+def test_verify_with_unknown_code_returns_400(api):
+    resp = api.post("/api/auth/verify", json={"email": "nobody@quizhub.com", "code": "123456"})
+    assert resp.status_code == 400, resp.text
+
+
+def test_resend_is_fail_closed_without_smtp(api):
+    """SMTP 未配置时重发验证码必须 503：否则会出现「提示已发送、用户永远收不到」。"""
+    resp = api.post("/api/auth/resend-verification", json={"email": "nobody@quizhub.com"})
+    assert resp.status_code == 503, resp.text
+
+
+def test_resend_does_not_leak_whether_email_exists(api, monkeypatch):
+    """已配置邮件时，未知邮箱与已注册邮箱都返回成功（防注册用户枚举）。"""
+    monkeypatch.setattr(mail_service, "ensure_configured", lambda settings: None)
+    resp = api.post("/api/auth/resend-verification", json={"email": "nobody@quizhub.com"})
+    assert resp.status_code == 200, resp.text
+    assert resp.json() == {"success": True}

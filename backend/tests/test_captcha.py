@@ -10,13 +10,15 @@ def test_captcha_generate_returns_id_and_image():
 
 
 def test_captcha_verify_correct_consumes():
-    # 重写：直接构造 entry 校验逻辑
+    """正确验证码必须通过，且单次消费。
+
+    原用例只断言「错码返回 False」：一个恒返回 False 的实现也能全绿（The Liar）。
+    这里直接读内部答案做正向断言，并保留「消费后不可重放」的断言。
+    """
     cid, _ = store.generate()
-    # 无法直接拿到明文答案（私有），改为用"错答案必失败、且消费后再次失败"间接验证单次消费
-    store.verify(cid, "0000")
-    # 同一 cid 第二次必失败（已消费或已过期）
-    ok2 = store.verify(cid, "0000")
-    assert ok2 is False
+    answer = store._store[cid].answer  # 单测直接读内部答案，用于正向断言
+    assert store.verify(cid, answer) is True
+    assert store.verify(cid, answer) is False  # 已消费，防重放
 
 
 def test_captcha_wrong_answer_consumes():

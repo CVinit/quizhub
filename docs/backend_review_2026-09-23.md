@@ -5,7 +5,7 @@
 > 基线提交：`main` @ `c9b59f5`（审查前工作区干净）
 > 审查方式：core/api/schema 人工逐行 + services/utils 分 8 片并行深审 + 测试覆盖映射；
 > 关键结论用仓库自带 `.venv` + 隔离临时库实弹复现（脚本为临时文件，未入库）
-> 整改状态：**19 项已落地**（第二节）+ 3 条产品决策已执行（第三节），全部改动均补回归测试并通过门禁
+> 整改状态：**20 项已落地**（第二节）+ 3 条产品决策已执行（第三节），全部改动均补回归测试并通过门禁
 
 ---
 
@@ -13,7 +13,7 @@
 
 - 分片代理原始结论：**59** 条（P0 12 / P1 31 / P2 16）；另有 schemas+api 补充 14 条（第六节）、测试覆盖 15 条（第五节）。
 - 本轮人工复核：**25** 条（实弹复现或逐行源码确认，见各条「复核」标注）。
-- 本轮已落地：**19 项修复**（第二节）+ **3 条产品决策**（第三节）+ 2 个数据迁移脚本；新增回归测试 134 例（守卫矩阵 72、导入/审计 8、并发与限流 14、统计锁行为 3、本轮其余修复 37）；随排行榜下线移除 11 例。
+- 本轮已落地：**20 项修复**（第二节）+ **3 条产品决策**（第三节）+ 2 个数据迁移脚本；新增回归测试 142 例（守卫矩阵 72、导入/审计 8、认证与并发 22、统计锁行为 3、本轮其余修复 37）；随排行榜下线移除 11 例。
 - 待处理：**0 项**（3.1/3.2 均已处理；第五节的「仍待补」为可选后续项）。
 
 
@@ -24,7 +24,7 @@
 
 ---
 
-## 二、已修复项（19 项，含复现证据）
+## 二、已修复项（20 项，含复现证据）
 
 > 改动集中在三类：①校验口径与消费口径不一致；②错误降级约定漏路径；③产品决策的落地与清理。
 > 每项都补了回归测试。
@@ -188,6 +188,20 @@
   - 受影响的 4 处测试断言改写为「行存在 = 当日活跃」的语义（更贴近真实契约）。
 - 保留取舍：练习类三列当前也无读取方，但保留用于活动标记与后续报表（见模型 docstring）；
   若确认长期不用，可连同聚合逻辑一起下线。
+
+### 20. P2 类型与上限批次：JSON 体积上限、TypedDict、列表响应模型、无用参数
+
+- **JSON 字段体积上限**：`core/limits.py` 新增 `MAX_JSON_BYTES(64KB)` / `MAX_SETTING_VALUE_CHARS(4096)` /
+  `MAX_SETTING_KEYS(50)` 与 `validate_json_size()`；应用到考试 `rules`、模板 `config`、
+  题目 `options` / `left_items` / `right_items` / `answer`、系统设置 `updates`
+  （此前作答路径有 16KB 上限，但这些创建/配置路径无任何限制，可写入任意大 JSON blob）。
+- **题目列表声明 `response_model`**：新增 `QuestionListOut`，`GET /api/admin/questions`
+  不再直接返回 ORM 实例（字段集此前随模型演进自动变化，且与同文件 create/update 的做法不一致）。
+- **类型标注**：`RowError` / `UserRowError` TypedDict 统一 Excel 解析错误项结构
+  （`RowError` 放在 schemas 层供 utils 复用，避免 utils→schemas→utils 成环），
+  `open_workbook()` 补返回类型，`UploadPreview.errors` 由 `list[dict]` 收紧为 `list[RowError]`。
+- **删除无用参数**：`user_excel.preview(db, ...)` 的 `db` 从未使用（调用方却在事务中等待它
+  数分钟），签名收紧为 `preview(content, user_id)`，8 处调用点同步更新。
 
 ---
 
@@ -817,9 +831,11 @@ except RuntimeError as exc:
 > 另补：认证路由 401/400/422、限流 429 + Retry-After、XFF 信任开关、考试真并发、
 > 开考幂等与 `max_attempts`/时段拦截、上传读取上限、草稿体积与限流
 > （`tests/test_http_auth_rate_limit_and_concurrency.py`，14 例）。
-> **仍待补**：`token_version` 之外的账号失效路径（禁用/删除后旧 token）、`publish_results`
-> 的并发幂等与邮件副作用、`start_exam` 的 IntegrityError 回退分支、验证码用例的正向断言、
-> 「断言查询条数」改为与用户数无关、认证路由其余端点（register/resend/verify）。
+> **本批（2026-09-23 第四批）已补**：账号失效路径（禁用/删除后旧 token → 403）、
+> 并发公布成绩（只结算一次、通知邮件只入队一次）、并发开考（唯一索引冲突回退返回同一会话，
+> 不 500）、验证码正向断言（原用例只断言错码失败，恒 False 的实现也能全绿）、
+> 认证路由其余端点（弱口令 422 / 未知验证码 400 / 重发在未配置 SMTP 时 503、未知邮箱不泄露）。
+> 「断言查询条数」一项已随 `test_stats_rank.py` 的删除自然消失（排行榜下线时移除）。
 
 
 ### 分片 B：测试覆盖映射与测试反模式（代理原始结论）
@@ -1005,7 +1021,7 @@ cd backend
 ./.venv/bin/ruff check app tests scripts      # All checks passed!
 ./.venv/bin/ruff format --check app tests scripts
 ./.venv/bin/mypy app                          # Success: no issues found in 70 source files
-./.venv/bin/python -m pytest -q               # 586 passed（新增 134 例、随排行下线移除 11 例；整改前 463）
+./.venv/bin/python -m pytest -q               # 594 passed（新增 142 例、随排行下线移除 11 例；整改前 463）
 
 cd ../frontend
 npx vue-tsc --noEmit                          # 通过（无输出）
