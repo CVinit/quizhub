@@ -5,7 +5,7 @@
 > 基线提交：`main` @ `c9b59f5`（审查前工作区干净）
 > 审查方式：core/api/schema 人工逐行 + services/utils 分 8 片并行深审 + 测试覆盖映射；
 > 关键结论用仓库自带 `.venv` + 隔离临时库实弹复现（脚本为临时文件，未入库）
-> 整改状态：**17 项已落地**（第二节）+ 3 条产品决策已执行（第三节），全部改动均补回归测试并通过门禁
+> 整改状态：**19 项已落地**（第二节）+ 3 条产品决策已执行（第三节），全部改动均补回归测试并通过门禁
 
 ---
 
@@ -13,8 +13,8 @@
 
 - 分片代理原始结论：**59** 条（P0 12 / P1 31 / P2 16）；另有 schemas+api 补充 14 条（第六节）、测试覆盖 15 条（第五节）。
 - 本轮人工复核：**25** 条（实弹复现或逐行源码确认，见各条「复核」标注）。
-- 本轮已落地：**17 项修复**（第二节）+ **3 条产品决策**（第三节）+ 1 个数据迁移脚本；新增回归测试 52 例（`test_review_2026_09_23_fixes.py` 26、`test_http_auth_rate_limit_and_concurrency.py` 13、`test_review_2026_09_23_p1_fixes.py` 7、`test_mock_cleanup_and_rank_removal.py` 5、`test_stats_refresh_locking.py` +1）；随排行榜下线移除 11 例。
-- 待处理：**0 项**（3.1 的口径问题已修复；3.2 与第五节的剩余测试缺口为可选后续项）。
+- 本轮已落地：**19 项修复**（第二节）+ **3 条产品决策**（第三节）+ 2 个数据迁移脚本；新增回归测试 134 例（守卫矩阵 72、导入/审计 8、并发与限流 14、统计锁行为 3、本轮其余修复 37）；随排行榜下线移除 11 例。
+- 待处理：**0 项**（3.1/3.2 均已处理；第五节的「仍待补」为可选后续项）。
 
 
 门禁现状：`ruff check app tests scripts`、`ruff format --check`、`mypy app`、`pytest -q` 全绿；
@@ -24,7 +24,7 @@
 
 ---
 
-## 二、已修复项（17 项，含复现证据）
+## 二、已修复项（19 项，含复现证据）
 
 > 改动集中在三类：①校验口径与消费口径不一致；②错误降级约定漏路径；③产品决策的落地与清理。
 > 每项都补了回归测试。
@@ -157,6 +157,38 @@
 - `utils/user_excel.py` 不再 `raise fastapi.HTTPException`，统一改抛 `DomainError`
   （与 `import_service.do_import` 同口径，响应体形状不变），utils 层不再抛传输层异常。
 
+### 18. P2 清理批次：示例行不再入库、截断/空表可见、死代码与筛选校验
+
+- **模板示例行不再被当真题导入**：`utils/excel.py` 新增 `EXAMPLE_PREFIX = "【示例】"`，
+  `build_template()` 的 6 行示例题带该前缀，`parse_workbook` 解析时跳过 —— 此前
+  `parse_workbook(build_template())` 会返回 6 道示例题（「HTTP 默认端口？」等），
+  用户下载模板后原地填写不删示例行，示例题就会随真实题目一起入库。
+- **无匹配 Sheet / 超行数上限不再静默**：题库模板一个 Sheet 都没命中时补一条整体错误；
+  用户导入预览新增 `truncated` 标记 + 一条「超过单次导入上限 N 行」的错误；缺少「用户」
+  Sheet 时也给出可见错误（原先都是静默返回 0 行/0 题）。
+- **题目列表筛选参数校验**：`difficulty` 加 `Query(ge=1, le=3)`，`type` 用 `QUESTION_TYPE`
+  白名单校验（422），服务层 `if difficulty:` 改为 `is not None` —— 原先 `?difficulty=0`
+  被当作「不过滤」返回全量、`?difficulty=99` 返回空集，而同一字段在创建/更新时是 400，
+  同一语义三种表现。
+- **死代码清理**：删除 `core/deps.users_in_scope`、`group_subtree_ids` 兼容别名（零引用）
+  与 `stats_service` 中零引用的 `_utcnow` 重导出（`_date_str` / `_day_bounds_utc` 仍被测试使用，保留）。
+
+### 19. 3.2 遗留处理：下线 stats_user_daily 的考试类聚合
+
+- 证据：`exam_count` / `exam_score_sum` / `exam_pass_count` 在 `app/**` 与 `frontend/src`
+  中**零读取方**（排行榜下线后仅剩写入），`answer_count` / `correct_count` / `wrong_count`
+  同样无读取方；该表当前唯一消费方是管理端概览的「今日活跃」，只按 `(user_id, date)` 计数。
+- 改动：
+  - `models/stats.py` 移除三个考试类列；
+  - `services/stats/aggregate.py` 的考试侧查询由「按用户聚合分数/次数」改为「是否存在当日
+    已公布正式考试成绩」（活跃判定），口径不变（仍排除未公布与模拟考），SQL 少一次聚合与 JOIN；
+  - 新增 `scripts/migrate_2026_09_23_stats_exam_columns.py`：按**当前模型 DDL** 重建
+    `stats_user_daily`（rename → create → copy → drop → 重建索引），保留数据、幂等、支持 `--dry-run`。
+    不迁移的话存量库会因列不存在而让概览刷新直接 `OperationalError`。
+  - 受影响的 4 处测试断言改写为「行存在 = 当日活跃」的语义（更贴近真实契约）。
+- 保留取舍：练习类三列当前也无读取方，但保留用于活动标记与后续报表（见模型 docstring）；
+  若确认长期不用，可连同聚合逻辑一起下线。
+
 ---
 
 ## 三、产品决策与处理结果（2026-09-23）
@@ -211,11 +243,12 @@ def exam_in_scope(group_ids: list[int] | None, scope: set[int] | None) -> bool:
 
 > 这条我建议与「部门管理员数据范围」相关的其它测试放在同一轮做，改完跑 `pytest` 即可验证无行为回退。
 
-### 3.2 排行下线后的遗留物（建议后续评估，不阻塞）
+### 3.2 排行下线后的遗留物（✅ 已处理：见第二节 #19）
 
 - `stats_user_daily` 的 `exam_count` / `exam_score_sum` / `exam_pass_count` 三列现在**没有任何读取方**（概览只用 `user_id` / `date` 统计「今日活跃」），但每次作答/交卷/复核仍在写入并触发聚合重算。
 - `services/stats/aggregate.py` 的 `_countable_exam_conditions()`（只统计已公布正式考试）同样已无消费方，属「无读取方的口径约束」。
-- 可选处置：①保留（未来可能恢复排行/做报表）；②下线考试类聚合，`stats_user_daily` 只保留活跃度字段。**建议先保留**：删除涉及数据迁移与写入路径改动，收益仅为减少写放大。
+- 处置（2026-09-23）：已**下线考试类聚合**（三列 + 相关口径 SQL），考试只参与「当日是否活跃」
+  判定；练习类三列暂时保留（无读取方，保留用于活动标记/后续报表）。实现与迁移见第二节 #19。
 
 ---
 
@@ -771,13 +804,22 @@ except RuntimeError as exc:
 ## 五、测试覆盖映射与测试反模式
 
 
-> **本轮（2026-09-23 第二轮加固）已补的缺口**：认证路由 HTTP 层（登录失败 401、图形验证码错误 400、
-> 弱口令 422、注册分组 fail-closed）、限流（路由层 429 + Retry-After、XFF 信任开关）、
-> 考试真并发（同 version 并发提交恰好一方 409、并发交卷只结算一次）、开考幂等与
-> `max_attempts` / 时段窗口拦截、上传读取上限（`core/uploads.py`）、草稿体积与限流。
-> 见 `backend/tests/test_http_auth_rate_limit_and_concurrency.py`（13 例）。
-> **仍待补**：管理端各路由的守卫矩阵、Excel 导入的 HTTP 层 200/413、审计日志 scope 过滤、
-> 并发禁用超管、把「断言 SQL 文本」改为行为断言。
+> **本轮（2026-09-23 第三批）已补的缺口**：
+> 1. 管理端守卫矩阵：18 条路由 × 未登录 401 / 普通用户 403 / dept_admin 仅超管路由 403 / super 放行
+>    （`tests/test_admin_guard_matrix.py`，72 例）；
+> 2. Excel 导入 HTTP 层：题库/用户导入的 preview→import 全链路、413 体积上限、非 xlsx 400、
+>    dept_admin 越权导入管理员行 403 且 token 不被消费、截断标记与缺 Sheet 可见错误
+>    （`tests/test_admin_import_http_and_audit_scope.py`，8 例）；
+> 3. 审计日志 scope：super_admin 看全量（含系统日志）、dept_admin 只见范围内操作者；
+> 4. 并发禁用超管：两个超管并发互禁 → 只成功一个，始终保留可用管理入口；
+> 5. 把「断言 SQL 文本」改为**行为断言**：`refresh_daily`/`refresh_user_daily` 在重建阶段
+>    持有写锁（另一连接写入被阻塞），不再匹配 `BEGIN IMMEDIATE` 字符串。
+> 另补：认证路由 401/400/422、限流 429 + Retry-After、XFF 信任开关、考试真并发、
+> 开考幂等与 `max_attempts`/时段拦截、上传读取上限、草稿体积与限流
+> （`tests/test_http_auth_rate_limit_and_concurrency.py`，14 例）。
+> **仍待补**：`token_version` 之外的账号失效路径（禁用/删除后旧 token）、`publish_results`
+> 的并发幂等与邮件副作用、`start_exam` 的 IntegrityError 回退分支、验证码用例的正向断言、
+> 「断言查询条数」改为与用户数无关、认证路由其余端点（register/resend/verify）。
 
 
 ### 分片 B：测试覆盖映射与测试反模式（代理原始结论）
@@ -963,7 +1005,7 @@ cd backend
 ./.venv/bin/ruff check app tests scripts      # All checks passed!
 ./.venv/bin/ruff format --check app tests scripts
 ./.venv/bin/mypy app                          # Success: no issues found in 70 source files
-./.venv/bin/python -m pytest -q               # 504 passed（新增 52 例、随排行下线移除 11 例；整改前 463）
+./.venv/bin/python -m pytest -q               # 586 passed（新增 134 例、随排行下线移除 11 例；整改前 463）
 
 cd ../frontend
 npx vue-tsc --noEmit                          # 通过（无输出）

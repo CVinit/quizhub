@@ -29,7 +29,7 @@ from app.models.group import Group
 from app.models.question import Question, QuestionBank
 from app.models.record import ExamResult, ExamSession
 from app.models.user import User
-from app.services import exam_service
+from app.services import exam_service, user_service
 
 
 @pytest.fixture
@@ -345,3 +345,62 @@ def test_draft_size_limit_and_save(api):
     ok = api.put("/api/drafts/form", headers=headers, json={"blob": "small"})
     assert ok.status_code == 200, ok.text
     assert api.get("/api/drafts/form", headers=headers).json()["payload"] == {"blob": "small"}
+
+
+# ---------- 7. 并发禁用超管 ----------
+def test_concurrent_cross_disable_of_super_admins_keeps_one_active():
+    """两个超管并发互禁：只能成功一个，系统始终保留可用管理入口。
+
+    守卫是「条件 UPDATE + EXISTS(除目标外仍有 active 超管)」：SQLite 单写者模型下，
+    后到者的 UPDATE 会等先到者提交后再求值 EXISTS，因此必然看到「对方已被禁用」→ rowcount=0 → 400。
+    """
+    init_db()
+    with db_session() as db:
+        first = User(
+            email="super-a@quizhub.com",
+            password_hash="x",
+            name="超管A",
+            role="super_admin",
+            status="active",
+            email_verified=True,
+        )
+        second = User(
+            email="super-b@quizhub.com",
+            password_hash="x",
+            name="超管B",
+            role="super_admin",
+            status="active",
+            email_verified=True,
+        )
+        db.add_all([first, second])
+        db.commit()
+        first_id, second_id = first.id, second.id
+
+    outcomes: list[object] = []
+    barrier = threading.Barrier(2)
+
+    def worker(actor_id: int, target_id: int) -> None:
+        with SessionLocal() as db:
+            barrier.wait(timeout=5)
+            try:
+                user_service.set_status(db, actor_id, target_id, False, scope=None)
+                outcomes.append("ok")
+            except DomainError as exc:
+                outcomes.append(exc.status_code)
+
+    threads = [
+        threading.Thread(target=worker, args=(first_id, second_id)),
+        threading.Thread(target=worker, args=(second_id, first_id)),
+    ]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=30)
+
+    assert outcomes.count("ok") == 1, outcomes
+    assert outcomes.count(400) == 1, outcomes
+    with db_session() as db:
+        active = db.execute(
+            select(func.count()).select_from(User).where(User.role == "super_admin", User.status == "active")
+        ).scalar_one()
+        assert active == 1, "并发互禁不得把最后一个可用超管也禁掉"
