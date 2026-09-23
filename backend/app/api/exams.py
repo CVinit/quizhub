@@ -25,6 +25,11 @@ from app.services.audit_service import log as audit_log
 
 router = APIRouter(tags=["exam"])
 
+# 模拟考试开考限流：每次开考都可能新建定义 + 固化 N 道题（见 exam/mock 的收敛逻辑），
+# 不限流时普通用户可高频构造不同设置组合放大数据量。阈值宽松，只用于兜底防刷。
+MOCK_START_LIMIT = 20
+MOCK_START_WINDOW_SEC = 3600
+
 
 # ---------- 用户端 ----------
 @router.get("/exams/available")
@@ -58,6 +63,9 @@ def preview_mock(payload: MockPaperIn, db: Session = Depends(get_db), user: User
 @router.post("/exams/mock/start")
 def start_mock(payload: MockStartIn, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     """按用户开考前设置组卷并开考（完全用户自助，后台无模拟考试配置）。"""
+    from app.core.rate_limit import check
+
+    check(f"mock-start:user:{user.id}", MOCK_START_LIMIT, MOCK_START_WINDOW_SEC, "模拟考试")
     return exam_service.start_mock_exam(
         db,
         user,

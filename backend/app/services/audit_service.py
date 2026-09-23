@@ -12,11 +12,17 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Session
 
 from app.core.deps import user_ids_subquery
+from app.core.errors import DomainError
 from app.core.like import ESCAPE_CHAR, like_pattern
 from app.core.request_context import get_request_ip
+from app.core.status import BAD_REQUEST
 from app.core.timeutil import utcnow_iso as _now
 from app.models.system import AuditLog, Draft
 from app.models.user import User
+
+# 每用户草稿条数上限：form_key 由客户端指定（仅限长度），不设上限时认证用户可以
+# 不断换 key 让 drafts 表无界增长（单条体积上限挡不住条数）。
+MAX_DRAFTS_PER_USER = 50
 
 
 def log(
@@ -112,7 +118,10 @@ def list_logs(
         out.append(
             {
                 "id": r.id,
-                "actor": f"用户#{u.id}" if u else "系统",
+                # actor 为 NULL 有两种来源：真正的系统日志，以及「操作者已被删除」
+                # （users 外键 ondelete=SET NULL）。两者无法从本表区分，标签必须如实说明，
+                # 否则已删除用户的历史操作会被误读为系统行为。
+                "actor": f"用户#{u.id}" if u else "系统/已删除用户",
                 "actor_id": r.actor,
                 "action": r.action,
                 "target_type": r.target_type,
@@ -127,12 +136,22 @@ def list_logs(
 
 # ---------- 草稿 ----------
 def save_draft(db: Session, user_id: int, form_key: str, payload: dict) -> dict:
-    """保存草稿（单条 upsert）。
+    """保存草稿（单条 upsert），并限制每用户的草稿条数。
 
     `drafts` 上有 UNIQUE(user_id, form_key)：原实现是「先 SELECT 判存在、再 INSERT/UPDATE」，
     并发自动保存（多标签页 / 请求重试）会双双读到不存在、双双 INSERT，一方撞唯一约束抛
     IntegrityError → 500。这里用 SQLite 原生 upsert 把读改写收敛成一条原子语句。
     """
+    # 仅对「新增 key」计数：覆盖已有草稿不受上限影响
+    exists = db.execute(select(Draft.id).where(Draft.user_id == user_id, Draft.form_key == form_key)).first()
+    if exists is None:
+        count = db.execute(select(func.count()).select_from(Draft).where(Draft.user_id == user_id)).scalar_one()
+        if count >= MAX_DRAFTS_PER_USER:
+            raise DomainError(
+                BAD_REQUEST,
+                f"草稿数量已达上限（{MAX_DRAFTS_PER_USER}），请先清理不再需要的草稿",
+            )
+
     now = _now()
     stmt = sqlite_insert(Draft).values(user_id=user_id, form_key=form_key, payload=payload, updated_at=now)
     stmt = stmt.on_conflict_do_update(

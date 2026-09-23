@@ -111,7 +111,10 @@ def test_last_active_super_admin_is_protected():
 
 
 def test_atomic_guard_is_the_only_authority_for_last_super_admin():
-    """最后一个 active 超管的禁用必须由条件 UPDATE 的 rowcount 拦截。
+    """最后一个 active 超管的禁用必须由条件 UPDATE 的 rowcount 拦截（本用例为串行验证）。
+
+    真正的并发竞争由 tests/test_http_auth_rate_limit_and_concurrency.py 的
+    test_concurrent_cross_disable_of_super_admins_keeps_one_active 覆盖（双线程互禁）。
 
     原实现在守卫前还有一次 COUNT 预检查，但预检查在并发下可能读到过期结果，
     已删除；本用例固定「守卫本身」就是最终判据（不再依赖任何预检查）。

@@ -18,6 +18,7 @@ from app.core.security import create_access_token
 from app.database import SessionLocal, db_session, get_db, init_db
 from app.main import create_app
 from app.models.group import Group
+from app.models.system import AuditLog
 from app.models.user import User
 from app.services import audit_service, system_service
 from app.utils import user_excel
@@ -231,3 +232,45 @@ def test_audit_logs_are_scoped_for_dept_admin(api):
     assert scoped.status_code == 200, scoped.text
     assert scoped.json()["total"] == 1, "dept_admin 只应看到范围内操作者的日志"
     assert all(f"#{ids['dept_admin_id']}" in item["actor"] for item in scoped.json()["items"])
+
+
+# ---------- 草稿：每用户条数上限与 actor 标签 ----------
+def test_drafts_are_capped_per_user(api):
+    """草稿条数上限：form_key 由客户端指定，不设上限时认证用户可无界增长 drafts 表。"""
+    from app.services.audit_service import MAX_DRAFTS_PER_USER
+
+    user = User(
+        email="draft-cap@quizhub.com",
+        password_hash="x",
+        name="u",
+        role="user",
+        status="active",
+        email_verified=True,
+    )
+    with db_session() as db:
+        db.add(user)
+        db.commit()
+        headers = {"Authorization": f"Bearer {create_access_token(user.id, {'ver': user.token_version})}"}
+
+    for i in range(MAX_DRAFTS_PER_USER):
+        assert api.put(f"/api/drafts/form{i}", headers=headers, json={"i": i}).status_code == 200
+
+    blocked = api.put("/api/drafts/one-more", headers=headers, json={"i": 1})
+    assert blocked.status_code == 400, blocked.text
+    assert "上限" in blocked.json()["detail"]
+
+    # 覆盖已有草稿不受上限影响
+    assert api.put("/api/drafts/form0", headers=headers, json={"i": 99}).status_code == 200
+
+
+def test_null_actor_logs_are_labelled_honestly(api):
+    """actor 为 NULL 既可能是系统日志、也可能是操作者已被删除，标签必须如实说明。"""
+    ids = _seed()
+    with db_session() as db:
+        db.add(AuditLog(actor=None, action="system.migrate", target_type="system", target_id="1"))
+        db.commit()
+
+    resp = api.get("/api/admin/audit-logs", headers=ids["super_admin_headers"])
+    assert resp.status_code == 200, resp.text
+    row = next(item for item in resp.json()["items"] if item["action"] == "system.migrate")
+    assert row["actor"] == "系统/已删除用户"

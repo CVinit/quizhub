@@ -326,3 +326,42 @@ def test_service_layer_rejects_admin_role_without_super_actor():
         with pytest.raises(DomainError) as update_exc:
             user_service.update_user(db, dept_admin.id, dept_admin.id, None, ROLE_SUPER_ADMIN, None)
         assert update_exc.value.status_code == 403
+
+
+# ---------- 11. 模拟考试开考限流 ----------
+def test_mock_start_is_rate_limited(api, monkeypatch):
+    """开考限流：每次开考都可能新建定义并固化题目，不限流时普通用户可高频放大数据量。"""
+    from app.api import exams as exams_api
+
+    monkeypatch.setattr(exams_api, "MOCK_START_LIMIT", 2)
+    monkeypatch.setattr(exams_api, "MOCK_START_WINDOW_SEC", 3600)
+
+    init_db()
+    with db_session() as db:
+        bank = QuestionBank(name="模拟库", practice_enabled=True)
+        db.add(bank)
+        db.flush()
+        db.add(
+            Question(
+                bank_id=bank.id,
+                type="单选题",
+                question="q",
+                options=["A", "B"],
+                answer="A",
+                analysis="",
+                difficulty=1,
+                score=2.0,
+            )
+        )
+        user = _mk_user(db, "mockrl@quizhub.com", "user")
+        db.commit()
+        bank_id = bank.id
+        headers = _headers(user)
+
+    payload = {"bank_ids": [bank_id], "size": 1}
+    assert api.post("/api/exams/mock/start", json=payload, headers=headers).status_code == 200
+    assert api.post("/api/exams/mock/start", json=payload, headers=headers).status_code == 200
+
+    blocked = api.post("/api/exams/mock/start", json=payload, headers=headers)
+    assert blocked.status_code == 429, blocked.text
+    assert blocked.headers["Retry-After"].isdigit()
