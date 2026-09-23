@@ -247,7 +247,8 @@ def test_rejected_question_import_does_not_consume_preview():
         admin = _mk_user(db, "super_admin")
         db.commit()
 
-        content = excel.build_template().getvalue()
+        # 模板示例行会被解析器跳过，这里用带真实数据行的工作簿
+        content = _question_workbook([["题干甲", "A.甲\nB.乙", "A", "解析", 1, "标签", 2, ""]])
         preview = import_service.preview(
             db,
             content,

@@ -12,10 +12,12 @@ from __future__ import annotations
 
 import logging
 import secrets
+from io import BytesIO
 
 import pytest
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
+from openpyxl import Workbook
 from sqlalchemy import select
 
 from app.core import rate_limit
@@ -29,7 +31,7 @@ from app.models.group import Group
 from app.models.question import Question, QuestionBank
 from app.models.user import User
 from app.services import auth_service, exam_service, import_service, question_service, stats_service, user_service
-from app.utils.excel import build_template
+from app.utils.excel import HEADERS
 
 
 @pytest.fixture
@@ -133,7 +135,15 @@ def test_imported_questions_inherit_bank_group():
         bank_id, group_id = bank.id, group.id
 
         # super_admin（scope=None）指定已有题库但不传 group_id
-        preview = import_service.preview(db, build_template().getvalue(), None, bank_id, "", 1, scope=None)
+        wb = Workbook()
+        ws = wb.active
+        ws.title = "单选题"
+        ws.append(HEADERS["单选题"])
+        ws.append(["题一", "A.甲\nB.乙", "A", "", 2, "", 2, ""])
+        ws.append(["题二", "A.甲\nB.乙", "B", "", 2, "", 2, ""])
+        buf = BytesIO()
+        wb.save(buf)
+        preview = import_service.preview(db, buf.getvalue(), None, bank_id, "", 1, scope=None)
         result = import_service.do_import(db, preview["confirm_token"], 1, scope=None)
         assert result.success > 0
 

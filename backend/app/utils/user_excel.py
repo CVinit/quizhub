@@ -193,6 +193,7 @@ def preview(db: Session, content: bytes, user_id: int) -> dict:
     wb = open_workbook(buf)
     rows: list[dict] = []
     errors: list[dict] = []
+    truncated = False
     try:
         if "用户" in wb.sheetnames:
             ws = wb["用户"]
@@ -204,6 +205,7 @@ def preview(db: Session, content: bytes, user_id: int) -> dict:
             else:
                 for r_idx, row in enumerate(row_iter, start=2):
                     if r_idx > _IMPORT_ROW_MAX + 1:
+                        truncated = True
                         break
                     if not row or all(c is None or str(c).strip() == "" for c in row):
                         continue
@@ -212,9 +214,24 @@ def preview(db: Session, content: bytes, user_id: int) -> dict:
                     if not parsed["valid"]:
                         errors.append({"row": r_idx, "email": parsed["email"], "error": parsed["error"]})
                     if len(rows) >= _IMPORT_ROW_MAX:
+                        truncated = True
                         break
+        else:
+            # 工作簿里没有「用户」Sheet（表名写错/用了别的模板）：必须给出可见错误，
+            # 否则预览会静默返回 0 行，用户完全不知道原因
+            errors.append({"row": 0, "email": "", "error": "未找到「用户」工作表，请下载最新模板后重新填写"})
     finally:
         wb.close()
+
+    if truncated:
+        # 静默截断会让用户以为已全部导入：补一条可见错误（与题库导入的 truncated 口径一致）
+        errors.append(
+            {
+                "row": _IMPORT_ROW_MAX + 1,
+                "email": "",
+                "error": f"超过单次导入上限 {_IMPORT_ROW_MAX} 行，其余行未导入",
+            }
+        )
 
     valid_rows = [r for r in rows if r["valid"]]
     # 立即把明文口令换成 bcrypt 哈希再暂存：确认导入阶段不再需要明文，
@@ -235,6 +252,7 @@ def preview(db: Session, content: bytes, user_id: int) -> dict:
         "rows": preview_rows,  # 仅返回前 50 条用于预览，避免回传初始密码
         "total": len(rows),
         "valid_count": len(valid_rows),
+        "truncated": truncated,
         "errors": errors,
         "confirm_token": token,
     }

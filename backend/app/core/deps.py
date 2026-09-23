@@ -67,10 +67,6 @@ def subtree_ids(db: Session, group_id: int) -> set[int]:
     return ids
 
 
-# 保留旧名作为兼容别名（历史引用已统一迁移到 subtree_ids）
-group_subtree_ids = subtree_ids
-
-
 def subtree_map(db: Session) -> dict[int, set[int]]:
     """一次性返回 {分组 id: 自身 + 全部后代} 映射。
 
@@ -143,27 +139,10 @@ def user_in_scope(db: Session, user_id: int, scope: set[int] | None) -> bool:
     return bool(user_group_ids(db, user_id) & scope)
 
 
-def users_in_scope(db: Session, scope: set[int] | None) -> set[int] | None:
-    """返回落在数据范围内的全部用户 id 集合。
-
-    scope 为 None（super_admin）返回 None 表示全量，不做范围限制；
-    否则返回 dept_group_id ∈ scope 或经 user_groups 关联到 scope 的用户 id 集合。
-    供列表/概览查询做按用户维度的范围过滤。
-
-    注意：需要按用户维度过滤 SQL 查询时，优先用 `user_ids_subquery`——本函数会把
-    整个范围的用户 id 物化到 Python 集合，大部门下会触及 SQLite 绑定参数上限。
-    """
-    if scope is None:
-        return None
-    by_dept = {r[0] for r in db.execute(select(User.id).where(User.dept_group_id.in_(scope))).all()}
-    by_group = {r[0] for r in db.execute(select(UserGroup.user_id).where(UserGroup.group_id.in_(scope))).all()}
-    return by_dept | by_group
-
-
 def user_ids_subquery(scope: set[int]) -> CompoundSelect:
     """把数据范围表达为 SQL 子查询，避免物化用户 id 后再拼 `IN (...)`。
 
-    等价于 `users_in_scope` 的集合，但由 SQLite 完成集合运算：不把成百上千个
+    等价于「按分组范围取用户 id」的集合运算，但由 SQLite 完成：不把成百上千个
     用户 id 变成绑定参数（SQLite 有参数上限），也不在大部门下产生内存峰值。
 
     Args:

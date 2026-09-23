@@ -220,7 +220,7 @@ def list_questions(
         stmt = stmt.where(Question.bank_id == bank_id)
     if group_id:
         stmt = stmt.where(Question.group_id == group_id)
-    if difficulty:
+    if difficulty is not None:
         stmt = stmt.where(Question.difficulty == difficulty)
     if keyword:
         stmt = stmt.where(Question.question.like(like_pattern(keyword), escape=ESCAPE_CHAR))

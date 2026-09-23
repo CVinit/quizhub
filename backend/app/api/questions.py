@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 from app.core.deps import dept_scope_ids, require_admin
 from app.core.uploads import read_limited
 from app.database import get_db
+from app.models.question import QUESTION_TYPE
 from app.models.user import User
 from app.schemas.question import (
     QuestionBankCreate,
@@ -83,11 +84,15 @@ def list_questions(
     type: str | None = None,
     bank_id: int | None = None,
     group_id: int | None = None,
-    difficulty: int | None = None,
+    difficulty: int | None = Query(None, ge=1, le=3),
     keyword: str | None = None,
     db: Session = Depends(get_db),
     user: User = Depends(require_admin),
 ):
+    # 非法筛选值必须在入口被拒：原先 difficulty=0 被服务层当作「不过滤」返回全量、
+    # difficulty=99 返回空集，而同一字段在创建/更新时是 400，同一语义三种表现。
+    if type is not None and type not in QUESTION_TYPE:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, f"题型必须是 {QUESTION_TYPE} 之一")
     rows, total = question_service.list_questions(
         db,
         page,

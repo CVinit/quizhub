@@ -2,9 +2,9 @@
 
 from io import BytesIO
 
-from openpyxl import Workbook
+from openpyxl import Workbook, load_workbook
 
-from app.utils.excel import build_template, parse_workbook
+from app.utils.excel import EXAMPLE_PREFIX, build_template, parse_workbook
 
 
 def test_build_template_returns_xlsx():
@@ -23,13 +23,17 @@ def test_parse_empty_workbook():
     assert result.rows == []
 
 
-def test_parse_template_has_example_data():
-    """模板内置示例题（供用户参考格式），解析应得到 6 题示例。"""
+def test_parse_template_skips_example_rows():
+    """模板内置示例题（供用户参考格式）必须被跳过：否则用户不删示例行就会把示例题导入题库。"""
     buf = build_template()
     result = parse_workbook(buf)
-    assert result.total == 6
-    assert set(result.type_dist.keys()) == {"单选题", "多选题", "判断题", "填空题", "简答题", "拖拽题"}
-    assert all(r.valid for r in result.rows)
+    assert result.total == 0, "示例行不应进入导入队列"
+    assert result.type_dist == {}
+    assert result.errors == []
+
+    # 示例行仍留在模板里（可读性不受影响），只是带上了可识别前缀
+    wb = load_workbook(BytesIO(build_template().getvalue()))
+    assert str(wb["单选题"].cell(row=2, column=1).value).startswith(EXAMPLE_PREFIX)
 
 
 def test_parse_single_choice_row():

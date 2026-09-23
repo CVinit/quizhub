@@ -356,9 +356,20 @@ def test_malformed_zip_is_rejected_as_value_error():
 
 # ---------- C5 单次解析 ----------
 def test_parse_workbook_exposes_all_rows_and_caps_preview():
-    from app.utils.excel import build_template, parse_workbook
+    from openpyxl import Workbook
 
-    parsed = parse_workbook(BytesIO(build_template().getvalue()))
+    from app.utils.excel import HEADERS, parse_workbook
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "单选题"
+    ws.append(HEADERS["单选题"])
+    for i in range(25):
+        ws.append([f"题目{i}", "A.甲\nB.乙", "A", "", 2, "", 2, ""])
+    buf = BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    parsed = parse_workbook(buf)
     assert parsed.all_rows, "完整解析结果必须可用（导入侧不再二次解析同一文件）"
     assert parsed.total == len(parsed.all_rows)
     assert len(parsed.rows) <= 20, "rows 仍是给前端的预览切片"

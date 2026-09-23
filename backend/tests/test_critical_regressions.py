@@ -287,6 +287,8 @@ def _single_sheet_workbook(*, rename_header: bool) -> bytes:
             del wb[name]
     if rename_header:
         wb["单选题"].cell(row=1, column=1).value = "题干（被改名）"
+    # 模板自带的示例行会被解析器跳过，这里补一行真实数据，保证「正常文件可导入」的对照有效
+    wb["单选题"].append(["HTTP 默认端口？", "21\n80\n443\n8080", "B", "HTTP 默认 80", 2, "网络", 2, ""])
     out = BytesIO()
     wb.save(out)
     return out.getvalue()
@@ -309,9 +311,11 @@ def test_mismatched_header_rows_are_not_queued_for_import():
     healthy = _single_sheet_workbook(rename_header=False)
     ok = import_service.preview(None, healthy, None, None, "新库", 1, None)
     assert ok["valid_count"] > 0
-    # 完整模板（6 个 Sheet）也必须照常可用
+    # 完整模板（6 个 Sheet）必须照常可解析：模板自带的示例行会被跳过，
+    # 因此「没有有效行」是预期结果，且不得因此报错
     full = import_service.preview(None, build_template().getvalue(), None, None, "新库", 1, None)
-    assert full["valid_count"] >= ok["valid_count"]
+    assert full["valid_count"] == 0
+    assert full["errors"] == []
 
 
 # ---------- 5. 邮箱归一迁移 ----------

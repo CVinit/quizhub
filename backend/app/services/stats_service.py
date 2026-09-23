@@ -27,16 +27,13 @@ from app.services.stats.common import (
 from app.services.stats.common import (
     _day_bounds_utc as _day_bounds_utc,
 )
-from app.services.stats.common import (
-    _utcnow as _utcnow,
-)
 from app.services.stats.panel import (
     admin_overview,
     user_panel,
 )
 
 # 私有实现以 `X as X` 形式显式重导出（PEP 484 约定的 re-export 写法）：api 层与既有测试
-# 依赖这三个导入路径，故保持可用；它们不属于本模块的公开 API，因此不列入 `__all__`。
+# 依赖这两个导入路径，故保持可用；它们不属于本模块的公开 API，因此不列入 `__all__`。
 __all__ = [
     "refresh_daily",
     "refresh_for_timestamps",

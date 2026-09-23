@@ -54,6 +54,8 @@ MAX_WORKBOOK_UNCOMPRESSED = 100 * 1024 * 1024
 # 流式解压时的读取块大小：用于在解压过程中逐步计量，避免一次性展开
 _DECOMPRESS_CHUNK = 1 << 20
 MAX_CELL_CHARS = 10000
+# 模板内置示例行的题干前缀：解析时跳过，避免用户不删示例行就把示例题当真实题目导入。
+EXAMPLE_PREFIX = "【示例】"
 TYPE_TO_SHEET = {
     "单选题": "单选题",
     "多选题": "多选题",
@@ -152,7 +154,7 @@ def _add_example(ws, sheet_type: str) -> None:
     if sheet_type == "单选题":
         ws.append(
             [
-                "以下哪一项是 HTTP 默认端口？",
+                EXAMPLE_PREFIX + "以下哪一项是 HTTP 默认端口？",
                 "A.21\nB.80\nC.443\nD.8080",
                 "B",
                 "HTTP 默认 80，HTTPS 默认 443",
@@ -165,7 +167,7 @@ def _add_example(ws, sheet_type: str) -> None:
     elif sheet_type == "多选题":
         ws.append(
             [
-                "以下属于关系型数据库的有？",
+                EXAMPLE_PREFIX + "以下属于关系型数据库的有？",
                 "A.MySQL\nB.Redis\nC.PostgreSQL\nD.MongoDB",
                 "AC",
                 "Redis/MongoDB 为 NoSQL",
@@ -176,15 +178,43 @@ def _add_example(ws, sheet_type: str) -> None:
             ]
         )
     elif sheet_type == "判断题":
-        ws.append(["HTTP 是无状态协议。", "正确", "HTTP 协议本身不保存客户端状态。", 1, "网络", 2, ""])
+        ws.append([EXAMPLE_PREFIX + "HTTP 是无状态协议。", "正确", "HTTP 协议本身不保存客户端状态。", 1, "网络", 2, ""])
     elif sheet_type == "填空题":
-        ws.append(["TCP 三次握手的第二次报文标志位是 ____ 与 ____。", "SYN/同步|ACK/确认", "SYN+ACK", 2, "网络", 2, ""])
+        ws.append(
+            [
+                EXAMPLE_PREFIX + "TCP 三次握手的第二次报文标志位是 ____ 与 ____。",
+                "SYN/同步|ACK/确认",
+                "SYN+ACK",
+                2,
+                "网络",
+                2,
+                "",
+            ]
+        )
     elif sheet_type == "简答题":
         ws.append(
-            ["简述 HTTPS 的工作原理。", "HTTPS = HTTP + TLS。客户端请求服务器证书…", "考察 TLS 握手", 3, "安全", 5, ""]
+            [
+                EXAMPLE_PREFIX + "简述 HTTPS 的工作原理。",
+                "HTTPS = HTTP + TLS。客户端请求服务器证书…",
+                "考察 TLS 握手",
+                3,
+                "安全",
+                5,
+                "",
+            ]
         )
     elif sheet_type == "拖拽题":
-        ws.append(["将协议与默认端口匹配。", "HTTP:80\nHTTPS:443\nSSH:22\nMySQL:3306", "常见端口", 2, "网络", 3, ""])
+        ws.append(
+            [
+                EXAMPLE_PREFIX + "将协议与默认端口匹配。",
+                "HTTP:80\nHTTPS:443\nSSH:22\nMySQL:3306",
+                "常见端口",
+                2,
+                "网络",
+                3,
+                "",
+            ]
+        )
 
 
 def parse_workbook(buf: BytesIO) -> UploadPreview:
@@ -199,10 +229,12 @@ def parse_workbook(buf: BytesIO) -> UploadPreview:
     errors: list[dict] = []
     type_dist: dict[str, int] = {}
 
+    matched_sheet = False
     try:
         for sheet_name in SHEET_ORDER:
             if sheet_name not in wb.sheetnames:
                 continue
+            matched_sheet = True
             ws = wb[sheet_name]
             # 列是**按位置**取值的，表头一旦被调换/改名，分值、难度、答案会静默错位。
             # 因此先校验第 1 行与模板一致，不一致直接跳过该 Sheet 并给出可见错误。
@@ -220,6 +252,9 @@ def parse_workbook(buf: BytesIO) -> UploadPreview:
             for r_idx, row in enumerate(row_iter, start=2):
                 if r_idx > PARSE_ROW_MAX + 1:
                     break
+                # 模板内置示例行（题干带 EXAMPLE_PREFIX）不是真实数据，直接跳过
+                if row and str(row[0] or "").strip().startswith(EXAMPLE_PREFIX):
+                    continue
                 if not row or all(c is None or str(c).strip() == "" for c in row):
                     continue
                 parsed = _parse_row(sheet_name, row, r_idx)
@@ -234,6 +269,15 @@ def parse_workbook(buf: BytesIO) -> UploadPreview:
                 break
     finally:
         wb.close()
+
+    if not matched_sheet:
+        errors.append(
+            {
+                "sheet": "",
+                "row": 0,
+                "error": f"未找到任何模板工作表（应为：{'、'.join(SHEET_ORDER)}），请下载最新模板后重新填写",
+            }
+        )
 
     # rows 仅返回前 20 条用于预览；all_rows 提供完整结果供导入消费（避免二次解析）
     return UploadPreview(
