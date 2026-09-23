@@ -11,12 +11,14 @@ import uuid
 from io import BytesIO
 from typing import Any
 
+from fastapi import status
 from openpyxl import Workbook
 from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
 from sqlalchemy.orm import Session
 
 from app.core.email import normalize_email
+from app.core.errors import DomainError
 from app.core.preview_cache import BoundedTTLCache
 from app.core.security import hash_password
 from app.utils.excel import MAX_CELL_CHARS, headers_match, open_workbook, validate_workbook_archive
@@ -252,34 +254,28 @@ def peek_preview(confirm_token: str, user_id: int) -> list[dict]:
         预览暂存的有效行列表。
 
     Raises:
-        HTTPException: 预览不存在/过期（400）或归属不符（403）。
+        DomainError: 预览不存在/过期（400）或归属不符（403）。
     """
-    from fastapi import HTTPException
-    from fastapi import status as http_status
-
     peeked = _preview_cache.peek(confirm_token)
     if peeked is None:
-        raise HTTPException(http_status.HTTP_400_BAD_REQUEST, "预览已过期，请重新上传")
+        raise DomainError(status.HTTP_400_BAD_REQUEST, "预览已过期，请重新上传")
     rows, owner = peeked
     if int(owner) != user_id:
-        raise HTTPException(http_status.HTTP_403_FORBIDDEN, "无权导入他人预览数据")
+        raise DomainError(status.HTTP_403_FORBIDDEN, "无权导入他人预览数据")
     return rows
 
 
 def consume_preview(confirm_token: str, user_id: int) -> list[dict]:
     """取出并消费预览暂存的有效行（校验 token 绑定用户）。"""
-    from fastapi import HTTPException
-    from fastapi import status as http_status
-
     peeked = _preview_cache.peek(confirm_token)
     if peeked is None:
-        raise HTTPException(http_status.HTTP_400_BAD_REQUEST, "预览已过期，请重新上传")
+        raise DomainError(status.HTTP_400_BAD_REQUEST, "预览已过期，请重新上传")
     _rows, owner = peeked
     if int(owner) != user_id:
         # 不消费他人条目：越权尝试不应使受害者的预览失效
-        raise HTTPException(http_status.HTTP_403_FORBIDDEN, "无权导入他人预览数据")
+        raise DomainError(status.HTTP_403_FORBIDDEN, "无权导入他人预览数据")
     taken = _preview_cache.take(confirm_token)
     if taken is None:
-        raise HTTPException(http_status.HTTP_400_BAD_REQUEST, "预览已过期，请重新上传")
+        raise DomainError(status.HTTP_400_BAD_REQUEST, "预览已过期，请重新上传")
     rows, _owner = taken
     return rows

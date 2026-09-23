@@ -6,6 +6,7 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, FiniteFloat, ValidationInfo, field_validator
 
+from app.core.limits import MAX_ID_LIST_LEN
 from app.schemas._patch import reject_explicit_null
 
 
@@ -51,7 +52,7 @@ class QuestionOut(BaseModel):
     answer: Any
     analysis: str = ""
     difficulty: int = Field(2, ge=1, le=3)
-    tags: list[str] | None = None
+    tags: list[str] | None = Field(None, max_length=MAX_ID_LIST_LEN)
     score: FiniteFloat = Field(2, ge=0)
     group_id: int | None = None
 
@@ -67,7 +68,7 @@ class QuestionCreate(BaseModel):
     answer: Any
     analysis: str = ""
     difficulty: int = Field(2, ge=1, le=3)
-    tags: list[str] | None = None
+    tags: list[str] | None = Field(None, max_length=MAX_ID_LIST_LEN)
     score: FiniteFloat = Field(2, ge=0)
     group_id: int | None = None
 
@@ -91,7 +92,7 @@ class QuestionUpdate(BaseModel):
     answer: Any | None = None
     analysis: str | None = None
     difficulty: int | None = Field(None, ge=1, le=3)
-    tags: list[str] | None = None
+    tags: list[str] | None = Field(None, max_length=MAX_ID_LIST_LEN)
     score: FiniteFloat | None = Field(None, ge=0)
     group_id: int | None = None
 
@@ -111,7 +112,7 @@ class UploadPreviewRow(BaseModel):
     answer: Any
     analysis: str = ""
     difficulty: int = 2
-    tags: list[str] | None = None
+    tags: list[str] | None = Field(None, max_length=MAX_ID_LIST_LEN)
     score: FiniteFloat = Field(2, ge=0)
     row_index: int
     valid: bool = True

@@ -6,6 +6,7 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator
 
+from app.core.limits import MAX_ID_LIST_LEN
 from app.schemas._patch import reject_explicit_null
 
 
@@ -55,4 +56,4 @@ GroupOut.model_rebuild()
 class UserGroupAssign(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    group_ids: list[int] = Field(default_factory=list)
+    group_ids: list[int] = Field(default_factory=list, max_length=MAX_ID_LIST_LEN)

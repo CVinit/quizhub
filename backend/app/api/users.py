@@ -9,6 +9,8 @@ from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
 from sqlalchemy.orm import Session
 
 from app.core.deps import dept_scope_ids, require_admin
+from app.core.limits import MAX_ID_LIST_LEN
+from app.core.uploads import read_limited
 from app.database import get_db
 from app.models.user import User
 from app.schemas.group import UserGroupAssign
@@ -40,7 +42,7 @@ class UserCreateIn(BaseModel):
     role: str = Field(default="user")
     password: str = Field(min_length=6, max_length=72)
     status: str = Field(default="active")
-    group_ids: list[int] = Field(default_factory=list)
+    group_ids: list[int] = Field(default_factory=list, max_length=MAX_ID_LIST_LEN)
 
     @field_validator("password")
     @classmethod
@@ -208,24 +210,15 @@ async def import_preview(
     from app.core.rate_limit import check
 
     check(f"user-import-preview:user:{user.id}", 20, 3600, "用户导入")
-    settings = __import_settings_max_mb(db)
-    if not (file.filename or "").lower().endswith(".xlsx"):
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "仅支持 .xlsx 文件")
-    max_bytes = int(settings * 1024 * 1024)
-    declared = file.size or 0
-    if declared and declared > max_bytes:
-        raise HTTPException(status.HTTP_413_CONTENT_TOO_LARGE, f"文件超过上限 {settings}MB")
-    chunks: list[bytes] = []
-    total = 0
-    while True:
-        chunk = await file.read(1024 * 1024)
-        if not chunk:
-            break
-        total += len(chunk)
-        if total > max_bytes:
-            raise HTTPException(status.HTTP_413_CONTENT_TOO_LARGE, f"文件超过上限 {settings}MB")
-        chunks.append(chunk)
-    content = b"".join(chunks)
+    max_mb = __import_settings_max_mb(db)
+    # 用户模板固定为 .xlsx（openpyxl 只解析 xlsx），不跟随题库导入的扩展名设置；
+    # 扩展名 + 体积上限 + 分块读取统一走 core.uploads（与题库导入共用同一实现）
+    content = await read_limited(
+        file,
+        max_bytes=int(max_mb * 1024 * 1024),
+        allowed_ext={".xlsx"},
+        ext_message="仅支持 .xlsx 文件",
+    )
     try:
         # 解析 xlsx 并对每行做 bcrypt（单次约 300ms，行数上限 5000）是纯 CPU 工作：
         # 直接在 async 路由内调用会独占事件循环数分钟，阻塞所有并发请求。

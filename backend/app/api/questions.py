@@ -8,6 +8,7 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
 from app.core.deps import dept_scope_ids, require_admin
+from app.core.uploads import read_limited
 from app.database import get_db
 from app.models.user import User
 from app.schemas.question import (
@@ -193,26 +194,9 @@ async def upload_preview(
         for ext in settings.get("upload_allowed_ext", ".xlsx").replace("，", ",").split(",")
         if ext.strip()
     }
-    filename = (file.filename or "").lower()
-    if not any(filename.endswith(ext) for ext in allowed_ext):
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "文件扩展名不在允许列表内")
     max_mb = float(settings.get("upload_max_size_mb", "10") or "10")
-    max_bytes = int(max_mb * 1024 * 1024)
-    declared = file.size or 0
-    if declared and declared > max_bytes:
-        raise HTTPException(status.HTTP_413_CONTENT_TOO_LARGE, f"文件超过上限 {max_mb}MB")
-    # 分块读取，超过上限即中止，避免一次性 read() 耗尽内存
-    chunks: list[bytes] = []
-    total = 0
-    while True:
-        chunk = await file.read(1024 * 1024)
-        if not chunk:
-            break
-        total += len(chunk)
-        if total > max_bytes:
-            raise HTTPException(status.HTTP_413_CONTENT_TOO_LARGE, f"文件超过上限 {max_mb}MB")
-        chunks.append(chunk)
-    content = b"".join(chunks)
+    # 扩展名白名单 + 体积上限 + 分块读取统一走 core.uploads（与用户导入共用同一实现）
+    content = await read_limited(file, max_bytes=int(max_mb * 1024 * 1024), allowed_ext=allowed_ext)
     scope = dept_scope_ids(db, user)
     try:
         # openpyxl 解析大工作簿是 CPU 密集型同步工作；在 async 路由内直接调用会

@@ -7,7 +7,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, FiniteFloat, ValidationInfo, field_validator, model_validator
 
-from app.core.limits import validate_answer_size
+from app.core.limits import MAX_ID_LIST_LEN, validate_answer_size
 from app.core.timeutil import business_tz
 from app.schemas._patch import reject_explicit_null
 
@@ -56,9 +56,9 @@ class ExamCreateIn(BaseModel):
     name: str = Field(min_length=1, max_length=200)
     type: str = Field("formal", pattern="^(mock|formal)$")
     paper_template_id: int | None = None
-    manual_questions: list[int] | None = None
+    manual_questions: list[int] | None = Field(None, max_length=MAX_ID_LIST_LEN)
     rules: dict = Field(default_factory=dict)
-    group_ids: list[int] | None = None
+    group_ids: list[int] | None = Field(None, max_length=MAX_ID_LIST_LEN)
     start_at: str | None = None
     end_at: str | None = None
     duration_min: int = Field(90, ge=1, le=1440)
@@ -94,7 +94,7 @@ class ExamUpdateIn(BaseModel):
     model_config = ConfigDict(extra="forbid")
     name: str | None = Field(None, min_length=1, max_length=200)
     rules: dict | None = None
-    group_ids: list[int] | None = None
+    group_ids: list[int] | None = Field(None, max_length=MAX_ID_LIST_LEN)
     start_at: str | None = None
     end_at: str | None = None
     duration_min: int | None = Field(None, ge=1, le=1440)
@@ -103,7 +103,7 @@ class ExamUpdateIn(BaseModel):
     show_score_immediately: bool | None = None
     show_analysis: bool | None = None
     need_review: bool | None = None
-    manual_questions: list[int] | None = None
+    manual_questions: list[int] | None = Field(None, max_length=MAX_ID_LIST_LEN)
     paper_template_id: int | None = None
     # 组卷来源（rules/manual_questions/paper_template_id）变更且该考试已有作答时，
     # 必须显式传 true 才会作废旧作答并重新固化；否则服务端返回 409 影响面提示。
@@ -149,7 +149,7 @@ class PaperTemplateIn(BaseModel):
     name: str = Field(min_length=1, max_length=200)
     mode: str = Field("mock", pattern="^(mock|formal)$")
     config: dict
-    group_ids: list[int] | None = None
+    group_ids: list[int] | None = Field(None, max_length=MAX_ID_LIST_LEN)
 
 
 class PaperPreviewIn(BaseModel):
@@ -164,9 +164,9 @@ class PaperPreviewIn(BaseModel):
 
     type_quota: dict[str, int] = Field(default_factory=dict)
     difficulty_dist: dict[str, float] = Field(default_factory=dict)
-    bank_ids: list[int] = Field(default_factory=list)
-    group_ids: list[int] = Field(default_factory=list)
-    tags: list[str] = Field(default_factory=list)
+    bank_ids: list[int] = Field(default_factory=list, max_length=MAX_ID_LIST_LEN)
+    group_ids: list[int] = Field(default_factory=list, max_length=MAX_ID_LIST_LEN)
+    tags: list[str] = Field(default_factory=list, max_length=MAX_ID_LIST_LEN)
     max_questions: int = Field(100, ge=1, le=1000)
     seed: int | None = None
     order_mode: str | None = Field(None, pattern="^(bank|random|grouped)$")
@@ -185,7 +185,7 @@ class MockPaperIn(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    bank_ids: list[int] | None = None
+    bank_ids: list[int] | None = Field(None, max_length=MAX_ID_LIST_LEN)
     size: int | None = Field(None, ge=1)
     type_quota: dict[str, int] | None = None
     allocation: str = Field("auto", pattern="^(auto|manual)$")

@@ -5,6 +5,7 @@ from __future__ import annotations
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
 
 from app.core.email import normalize_email
+from app.core.limits import MAX_ID_LIST_LEN
 
 
 def _validate_password_bytes(value: str) -> str:
@@ -28,7 +29,8 @@ class RegisterIn(BaseModel):
     password: str = Field(min_length=6, max_length=72)
     name: str = Field(default="", max_length=50)
     code: str = Field(min_length=4, max_length=10)
-    group_ids: list[int] = Field(default_factory=list)  # 注册时选择的分组（可空，视设置是否必选）
+    # 上限见 core/limits：公开接口的 list 入参会直达 SQL 的 IN (...)
+    group_ids: list[int] = Field(default_factory=list, max_length=MAX_ID_LIST_LEN)  # 注册分组（可空）
 
     _norm_email = field_validator("email")(normalize_email)
     _password_bytes = field_validator("password")(_validate_password_bytes)

@@ -12,6 +12,11 @@ from typing import Any
 
 MAX_ANSWER_BYTES = 16 * 1024
 
+# 单请求可提交的 id / 标签列表上限。这些列表会被原样拼进 SQL 的 `IN (...)`：
+# 无上限时单个请求就能撞上 SQLite 的绑定参数上限（`too many SQL variables` → 500），
+# 且 `RegisterIn.group_ids` 走公开注册接口（无需登录）。超限由 Pydantic 拦成 422。
+MAX_ID_LIST_LEN = 200
+
 # 练习作答属于高频核心操作，限流阈值只用于兜底防刷，不能影响正常刷题节奏。
 PRACTICE_ANSWER_LIMIT = 600
 PRACTICE_ANSWER_WINDOW_SEC = 300
