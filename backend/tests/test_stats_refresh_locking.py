@@ -33,6 +33,29 @@ def test_refresh_daily_takes_immediate_write_lock():
     )
 
 
+def test_refresh_user_daily_takes_immediate_write_lock():
+    """refresh_user_daily 与 refresh_daily 同模式，也必须在读快照前取得写锁。
+
+    调用方（review_service 复核改分、exam/scoring 交卷）都是在 commit 之后调用，
+    此时新事务的首条 SQL 是 SELECT；不取锁就存在与 refresh_daily 相同的丢失更新窗口。
+    """
+    statements: list[str] = []
+
+    def _capture(_conn, _cursor, statement, _params, _context, _executemany):  # type: ignore[no-untyped-def]
+        statements.append(statement)
+
+    event.listen(engine, "before_cursor_execute", _capture)
+    try:
+        with db_session() as db:
+            stats_service.refresh_user_daily(db, 1, "2026-01-01")
+    finally:
+        event.remove(engine, "before_cursor_execute", _capture)
+
+    assert any("BEGIN IMMEDIATE" in sql.upper() for sql in statements), (
+        f"未取得写锁，丢失更新窗口仍存在；已执行语句：{statements[:5]}"
+    )
+
+
 def test_refresh_daily_preserves_counts_roundtrip():
     """加锁不改变功能：作答后刷新，聚合应与源记录一致。"""
     from sqlalchemy import select

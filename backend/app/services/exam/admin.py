@@ -17,7 +17,7 @@ from app.models.question import Question, QuestionBank
 from app.models.record import ExamResult, ExamSession, ShortAnswerReview
 from app.models.user import User
 from app.services import mail_service
-from app.services.exam.common import _exam_brief, _exam_question_counts, _expand_groups, _parse_time
+from app.services.exam.common import _exam_brief, _exam_question_counts, _expand_groups, _parse_time, exam_in_scope
 from app.services.grading import is_passed
 from app.services.system_service import get_settings
 
@@ -63,11 +63,11 @@ def list_exams(db: Session, scope: set[int] | None = None, status_: str | None =
     rows = db.execute(stmt.order_by(ExamDefinition.id.desc()).limit(fetch)).scalars().all()
     visible: list[ExamDefinition] = []
     for e in rows:
-        if scope is not None:
-            e_groups = e.group_ids or []
-            if not e_groups or not set(e_groups).issubset(scope):
-                # 无指派考试默认全员可见，但部门管理员不应看到此类全局考试
-                continue
+        # 口径统一由 exam_in_scope 表达（子集）：与概览计数、_check_exam_scope 共用，
+        # 否则会出现「概览算得到、列表看不到、编辑 403」的自相矛盾。
+        if not exam_in_scope(e.group_ids, scope):
+            # 无指派考试默认全员可见，但部门管理员不应看到此类全局考试
+            continue
         visible.append(e)
         if len(visible) >= limit:
             break
@@ -81,11 +81,9 @@ def _check_exam_scope(db: Session, e: ExamDefinition, scope: set[int] | None) ->
 
     口径是**子集**而非"有交集"：只要有一个指派分组在调用者范围之外，就说明该考试
     跨出了其管辖范围（例如共同指派给两个部门的考试，两个部门管理员都无权改）。
+    判定统一由 `exam_in_scope` 表达，与概览计数、考试列表共用同一实现。
     """
-    if scope is None:
-        return
-    e_groups = e.group_ids or []
-    if not e_groups or not set(e_groups).issubset(scope):
+    if not exam_in_scope(e.group_ids, scope):
         raise DomainError(status.HTTP_403_FORBIDDEN, "无权操作该考试")
 
 

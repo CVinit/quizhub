@@ -6,12 +6,16 @@
 
 from __future__ import annotations
 
+import hashlib
+import logging
 import os
 import threading
 import time
 from collections.abc import Callable
 
 from fastapi import HTTPException, Request, status
+
+logger = logging.getLogger("quizhub")
 
 # 是否信任反向代理头 X-Forwarded-For。默认不信任（裸跑 uvicorn 时安全），
 # 仅当确认上游 Nginx 已用 `proxy_set_header X-Forwarded-For $remote_addr;`
@@ -77,7 +81,22 @@ class RateLimiter:
 limiter = RateLimiter()
 
 
-def _deny(scope: str, retry: int) -> None:
+def _mask_key(key: str) -> str:
+    """把限流键转成可入日志的形式。
+
+    键形如 `login:account:<email>`、`practice-answer:user:<id>`：标识部分可能是邮箱（PII），
+    因此只保留前两段维度前缀，标识替换为短哈希（不可逆，但仍可跨请求关联同一账号）。
+    """
+    parts = key.split(":")
+    if len(parts) <= 2:
+        return key
+    digest = hashlib.sha256(":".join(parts[2:]).encode("utf-8")).hexdigest()[:8]
+    return f"{':'.join(parts[:2])}:{digest}"
+
+
+def _deny(scope: str, retry: int, key: str = "") -> None:
+    # 限流拒绝必须留痕：撞库/邮件轰炸/刷接口需要能从日志看出「哪个维度在被刷、多久后可重试」。
+    logger.warning("[rate_limit] 触发限流 scope=%s key=%s retry_after=%ss", scope, _mask_key(key), retry)
     raise HTTPException(
         status.HTTP_429_TOO_MANY_REQUESTS,
         detail=f"请求过于频繁，请稍后再试（{scope}）",
@@ -92,7 +111,7 @@ def check(key: str, limit: int, window: int, scope: str = "操作") -> None:
     """
     allowed, retry = limiter.hit(key, limit, window)
     if not allowed:
-        _deny(scope, retry)
+        _deny(scope, retry, key)
 
 
 def ip_limit(scope: str, limit: int, window: int) -> Callable[..., None]:

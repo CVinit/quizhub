@@ -84,12 +84,18 @@ def _safe_header(value: str) -> str:
 
 
 def _render(tpl: str, **kwargs: object) -> str:
+    """按模板渲染正文；模板异常时返回空串，由调用方回退默认文案。
+
+    `str.format` 的失败形式不止 KeyError/IndexError：格式说明符非法（如 `{code!x}`、
+    `{code:02d}`）抛 ValueError，属性访问不存在（如 `{code.missing}`）抛 AttributeError。
+    只捕获前两者会让异常逃出兜底，整封邮件被丢弃（用户收不到验证码/通知），故一并捕获。
+    """
     try:
         return tpl.format(**kwargs)
-    except (KeyError, IndexError):
+    except (KeyError, IndexError, ValueError, AttributeError):
         # 模板占位符写错时不应把「带 {xxx} 的原文」发给用户，
         # 记录告警以便管理员发现，同时退回不带占位符的通用文案。
-        logger.warning("[mail] 邮件模板占位符不匹配，已改用默认文案: %r", tpl[:60])
+        logger.warning("[mail] 邮件模板占位符不匹配或格式错误，已改用默认文案: %r", tpl[:60])
         return ""
 
 

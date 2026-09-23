@@ -9,6 +9,7 @@ from app.models.question import Question
 from app.models.record import ExamResult, PracticeRecord, QuestionState
 from app.models.stats import StatsUserDaily
 from app.models.user import User
+from app.services.exam_service import exam_in_scope
 from app.services.stats.common import _date_str, _utcnow
 
 
@@ -150,14 +151,17 @@ def admin_overview(db: Session, scope: set[int] | None = None) -> dict:
     correct_answers = db.execute(correct_stmt).scalar() or 0
     accuracy = round(correct_answers / total_answers * 100) if total_answers else 0
 
-    # 正式考试数：按指派分组与 scope 取交集过滤（无指派考试仅 super_admin 计入）
+    # 正式考试数：与考试列表 / _check_exam_scope 共用 exam_in_scope（**子集**口径）。
+    # 原实现用「有交集」判定：共同指派给多个部门的考试会被算进某个部门的概览，
+    # 但该部门管理员既看不到它（列表按子集过滤）也改不了（操作前校验 403），
+    # 概览数字与其可操作范围自相矛盾。
     if scope is None:
         total_exams = (
             db.execute(select(func.count(ExamDefinition.id)).where(ExamDefinition.type == "formal")).scalar() or 0
         )
     else:
         exam_rows = db.execute(select(ExamDefinition.group_ids).where(ExamDefinition.type == "formal")).all()
-        total_exams = sum(1 for (gids,) in exam_rows if gids and set(gids) & scope)
+        total_exams = sum(1 for (gids,) in exam_rows if exam_in_scope(gids, scope))
 
     # 待复核简答：按可见用户过滤
     review_stmt = select(func.count(ShortAnswerReview.id)).where(ShortAnswerReview.verdict.is_(None))

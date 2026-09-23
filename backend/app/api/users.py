@@ -249,7 +249,17 @@ def import_users(
             if str(r.get("role") or "user") != "user":
                 raise HTTPException(status.HTTP_403_FORBIDDEN, "仅超级管理员可创建管理员账号")
     rows = user_excel.consume_preview(confirm_token, user.id)
-    res = user_service.import_users(db, user.id, rows, scope=dept_scope_ids(db, user), actor_role=user.role)
+    scope = dept_scope_ids(db, user)
+    res = user_service.import_users(
+        db,
+        user.id,
+        rows,
+        scope=scope,
+        actor_role=user.role,
+        # 部门管理员导入的用户自动归属其部门：与手动新增（create_user）同口径。
+        # 模板的「分组ID」列允许留空，不自动归属会产生「自己建的号自己看不到、管不了」。
+        dept_group_id=user.dept_group_id if scope is not None else None,
+    )
     return res
 
 

@@ -31,6 +31,7 @@ __all__ = [
     "_exam_question_counts",
     "_expand_groups",
     "_user_can_access_exam",
+    "exam_in_scope",
 ]
 
 
@@ -61,6 +62,31 @@ def _user_can_access_exam(e: ExamDefinition, user_group_ids: set[int], subtree: 
     for gid in e_groups:
         allowed |= subtree.get(gid, {gid})
     return bool(allowed.intersection(user_group_ids))
+
+
+def exam_in_scope(group_ids: list[int] | None, scope: set[int] | None) -> bool:
+    """考试是否落在调用者的数据范围内（管理端口径）。
+
+    口径是**子集**而非「有交集」：只要有一个指派分组在调用者范围之外，就说明该考试
+    跨出了其管辖范围（例如共同指派给两个部门的考试，两个部门管理员都无权改）。
+    无指派分组（全员可见）的考试不属于任何部门管理员的可操作范围，故 scope 非 None
+    时返回 False。
+
+    概览计数、考试列表、操作前校验必须共用本函数：三处口径一旦分叉，就会出现
+    「概览里算得到、列表里看不到、编辑时 403」的自相矛盾。
+
+    Args:
+        group_ids: 考试的指派分组（None/空表示未指派）。
+        scope: 调用者的数据范围；None（super_admin）表示全量。
+
+    Returns:
+        是否在范围内。
+    """
+    if scope is None:
+        return True
+    if not group_ids:
+        return False
+    return set(group_ids).issubset(scope)
 
 
 def _parse_time(value: str) -> datetime:

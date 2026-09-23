@@ -36,9 +36,15 @@ def update(group_id: int, payload: GroupUpdate, db: Session = Depends(get_db), u
     scope = dept_scope_ids(db, user)
     if scope is not None and group_id not in scope:
         raise HTTPException(status.HTTP_403_FORBIDDEN, "无权操作该分组")
-    # 部门管理员不可把分组挂到自身子树外的父分组（防扩张数据范围）
-    if scope is not None and payload.parent_id is not None and payload.parent_id not in scope:
-        raise HTTPException(status.HTTP_403_FORBIDDEN, "无权挂到该父分组")
+    # 部门管理员不可把分组挂到自身子树外的父分组（防扩张数据范围）。
+    # 必须用 model_fields_set 区分「未传」与「显式 null」：显式 null 表示「移到根」，
+    # 若不校验，部门管理员可把自己子树内的分组（含 dept_group_id 指向的那个）摘出本部门树。
+    if (
+        scope is not None
+        and "parent_id" in payload.model_fields_set
+        and (payload.parent_id is None or payload.parent_id not in scope)
+    ):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "无权把分组移出本部门")
     g = group_service.update_group(db, group_id, payload)
     audit_log(db, user.id, "group.update", "group", group_id, payload.model_dump(exclude_unset=True))
     return g

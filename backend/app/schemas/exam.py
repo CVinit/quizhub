@@ -9,6 +9,7 @@ from pydantic import BaseModel, ConfigDict, Field, FiniteFloat, ValidationInfo, 
 
 from app.core.limits import validate_answer_size
 from app.core.timeutil import business_tz
+from app.schemas._patch import reject_explicit_null
 
 
 def _parse_exam_time(value: str, field_name: str) -> datetime:
@@ -82,8 +83,12 @@ class ExamUpdateIn(BaseModel):
     """考试更新入参（PATCH 语义：未传字段不修改）。
 
     注意区分“未传”与“显式传 null”：`exclude_unset=True` 会跳过未传字段，但显式 null
-    会被 setattr 写入模型。duration_min / pass_score / max_attempts 在数据库中是 NOT NULL，
-    写入 null 会抛出 IntegrityError（500）。这里用 `_reject_explicit_null` 将其拦成 422。
+    会被 setattr 写入模型。凡是 exam_definitions 中的 NOT NULL 列（name / duration_min /
+    pass_score / max_attempts / show_score_immediately / show_analysis / need_review），
+    写入 null 都会抛 IntegrityError（500）。这里用 `_reject_explicit_null` 将其拦成 422。
+
+    可空列（rules / group_ids / start_at / end_at / manual_questions / paper_template_id）
+    仍允许显式 null。
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -104,13 +109,20 @@ class ExamUpdateIn(BaseModel):
     # 必须显式传 true 才会作废旧作答并重新固化；否则服务端返回 409 影响面提示。
     confirm_reset: bool = False
 
-    @field_validator("duration_min", "pass_score", "max_attempts", mode="before")
+    @field_validator(
+        "name",
+        "duration_min",
+        "pass_score",
+        "max_attempts",
+        "show_score_immediately",
+        "show_analysis",
+        "need_review",
+        mode="before",
+    )
     @classmethod
     def _reject_explicit_null(cls, v: Any, info: ValidationInfo) -> Any:
         """这些字段对应 NOT NULL 列，拒绝显式 null，避免落库时 500。"""
-        if v is None:
-            raise ValueError(f"{info.field_name} 不能为 null；如需保持不变请不要提交该字段")
-        return v
+        return reject_explicit_null(v, info)
 
     @field_validator("rules", mode="before")
     @classmethod

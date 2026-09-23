@@ -101,6 +101,25 @@ def list_questions(
     return {"total": total, "page": page, "page_size": page_size, "items": rows}
 
 
+def _split_ids(raw: str) -> list[int]:
+    """解析逗号分隔的 id 列表（非法片段静默跳过）。
+
+    只接受 1~10 位纯数字：`str.isdigit()` 对任意长度都为真，而 CPython ≥3.11 的
+    `int()` 有 4300 位上限，超长入参会抛未捕获的 ValueError → 500。
+    """
+    ids: list[int] = []
+    for item in raw.split(","):
+        token = item.strip()
+        if token.isdigit() and len(token) <= 10:
+            ids.append(int(token))
+    return ids
+
+
+def _split_tags(raw: str) -> list[str]:
+    """解析逗号分隔的标签列表（去空白、去空项）。"""
+    return [item.strip() for item in raw.split(",") if item.strip()]
+
+
 @router.get("/question-type-stats")
 def question_type_stats(
     bank_ids: str = "",
@@ -110,13 +129,11 @@ def question_type_stats(
     user: User = Depends(require_admin),
 ):
     """各题型可用题量统计（组卷来源筛选），供题型配比编辑时提示可用余量。"""
-    split_ids = lambda s: [int(x) for x in s.split(",") if x.strip().isdigit()]  # noqa: E731
-    split_tags = lambda s: [x.strip() for x in s.split(",") if x.strip()]  # noqa: E731
     return question_service.type_stats(
         db,
-        split_ids(bank_ids),
-        split_ids(group_ids),
-        split_tags(tags),
+        _split_ids(bank_ids),
+        _split_ids(group_ids),
+        _split_tags(tags),
         dept_scope_ids(db, user),
     )
 

@@ -119,7 +119,17 @@ def do_import(db: Session, confirm_token: str, user_id: int, scope: set[int] | N
         bank = QuestionBank(name=bank_name, group_id=group_id)
         db.add(bank)
         db.flush()  # 拿到 bank.id
-        bank_id = bank.id
+    else:
+        # 预览与确认之间题库可能已被删除：显式报错，避免后续访问 bank 属性变成 500
+        existing = db.get(QuestionBank, bank_id)
+        if existing is None:
+            raise DomainError(status.HTTP_400_BAD_REQUEST, "题库不存在")
+        bank = existing
+    bank_id = bank.id
+    # 题目分组必须与题库分组一致（question_service.update_question 维护同一不变量）。
+    # super_admin 指定已有题库但未传 group_id 时若沿用 None，题目会落 NULL 分组：
+    # 部门管理员既看不到（列表按 group_id 过滤）也改不了（_validate_group 对 None 直接 403）。
+    question_group_id = bank.group_id
 
     # 先收集所有唯一标签，统一入库，避免同事务内重复插入
     all_tags: set[str] = set()
@@ -145,7 +155,7 @@ def do_import(db: Session, confirm_token: str, user_id: int, scope: set[int] | N
             difficulty=r.difficulty,
             tags=r.tags,
             score=r.score,
-            group_id=group_id,
+            group_id=question_group_id,
         )
         pending.append(q)
         success += 1

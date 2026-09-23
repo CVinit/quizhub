@@ -263,13 +263,14 @@ def test_system_settings_read_and_update(api):
     updated = api.put(
         "/api/system/settings",
         headers=headers,
-        json={"category": "general", "updates": {"site_name": "新站点", "rank_visible": "false"}},
+        json={"category": "general", "updates": {"site_name": "新站点"}},
     )
     assert updated.status_code == 200
     assert api.get("/api/system/site").json()["site_name"] == "新站点"
 
+    # 布尔型设置项非法值必须被拒绝（rank_visible 下线后，改用同类的 register_open）
     invalid = api.put(
-        "/api/system/settings", headers=headers, json={"category": "general", "updates": {"rank_visible": "maybe"}}
+        "/api/system/settings", headers=headers, json={"category": "register", "updates": {"register_open": "maybe"}}
     )
     assert invalid.status_code == 400
 

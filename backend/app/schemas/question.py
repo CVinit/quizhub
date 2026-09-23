@@ -4,7 +4,9 @@ from __future__ import annotations
 
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field, FiniteFloat
+from pydantic import BaseModel, ConfigDict, Field, FiniteFloat, ValidationInfo, field_validator
+
+from app.schemas._patch import reject_explicit_null
 
 
 class QuestionBankOut(BaseModel):
@@ -71,6 +73,14 @@ class QuestionCreate(BaseModel):
 
 
 class QuestionUpdate(BaseModel):
+    """题目更新入参（PATCH 语义：未传字段不修改）。
+
+    questions 的 question / analysis / difficulty / score 是 NOT NULL 列，显式传 null
+    会在服务层 setattr + commit 时抛 IntegrityError（500），故由 `_reject_explicit_null`
+    拦成 422；可空列（bank_id / options / left_items / right_items / answer / tags /
+    group_id）仍允许显式 null。
+    """
+
     model_config = ConfigDict(extra="forbid")
     bank_id: int | None = None
     type: str | None = None
@@ -84,6 +94,12 @@ class QuestionUpdate(BaseModel):
     tags: list[str] | None = None
     score: FiniteFloat | None = Field(None, ge=0)
     group_id: int | None = None
+
+    @field_validator("question", "analysis", "difficulty", "score", mode="before")
+    @classmethod
+    def _reject_explicit_null(cls, v: Any, info: ValidationInfo) -> Any:
+        """这些字段对应 NOT NULL 列，拒绝显式 null，避免落库时 500。"""
+        return reject_explicit_null(v, info)
 
 
 class UploadPreviewRow(BaseModel):

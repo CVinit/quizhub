@@ -322,6 +322,11 @@ def update_user(
         # 部门管理员只能把目标用户迁到自己范围内的分组
         if scope is not None and dept_group_id not in scope:
             raise DomainError(status.HTTP_403_FORBIDDEN, "无权将用户迁移到该部门")
+        # 分组必须存在：users.dept_group_id 有指向 groups.id 的外键且运行期
+        # PRAGMA foreign_keys=ON，直接写入不存在的 id 会在 commit 抛 IntegrityError → 500。
+        # 与 assign_groups 的分组存在性校验同口径。
+        if not db.get(Group, dept_group_id):
+            raise DomainError(status.HTTP_400_BAD_REQUEST, "分组不存在")
         u.dept_group_id = dept_group_id
         changes["dept_group_id"] = dept_group_id
     db.commit()
@@ -452,12 +457,16 @@ def import_users(
     rows: list[dict],
     scope: set[int] | None = None,
     actor_role: str = "user",
+    dept_group_id: int | None = None,
 ) -> dict:
     """批量导入用户（管理员已预览确认）。rows 每项含 email/name/role/password/status/group_ids。
 
     单行失败不中断整体导入，逐行收集成功/失败计数与失败明细，统一提交成功项。
     - scope：部门管理员数据范围；非 None 时导入用户的 group_ids 必须落在 scope 内（防水平越权）。
     - actor_role：调用者角色；非 super_admin 不得导入管理员账号（防垂直越权，与 create_user 路由守卫一致）。
+    - dept_group_id：新用户的归属部门（部门管理员导入时传其本部门，与 create_user 同口径）；
+      模板的「分组ID」列允许留空，若不自动归属，导入出的用户不在调用者数据范围内，
+      会出现「自己建的号自己看不到、管不了」的孤儿用户。
 
     性能与隔离：
     - 已存在邮箱、合法分组 id 均一次性预取，消除逐行 SELECT（原实现每行 2 次查询）；
@@ -541,6 +550,7 @@ def import_users(
                         role=role,
                         status=st,
                         email_verified=True,
+                        dept_group_id=dept_group_id,
                     ),
                     gids,
                 )

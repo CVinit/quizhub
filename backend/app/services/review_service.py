@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import logging
+from collections.abc import Callable
 from datetime import datetime, timezone
 from typing import cast
 
@@ -15,6 +17,28 @@ from app.models.exam import ExamDefinition, ExamQuestion
 from app.models.question import Question
 from app.models.record import ExamResult, ShortAnswerReview
 from app.models.user import User
+
+logger = logging.getLogger("quizhub")
+
+
+def _refresh_stats_quietly(db: Session, label: str, refresh: Callable[[], object]) -> None:
+    """派生统计刷新失败时降级为日志，不阻断已提交的业务结果。
+
+    复核与成绩公布都会在 commit 之后重算当日聚合。重算属于派生数据：失败若向上抛，
+    接口会返回 500，但复核/公布其实已经落库，管理员重试只会得到「该题已复核」或
+    「published: 0」，无法判断真实状态（且公布路径会因此跳过通知邮件）。
+    与 exam/scoring.submit_exam、exam/admin.update_exam、question_service.delete_* 同口径。
+
+    Args:
+        db: 数据库会话。
+        label: 日志中的操作名（便于定位是哪条业务路径）。
+        refresh: 实际执行重算的无参可调用对象。
+    """
+    try:
+        refresh()
+    except Exception as exc:  # noqa: BLE001  派生统计失败不阻断已提交结果
+        db.rollback()
+        logger.warning("[review] %s 后统计重算失败，已忽略：%s", label, type(exc).__name__)
 
 
 def list_pending(
@@ -86,6 +110,26 @@ def review(
     reviewer: User,
     scope: set[int] | None = None,
 ) -> dict:
+    """复核一道简答题并累加得分。
+
+    归属校验：`scope` 非 None（部门管理员）时校验考生落在其数据范围内（IDOR 防护）。
+
+    内控取舍（产品决策 2026-09-23）：**允许管理员兼考生**，因此不禁止复核人复核本人成绩。
+    管理员若同时是某场考试的考生，其本人简答可由自己判定 verdict —— 这是已确认的产品
+    取舍，不是遗漏。若日后改为强制双人复核，在此处加 `r.user_id == reviewer.id` 拦截，
+    并同步确认前端「待复核」列表不再把本人条目展示给本人。
+
+    Args:
+        db: 数据库会话。
+        review_id: 待复核记录 id。
+        verdict: pass / fail / partial。
+        partial_score: partial 时的得分（0 ~ 该题卷面分值）。
+        reviewer: 复核人。
+        scope: 调用者的数据范围（None = super_admin 全量）。
+
+    Returns:
+        {"success": True, "verdict": verdict}
+    """
     if verdict not in ("pass", "fail", "partial"):
         raise DomainError(status.HTTP_400_BAD_REQUEST, "verdict 必须是 pass/fail/partial")
     r = db.get(ShortAnswerReview, review_id)
@@ -159,10 +203,15 @@ def review(
         )
     )
     db.commit()
-    # 复核改分会影响该考生当日成绩聚合，即时刷新其当日行
+    # 复核改分会影响该考生当日成绩聚合，即时刷新其当日行。
+    # 派生统计失败不阻断已提交的复核结果（否则管理员重试只会得到「该题已复核」）。
     from app.services import stats_service
 
-    stats_service.refresh_user_for_timestamps(db, r.user_id, [result.created_at])
+    _refresh_stats_quietly(
+        db,
+        "复核改分",
+        lambda: stats_service.refresh_user_for_timestamps(db, r.user_id, [result.created_at]),
+    )
     return {"success": True, "verdict": verdict}
 
 
@@ -187,12 +236,11 @@ def publish_results(db: Session, exam_id: int, scope: set[int] | None = None, bg
     e = db.get(ExamDefinition, exam_id)
     if not e:
         raise DomainError(status.HTTP_404_NOT_FOUND, "考试不存在")
-    # 部门管理员数据范围校验：考试的全部分组都须落在其子树内（子集口径，
-    # 与 exam/admin._check_exam_scope 保持一致）
-    if scope is not None:
-        e_groups = e.group_ids or []
-        if not e_groups or not set(e_groups).issubset(scope):
-            raise DomainError(status.HTTP_403_FORBIDDEN, "无权操作该考试")
+    # 部门管理员数据范围校验：与 exam/admin 共用 exam_in_scope（子集口径）
+    from app.services.exam_service import exam_in_scope
+
+    if not exam_in_scope(e.group_ids, scope):
+        raise DomainError(status.HTTP_403_FORBIDDEN, "无权操作该考试")
 
     # 只取关键列，避免把每条成绩实例化为 ORM 对象后逐行 flush（写事务时间随人数线性增长）
     stmt = select(ExamResult.id, ExamResult.user_id, ExamResult.exam_session_id, ExamResult.created_at).where(
@@ -266,9 +314,15 @@ def publish_results(db: Session, exam_id: int, scope: set[int] | None = None, bg
 
     # 成绩由「未公布」变为「已公布」会改变统计口径（聚合只纳入已公布正式成绩），
     # 因此必须在提交后重算受影响日期的聚合，否则排行榜要等到下次日刷/手动刷新才更新。
+    # 降级执行：重算失败不能让已成功的公布变成 500，否则会连带跳过下面的通知邮件，
+    # 而管理员重试时已无 published=False 的行（published: 0），考生永远收不到通知。
     from app.services import stats_service
 
-    stats_service.refresh_for_timestamps(db, [r[3] for r in claimed])
+    _refresh_stats_quietly(
+        db,
+        "公布成绩",
+        lambda: stats_service.refresh_for_timestamps(db, [r[3] for r in claimed]),
+    )
 
     if bg is not None:
         from app.services import mail_service

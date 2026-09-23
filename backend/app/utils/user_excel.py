@@ -106,6 +106,11 @@ def _norm_status(v: str) -> str:
 
 
 def _parse_group_ids(v: Any) -> list[int]:
+    """解析「分组ID」单元格（逗号分隔），非法片段静默跳过。
+
+    片段必须能转为有限整数：`inf` / `1e400` 这类文本会被 float() 解析为 inf，而
+    `int(inf)` 抛 OverflowError（原先只捕获 ValueError/TypeError，会让整份导入 500）。
+    """
     if v is None or str(v).strip() == "":
         return []
     parts = str(v).replace("，", ",").split(",")
@@ -118,7 +123,7 @@ def _parse_group_ids(v: Any) -> list[int]:
             gid = int(float(p))
             if gid > 0:
                 out.append(gid)
-        except (ValueError, TypeError):
+        except (ValueError, TypeError, OverflowError):
             continue
     return list(dict.fromkeys(out))
 

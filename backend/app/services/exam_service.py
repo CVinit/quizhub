@@ -42,6 +42,7 @@ from app.services.exam.common import (
     _parse_time,
     _user_can_access_exam,
     _within_time_window,
+    exam_in_scope,
 )
 from app.services.exam.mock import (
     MOCK_ALLOCATIONS,
@@ -90,6 +91,7 @@ __all__ = [
     "_parse_time",
     "_user_can_access_exam",
     "_within_time_window",
+    "exam_in_scope",
     "_SCORING_TIMEOUT_SEC",
     "_recover_stuck_scoring",
     "get_result",

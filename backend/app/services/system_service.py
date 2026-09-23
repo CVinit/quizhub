@@ -19,11 +19,13 @@ from app.models.system import Setting
 
 logger = logging.getLogger("quizhub")
 
+# 模拟考试保留的未提交定义数上限。与 exam/mock.MOCK_KEEP_MAX 同值：本模块处于更底层
+# （exam/mock 反向依赖它），不能 import exam 包，故此处保留字面量并在此注明。
+_MOCK_KEEP_MAX = 100
+
 # 布尔型设置项：写入时统一归一为小写 "true"/"false"。读取端（site_info、
-# rank_visible 开关等）按小写字面量比较，若不归一，"TRUE" 会被接受入库却读成 false。
-BOOL_SETTING_KEYS = frozenset(
-    {"rank_visible", "smtp_use_tls", "register_open", "new_user_need_approve", "register_group_required"}
-)
+# 各布尔开关）按小写字面量比较，若不归一，"TRUE" 会被接受入库却读成 false。
+BOOL_SETTING_KEYS = frozenset({"smtp_use_tls", "register_open", "new_user_need_approve", "register_group_required"})
 
 # 注册邮箱后缀的合法形态：@ + 域名（至少一个点；标签不以连字符开头/结尾）。
 # 强制 "@" 前缀是安全控制的一部分，见 _validate_value 的 register_allowed_email_suffixes 分支。
@@ -34,11 +36,13 @@ DEFAULT_SETTINGS: dict[str, tuple[str, str, bool]] = {
     "site_name": ("培训考试平台", "general", False),
     "site_logo": ("", "general", False),
     "brand_color": ("#E60012", "general", False),
-    # 排行榜是否对用户端可见（关闭后用户端不显示排行入口，且路由拦截直接访问）
-    "rank_visible": ("true", "general", False),
     "default_pass_score": ("60", "exam", False),
     "default_exam_duration_min": ("90", "exam", False),
     "max_questions_per_exam": ("100", "exam", False),
+    # 每个用户保留的「未提交」模拟考试定义数：超出后清理最早的未提交考试，
+    # 已交卷的模拟成绩不受影响（见 exam/mock._cleanup_stale_mock_defs）。
+    # 上限 100 与 exam/mock.MOCK_KEEP_MAX 保持一致（本模块是低层模块，不反向 import exam 包）。
+    "mock_keep_definitions": ("5", "exam", False),
     "upload_max_size_mb": ("10", "upload", False),
     "upload_allowed_ext": (".xlsx", "upload", False),
     "smtp_host": ("", "smtp", False),
@@ -188,13 +192,22 @@ def _validate_value(key: str, value: str) -> None:
             raise ValueError("default_pass_score 必须是数字") from None
         if not math.isfinite(number) or not 0 <= number <= 100:
             raise ValueError("default_pass_score 必须在 0~100 之间")
-    elif key in {"default_exam_duration_min", "max_questions_per_exam", "upload_max_size_mb"}:
+    elif key in {"default_exam_duration_min", "max_questions_per_exam", "mock_keep_definitions"}:
+        # 消费方按 int() 解析（exam/mock.py 用 int(settings.get("default_exam_duration_min"))）。
+        # 原先用 float() 校验会放行 "90.5"：保存返回 200，但用户开考时 int("90.5") 抛
+        # ValueError → 500。校验口径必须与消费口径一致，否则错误在另一条链路才爆发。
+        if not value.isdigit() or len(value) > 9 or int(value) < 1:
+            raise ValueError(f"{key} 必须是正整数")
+        if key == "mock_keep_definitions" and int(value) > _MOCK_KEEP_MAX:
+            raise ValueError(f"mock_keep_definitions 不能超过 {_MOCK_KEEP_MAX}")
+    elif key == "upload_max_size_mb":
+        # 消费方按 float() 解析（api/questions.py、api/users.py），允许小数 MB
         try:
             number = float(value)
         except ValueError:
-            raise ValueError(f"{key} 必须是数字") from None
+            raise ValueError("upload_max_size_mb 必须是数字") from None
         if not math.isfinite(number) or number < 0:
-            raise ValueError(f"{key} 必须是非负有限数字")
+            raise ValueError("upload_max_size_mb 必须是非负有限数字")
     elif key == "register_allowed_group_ids":
         for group_id in value.replace("，", ",").split(","):
             if group_id.strip() and (not group_id.strip().isdigit() or int(group_id) <= 0):

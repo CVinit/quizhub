@@ -16,6 +16,7 @@ from sqlalchemy.orm import Session
 
 from app.core.email import normalize_email
 from app.core.errors import DomainError
+from app.core.request_context import get_request_ip
 from app.core.security import create_access_token, gen_verify_code, hash_password, verify_password
 from app.models.user import EmailVerification, User
 from app.services import mail_service
@@ -305,6 +306,14 @@ def resend(db: Session, email: str, bg: BackgroundTasks) -> None:
 
 
 def login(db: Session, email: str, password: str) -> dict:
+    """校验凭据并签发访问令牌。
+
+    失败分支一律记 WARNING：撞库/账号枚举需要能从服务端日志发现，但日志中**不落邮箱**
+    （PII），只记原因与来源 IP / user_id（项目日志 PII 约定见 CLAUDE 审查规则）。
+
+    Raises:
+        DomainError: 401（凭据错误）/ 403（未验证、禁用、待审批）。
+    """
     email = normalize_email(email)
     user = db.execute(select(User).where(User.email == email)).scalar_one_or_none()
     if user is None:
@@ -312,14 +321,19 @@ def login(db: Session, email: str, password: str) -> dict:
         # 「命中 ~300ms / 未命中 ~0ms」的差异可被单次请求用来枚举已注册邮箱
         # （与 send_code 的静默防枚举一致）。该 hash 不对应任何真实账号。
         verify_password(password, _DUMMY_PASSWORD_HASH)
+        logger.warning("[auth] 登录失败：账号不存在 ip=%s", get_request_ip())
         raise DomainError(status.HTTP_401_UNAUTHORIZED, "邮箱或密码错误")
     if not verify_password(password, user.password_hash):
+        logger.warning("[auth] 登录失败：密码错误 user_id=%s ip=%s", user.id, get_request_ip())
         raise DomainError(status.HTTP_401_UNAUTHORIZED, "邮箱或密码错误")
     if not user.email_verified:
+        logger.warning("[auth] 登录失败：邮箱未验证 user_id=%s", user.id)
         raise DomainError(status.HTTP_403_FORBIDDEN, "请先完成邮箱验证")
     if user.status == "disabled":
+        logger.warning("[auth] 登录失败：账号已禁用 user_id=%s ip=%s", user.id, get_request_ip())
         raise DomainError(status.HTTP_403_FORBIDDEN, "账号已被禁用")
     if user.status == "pending":
+        logger.warning("[auth] 登录失败：账号待审批 user_id=%s", user.id)
         raise DomainError(status.HTTP_403_FORBIDDEN, "账号待管理员审批")
     token = create_access_token(user.id, {"role": user.role, "ver": user.token_version})
     return {"access_token": token, "token_type": "bearer", "user": user}
@@ -327,7 +341,11 @@ def login(db: Session, email: str, password: str) -> dict:
 
 def change_password(db: Session, user: User, old: str, new: str) -> None:
     if not verify_password(old, user.password_hash):
+        logger.warning("[auth] 修改密码失败：原密码错误 user_id=%s", user.id)
         raise DomainError(status.HTTP_400_BAD_REQUEST, "原密码错误")
     user.password_hash = hash_password(new)
     user.token_version += 1
     db.commit()
+    # token_version 变更会让该用户其它会话立即失效：属安全相关事件，留痕便于排查
+    # 「莫名被踢下线」类反馈（仅记 user_id，不含邮箱等 PII）
+    logger.info("[auth] 用户 %s 修改密码成功，其它会话已失效", user.id)
