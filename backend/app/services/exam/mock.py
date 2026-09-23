@@ -24,6 +24,10 @@ MOCK_SIZE_PRESETS = (10, 20, 30, 50, 100)
 MOCK_DEFAULT_SIZE = 30
 MOCK_MAX_QUESTIONS = 100
 MOCK_ALLOCATIONS = ("auto", "manual")
+# 每个用户保留的「未提交」模拟考试定义数，可由系统设置 mock_keep_definitions 覆盖。
+# 每次开考若设置组合不同就会新建一个定义 + N 行固化题目，不收敛则数据无界增长。
+MOCK_KEEP_DEFAULT = 5
+MOCK_KEEP_MAX = 100
 
 
 def _normalize_bank_ids(bank_ids) -> list[int]:
@@ -225,39 +229,93 @@ def _mock_rules_key(rules: dict) -> str:
     )
 
 
-def _cleanup_stale_mock_defs(db: Session, user_id: int, keep_id: int | None = None) -> int:
-    """清理该用户无任何作答记录的 ongoing mock 定义，避免 exam_definitions 无界堆积。
+def _mock_keep_limit(settings: dict[str, str]) -> int:
+    """读取「保留最近 N 个未提交模拟考试定义」的上限。
 
-    仅清理「没有 ExamSession」的定义：有会话的定义保留（可能是用户未完成的作答）。
+    设置值非法（被直接改库、越界）时回退默认，避免清理逻辑因脏配置整体失效。
+
+    Args:
+        settings: `get_settings(db, "exam")` 的返回值。
+
+    Returns:
+        保留数量，范围 1 ~ `MOCK_KEEP_MAX`。
     """
+    raw = (settings.get("mock_keep_definitions") or "").strip()
+    if raw.isdigit() and 1 <= int(raw) <= MOCK_KEEP_MAX:
+        return int(raw)
+    return MOCK_KEEP_DEFAULT
 
+
+def _cleanup_stale_mock_defs(
+    db: Session, user_id: int, keep_id: int | None = None, keep: int = MOCK_KEEP_DEFAULT
+) -> int:
+    """把该用户的 ongoing mock 定义收敛到最近 `keep` 个，清理更早的未提交考试。
+
+    背景：原实现只删「没有任何 ExamSession」的定义，而每次开考都会建出会话，该条件
+    实际永不成立 —— 清理从未生效，`exam_definitions` / `exam_questions` /
+    `exam_sessions` 随开考次数无界增长（用户每换一组题库/题量设置就是一个新定义）。
+
+    规则：
+    - 保留最近 `keep` 个 ongoing 定义（按 id 倒序，并强制包含本次复用的 keep_id）；
+    - 其余定义中，**有已交卷/已判分会话的保留**：删除会级联抹掉该考生的模拟考试成绩
+      （ExamResult 经 exam_definition_id / exam_session_id 级联），属破坏性操作；
+    - 只清理「全部会话仍是 in_progress」的废弃定义，连同其未完成会话一并删除。
+
+    Args:
+        db: 数据库会话。
+        user_id: 归属用户（mock 定义全局可见，必须按创建者收敛）。
+        keep_id: 本次开考复用的定义 id，强制保留。
+        keep: 保留的最近定义数（<1 时按 1 处理）。
+
+    Returns:
+        实际删除的定义数。
+    """
     rows = (
         db.execute(
-            select(ExamDefinition).where(
+            select(ExamDefinition)
+            .where(
                 ExamDefinition.type == "mock",
                 ExamDefinition.created_by == user_id,
                 ExamDefinition.status == "ongoing",
             )
+            .order_by(ExamDefinition.id.desc())
         )
         .scalars()
         .all()
     )
     if not rows:
         return 0
-    ids = [e.id for e in rows if e.id != keep_id]
-    if not ids:
+    keep_ids = {e.id for e in rows[: max(1, keep)]}
+    if keep_id is not None:
+        keep_ids.add(keep_id)
+    candidates = [e for e in rows if e.id not in keep_ids]
+    if not candidates:
         return 0
-    with_session = {
+
+    candidate_ids = [e.id for e in candidates]
+    settled = {
         r[0]
-        for r in db.execute(select(ExamSession.exam_definition_id).where(ExamSession.exam_definition_id.in_(ids))).all()
+        for r in db.execute(
+            select(ExamSession.exam_definition_id).where(
+                ExamSession.exam_definition_id.in_(candidate_ids),
+                ExamSession.status != "in_progress",
+            )
+        ).all()
     }
     removed = 0
-    for e in rows:
-        if e.id in ids and e.id not in with_session:
-            # 先删题目固化行，再删定义（exam_questions 外键为级联，但显式删除更明确）
-            db.execute(delete(ExamQuestion).where(ExamQuestion.exam_definition_id == e.id))
-            db.delete(e)
-            removed += 1
+    for e in candidates:
+        if e.id in settled:
+            continue
+        # 先删未完成会话与题目固化行，再删定义（外键均为级联，显式删除更明确）
+        db.execute(
+            delete(ExamSession).where(
+                ExamSession.exam_definition_id == e.id,
+                ExamSession.status == "in_progress",
+            )
+        )
+        db.execute(delete(ExamQuestion).where(ExamQuestion.exam_definition_id == e.id))
+        db.delete(e)
+        removed += 1
     if removed:
         db.commit()
     return removed
@@ -279,6 +337,7 @@ def start_mock_exam(
     后台不再提供模拟考试配置。所有入参在服务端重新校验（不信任前端）。
     """
     settings = get_settings(db, "exam")
+    keep_limit = _mock_keep_limit(settings)
     rules, _meta = build_mock_spec(
         db,
         bank_ids,
@@ -310,7 +369,7 @@ def start_mock_exam(
             # 范围与配额以本次设置为准（管理员后来关闭某题库时，复用中的定义也须收敛）
             e.rules = rules
             db.commit()
-            _cleanup_stale_mock_defs(db, user.id, keep_id=e.id)
+            _cleanup_stale_mock_defs(db, user.id, keep_id=e.id, keep=keep_limit)
             return start_exam(db, user, e.id)
 
     e = ExamDefinition(
@@ -332,5 +391,5 @@ def start_mock_exam(
     db.add(e)
     db.commit()
     db.refresh(e)
-    _cleanup_stale_mock_defs(db, user.id, keep_id=e.id)
+    _cleanup_stale_mock_defs(db, user.id, keep_id=e.id, keep=keep_limit)
     return start_exam(db, user, e.id)

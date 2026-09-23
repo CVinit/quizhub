@@ -607,23 +607,6 @@ def test_paper_candidate_cap_and_score_pruning(monkeypatch):
         assert set(paper["scores"]) == set(paper["question_ids"])
 
 
-def test_rank_streak_uses_min_date_sentinel():
-    from app.services import stats_service
-    from app.services.stats import rank as rank_module
-
-    assert rank_module._MIN_DATE == "0000-01-01"
-    init_db()
-    with db_session() as db:
-        user = _mk_user(db)
-        db.add(StatsUserDaily(user_id=user.id, date="2025-01-01", group_id=None, answer_count=1, correct_count=1))
-        db.commit()
-
-        # range=all 仍能返回结果（哨兵值字典序最小，等价于不设下界）
-        assert stats_service.rank(db, "count", "self", "all")[0]["user_id"] == user.id
-        items = stats_service.rank(db, "count", "self", "all", user.id)
-        assert items[0].get("is_me") is True
-
-
 def test_exam_windows_are_optional():
     """未配置时段的考试不受新增校验影响。"""
     payload = ExamCreateIn(name="无时段考试", start_at=None, end_at=None)

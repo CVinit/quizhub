@@ -7,7 +7,7 @@
 3. 登录对"邮箱不存在"也要付一次 bcrypt 开销（消除账号枚举的计时侧信道）；
 4. 表头不一致的行不得进入导入队列（列按位置读取，错列会静默污染数据）；
 5. 邮箱归一迁移在大小写变体重复时必须能完成、不丢数据、可重复执行；
-6. 删除题目 / 题库后必须重算受影响的每日聚合（否则排行永久偏高）。
+6. 删除题目 / 题库后必须重算受影响的每日聚合（否则概览统计永久偏高）。
 """
 
 from __future__ import annotations
@@ -376,7 +376,7 @@ def _total_answer_count(db, user_id: int) -> int:
 
 
 def test_delete_question_refreshes_daily_stats():
-    """删除题目后聚合必须重算（回归：排行永久高于真实值）。"""
+    """删除题目后聚合必须重算（回归：概览统计永久高于真实值）。"""
     init_db()
     with db_session() as db:
         user = _mk_user(db)

@@ -16,7 +16,7 @@ class StatsUserDaily(PKMixin):
     __table_args__ = (
         UniqueConstraint("user_id", "date", "group_id", name="uq_user_daily"),
         # NULL 在唯一约束中互不相等（SQLite 与标准 SQL 均如此），因此 group_id 为 NULL 的
-        # 「未分组」行不受上面的约束保护：重复刷新可能插出两行，rank 的 SUM 会重复计分。
+        # 「未分组」行不受上面的约束保护：重复刷新可能插出两行，按用户聚合的 SUM 会重复计分。
         # 用部分唯一索引补齐该不变式（存量去重见 scripts/migrate_2026_09_18.py）。
         Index(
             "uq_user_daily_ungrouped",
@@ -25,7 +25,7 @@ class StatsUserDaily(PKMixin):
             unique=True,
             sqlite_where=text("group_id IS NULL"),
         ),
-        # 排行查询按 date 范围 + user_id 分组，唯一约束的前缀无法服务该访问模式
+        # 按日期维度查询（管理端概览的「今日活跃」）需要 date 前缀，唯一约束的前缀无法服务该访问模式
         Index("ix_stats_date_user", "date", "user_id"),
     )
 

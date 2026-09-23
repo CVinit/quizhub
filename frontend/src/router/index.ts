@@ -53,7 +53,6 @@ const routes: RouteRecordRaw[] = [
       },
       { path: 'wrong', name: 'wrong', component: () => import('@/views/user/Wrong.vue'), meta: { title: '错题本' } },
       { path: 'marks', name: 'marks', component: () => import('@/views/user/Marks.vue'), meta: { title: '我的标记' } },
-      { path: 'rank', name: 'rank', component: () => import('@/views/user/Rank.vue'), meta: { title: '排行榜' } },
       {
         path: 'profile',
         name: 'profile',
@@ -158,13 +157,6 @@ const router = createRouter({
 
 router.beforeEach(async (to, _from, next) => {
   const auth = useAuthStore()
-  const site = useSiteStore()
-  // 排行被后台关闭时，普通用户无法进入排行页（管理员可查看）
-  // 路由守卫先取最新可见性（绕过 loaded 缓存，避免页面停留在旧开关状态时直链放行）
-  if (to.path === '/rank' && !auth.isAdmin) {
-    await site.refresh()
-    if (!site.rank_visible) return next({ name: 'home' })
-  }
   if (to.meta.guest && auth.isLoggedIn) return next({ name: 'home' })
   if (to.meta.auth && !auth.isLoggedIn) return next({ name: 'login' })
   // 管理端不以可被改写的 localStorage 角色做最终决定：进入前向服务端核对。

@@ -30,7 +30,6 @@ def site_info(db: Session = Depends(get_db)):
         "site_name": settings.get("site_name", "培训考试平台"),
         "brand_color": settings.get("brand_color", "#E60012"),
         "site_logo": settings.get("site_logo", ""),
-        "rank_visible": settings.get("rank_visible", "true").lower() == "true",
     }
 
 
@@ -146,10 +145,10 @@ _LABELS = {
     "site_name": "站点名称",
     "site_logo": "站点Logo URL",
     "brand_color": "主题色",
-    "rank_visible": "排行榜对用户可见",
     "default_pass_score": "默认及格线",
     "default_exam_duration_min": "默认考试时长(分钟)",
     "max_questions_per_exam": "单场最大题数",
+    "mock_keep_definitions": "模拟考试保留的未提交试卷数",
     "upload_max_size_mb": "上传大小上限(MB)",
     "upload_allowed_ext": "允许上传扩展名",
     "smtp_host": "SMTP 服务器",
@@ -174,12 +173,13 @@ def _label(key: str) -> str:
 
 
 def _value_type(key: str) -> str:
-    if key in ("smtp_use_tls", "register_open", "new_user_need_approve", "register_group_required", "rank_visible"):
+    if key in ("smtp_use_tls", "register_open", "new_user_need_approve", "register_group_required"):
         return "bool"
     if key in (
         "default_pass_score",
         "default_exam_duration_min",
         "max_questions_per_exam",
+        "mock_keep_definitions",
         "upload_max_size_mb",
         "smtp_port",
     ):

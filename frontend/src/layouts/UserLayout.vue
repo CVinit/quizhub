@@ -8,13 +8,7 @@
         <span class="site-name">{{ siteName }}</span>
       </router-link>
       <!-- 桌面/平板：水平菜单 -->
-      <UserMenu
-        class="desktop-menu"
-        :active="activeMenu"
-        :rank-visible="site.rank_visible"
-        mode="horizontal"
-        :ellipsis="false"
-      />
+      <UserMenu class="desktop-menu" :active="activeMenu" mode="horizontal" :ellipsis="false" />
       <!-- 手机端菜单入口已下沉到底部导航的"更多"标签，顶栏不再放汉堡 -->
       <div class="user">
         <template v-if="auth.isAdmin">
@@ -35,13 +29,7 @@
     </el-header>
     <!-- 手机端抽屉菜单 -->
     <el-drawer v-model="drawer" direction="ltr" :size="240" :with-header="false" class="mobile-drawer">
-      <UserMenu
-        :active="activeMenu"
-        :is-admin="auth.isAdmin"
-        :rank-visible="site.rank_visible"
-        show-profile
-        @navigate="drawer = false"
-      />
+      <UserMenu :active="activeMenu" :is-admin="auth.isAdmin" show-profile @navigate="drawer = false" />
       <!-- 退出登录放在菜单外：el-menu 开启 router 后会把 index 当路由跳转，非导航动作不应进菜单 -->
       <el-button text class="drawer-logout" @click="onCmd('logout')">退出登录</el-button>
     </el-drawer>
@@ -64,7 +52,7 @@
         <el-icon class="bn-icon"><component :is="item.icon" /></el-icon>
         <span class="bn-label">{{ item.label }}</span>
       </router-link>
-      <!-- "更多"标签：点击打开抽屉，容纳标记/排行/管理后台/退出等次级入口 -->
+      <!-- "更多"标签：点击打开抽屉，容纳标记/个人信息/管理后台/退出等次级入口 -->
       <button type="button" class="bn-item" :class="{ active: drawer }" :aria-expanded="drawer" @click="drawer = true">
         <el-icon class="bn-icon"><Menu /></el-icon>
         <span class="bn-label">更多</span>

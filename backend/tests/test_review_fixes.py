@@ -228,8 +228,8 @@ def test_submit_exam_refreshes_daily_stats():
         assert row.exam_count == 1
 
 
-def test_mock_exam_result_does_not_enter_daily_stats_or_rank():
-    """回归：模拟考不进日均聚合与排行榜（口径见 mock-exam-redesign 规格）。"""
+def test_mock_exam_result_does_not_enter_daily_stats():
+    """回归：模拟考不进日均聚合（口径见 mock-exam-redesign 规格）。"""
     from app.services import exam_service, stats_service
 
     init_db()
@@ -251,12 +251,6 @@ def test_mock_exam_result_does_not_enter_daily_stats_or_rank():
             select(StatsUserDaily).where(StatsUserDaily.user_id == user.id, StatsUserDaily.date == date_str)
         ).scalar_one_or_none()
         assert row is None or row.exam_count == 0
-
-        # 排行榜 score 维度也不应看到模拟考分数
-        rank_items = stats_service.rank(db, "score", "self", "7d")
-        assert all(item["user_id"] != user.id for item in rank_items) or all(
-            item["value"] == 0 for item in rank_items if item["user_id"] == user.id
-        )
 
 
 def test_unpublished_formal_result_does_not_enter_daily_stats():

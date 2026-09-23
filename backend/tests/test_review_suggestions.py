@@ -6,7 +6,6 @@
 - 考试入参边界：duration_min 上限、单题答案体积、verdict 枚举、登录口令长度；
 - 审计时间上界归一（S5）；
 - 错题本/标记按题库过滤先于 LIMIT（S6）；
-- 分组排行按分子/分母加权、展示名不回退邮箱（S7）；
 - 管理端完成率按数据范围统计（S8）；批量尝试次数（S9）；范围子查询（S10）；
 - random 出题顺序确实打散、统一 UTC 时间戳（N4/N5/N7）。
 """
@@ -30,7 +29,6 @@ from app.models.exam import ExamDefinition
 from app.models.group import Group, UserGroup
 from app.models.question import DEFAULT_QUESTION_SCORE, Question, QuestionBank
 from app.models.record import ExamResult, ExamSession, QuestionState
-from app.models.stats import StatsUserDaily
 from app.models.user import User
 from app.schemas.auth import LoginIn
 from app.schemas.exam import ExamAnswerIn, ExamCreateIn, ExamUpdateIn, ReviewIn
@@ -94,22 +92,6 @@ def _mk_exam(db, *, name: str = "考试", exam_type: str = "mock", rules: dict |
     db.add(e)
     db.flush()
     return e
-
-
-def _add_stats(db, user: User, date: str, *, answer: int, correct: int, group_id: int | None = None) -> None:
-    db.add(
-        StatsUserDaily(
-            user_id=user.id,
-            date=date,
-            group_id=group_id,
-            answer_count=answer,
-            correct_count=correct,
-            wrong_count=answer - correct,
-            exam_count=0,
-            exam_score_sum=0,
-            exam_pass_count=0,
-        )
-    )
 
 
 # ---------- S1：空卷 ----------
@@ -270,41 +252,6 @@ def test_mark_mode_filters_bank_before_limit():
 
         rows = practice_service.start_practice(db, user.id, "mark", None, 1, bank_a.id)
         assert [r["id"] for r in rows] == [q_a.id]
-
-
-# ---------- S7：分组排行加权 + 不回退邮箱 ----------
-def test_group_accuracy_is_weighted_by_answers():
-    init_db()
-    with db_session() as db:
-        group = Group(name="研发部", type="部门")
-        db.add(group)
-        db.flush()
-        u1 = _mk_user(db, "甲")
-        u2 = _mk_user(db, "乙")
-        db.add_all([UserGroup(user_id=u1.id, group_id=group.id), UserGroup(user_id=u2.id, group_id=group.id)])
-        today = stats_service._date_str(stats_service._utcnow())
-        # 甲 1/1=100%，乙 1/9≈11%：加权正确率应为 2/10=20%，而非平均的平均 55.6%
-        _add_stats(db, u1, today, answer=1, correct=1, group_id=group.id)
-        _add_stats(db, u2, today, answer=9, correct=1, group_id=group.id)
-        db.commit()
-
-        grouped = stats_service.rank(db, "accuracy", "group", "7d")
-        row = next(item for item in grouped if item["name"] == "研发部")
-        assert row["value"] == 20.0
-
-
-def test_rank_never_falls_back_to_email():
-    init_db()
-    with db_session() as db:
-        user = _mk_user(db, "")  # 姓名为空
-        today = stats_service._date_str(stats_service._utcnow())
-        _add_stats(db, user, today, answer=3, correct=2)
-        db.commit()
-
-        top = stats_service.rank(db, "count", "self", "7d")
-        assert top[0]["user_id"] == user.id
-        assert top[0]["name"] == f"#{user.id}"
-        assert "@" not in top[0]["name"]
 
 
 # ---------- S8：概览完成率按范围 ----------

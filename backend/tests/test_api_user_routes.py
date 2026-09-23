@@ -172,8 +172,8 @@ def test_practice_endpoints_flow(api):
     )
 
     assert api.get("/api/panel/me", headers=headers).status_code == 200
-    assert api.get("/api/rank", headers=headers, params={"dimension": "accuracy", "scope": "self"}).status_code == 200
-    assert api.get("/api/rank", headers=headers, params={"dimension": "count", "scope": "group"}).status_code == 200
+    # 排行榜已按产品决策整体下线（2026-09-23）：端点不再存在
+    assert api.get("/api/rank", headers=headers).status_code == 404
 
     # 未登录访问受保护路由
     assert api.get("/api/panel/me").status_code == 401

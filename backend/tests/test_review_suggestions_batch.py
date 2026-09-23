@@ -1,6 +1,6 @@
 """2026-09-18 后端审查 10 项 Suggestions 的回归测试。
 
-S1  rank() 部门数据范围（个人榜 + 分组榜）
+S1  rank() 部门数据范围（个人榜 + 分组榜）—— 排行榜已于 2026-09-23 下线，本项随之移除
 S2  超管保护的原子守卫（过期预检也不能绕过）
 S3  统计分组归属回退 User.dept_group_id
 S4  wrong_count 按 is_correct 三态统计（未自评简答不计错）
@@ -77,40 +77,6 @@ def _mk_question(db, *, is_short: bool = False) -> Question:
 
 def _today() -> str:
     return stats_service._date_str(datetime.now(timezone.utc))
-
-
-# ---------- S1 ----------
-
-
-def test_rank_respects_dept_scope_for_self_and_group_boards():
-    init_db()
-    with db_session() as db:
-        g1 = Group(name="一部", type="部门")
-        g2 = Group(name="二部", type="部门")
-        db.add_all([g1, g2])
-        db.flush()
-        u1 = _mk_user(db)
-        u2 = _mk_user(db)
-        db.add_all([UserGroup(user_id=u1.id, group_id=g1.id), UserGroup(user_id=u2.id, group_id=g2.id)])
-        today = _today()
-        db.add_all(
-            [
-                StatsUserDaily(user_id=u1.id, date=today, group_id=g1.id, answer_count=5, correct_count=5),
-                StatsUserDaily(user_id=u2.id, date=today, group_id=g2.id, answer_count=9, correct_count=9),
-            ]
-        )
-        db.commit()
-
-        # super_admin（dept_scope=None）全量
-        full = stats_service.rank(db, "count", "self", "7d")
-        assert {item["user_id"] for item in full} == {u1.id, u2.id}
-
-        # 部门管理员只看本部门子树
-        scoped = stats_service.rank(db, "count", "self", "7d", dept_scope={g1.id})
-        assert [item["user_id"] for item in scoped] == [u1.id]
-
-        grouped = stats_service.rank(db, "count", "group", "7d", dept_scope={g1.id})
-        assert grouped == [{"name": "一部", "value": 5.0}]
 
 
 # ---------- S2 ----------

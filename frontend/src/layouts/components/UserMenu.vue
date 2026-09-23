@@ -3,7 +3,6 @@
     <el-menu-item v-for="item in items" :key="item.path" :index="item.path">
       {{ item.label }}
     </el-menu-item>
-    <el-menu-item v-if="rankVisible" index="/rank">排行</el-menu-item>
     <el-menu-item v-if="showProfile" index="/profile">个人信息</el-menu-item>
     <el-menu-item v-if="isAdmin" index="/admin">管理后台</el-menu-item>
   </el-menu>
@@ -22,13 +21,11 @@ withDefaults(
     isAdmin?: boolean
     /** 抽屉版才展示的次级入口 */
     showProfile?: boolean
-    /** 排行是否对当前用户可见（后台可关闭） */
-    rankVisible?: boolean
     /** 桌面顶栏用 horizontal，抽屉用 vertical */
     mode?: 'horizontal' | 'vertical'
     ellipsis?: boolean
   }>(),
-  { isAdmin: false, showProfile: false, rankVisible: true, mode: 'vertical', ellipsis: true },
+  { isAdmin: false, showProfile: false, mode: 'vertical', ellipsis: true },
 )
 
 defineEmits<{ navigate: [] }>()
