@@ -32,6 +32,10 @@ from app.services.audit_service import log as audit_log
 
 logger = logging.getLogger("quizhub")
 
+# 分组 id 预取的分块大小：Excel 单元格上限 1 万字符（约 2500 个 id/行）、单次最多 5000 行，
+# 一条 `IN (...)` 理论上能塞进数十万个绑定参数并撞上 SQLite 的变量上限（too many SQL variables）。
+_GID_PREFETCH_CHUNK = 500
+
 # 角色与状态白名单：管理员新增/导入用户时校验，防伪造非法角色。
 # 直接复用模型层常量，避免同一枚举在多处漂移（历史上曾有三份副本）。
 ROLES = USER_ROLE
@@ -293,12 +297,18 @@ def update_user(
     scope: set[int] | None = None,
     *,
     clear_dept_group: bool = False,
+    actor_role: str | None = None,
 ) -> User:
     """更新用户。角色变更仅超级管理员可执行；部门管理员不得修改角色。
+
+    角色校验由路由与服务层双重把关：路由直接 403，服务层在「设置管理员角色」时自证
+    （`actor_role` 未传按「非超管」处理），避免未来的调用方绕过。
 
     `clear_dept_group=True` 表示调用方显式要求清空部门归属（HTTP 层收到
     `dept_group_id: null`）；否则 `dept_group_id=None` 保持"不修改"语义。
     """
+    if role is not None and role != ROLE_USER and actor_role != ROLE_SUPER_ADMIN:
+        raise DomainError(FORBIDDEN, "仅超级管理员可修改用户角色")
     _check_scope(db, actor, user_id, scope)
     u = _get(db, user_id)
     _check_manage_permission(db, actor, u)
@@ -410,6 +420,8 @@ def create_user(
     status_: str = STATUS_ACTIVE,
     group_ids: list[int] | None = None,
     dept_group_id: int | None = None,
+    *,
+    actor_role: str | None = None,
 ) -> User:
     """管理员手动新增用户。
 
@@ -426,6 +438,10 @@ def create_user(
         raise DomainError(BAD_REQUEST, "邮箱格式不正确")
     if role not in ROLES:
         raise DomainError(BAD_REQUEST, "角色非法")
+    # 服务层自证：管理员角色只允许超级管理员创建。路由已有一道同样的校验，这里是第二道
+    # 防线 —— 未来的脚本/新路由直接调用本函数时不会绕过（actor_role 未传时按「非超管」处理）。
+    if role != ROLE_USER and actor_role != ROLE_SUPER_ADMIN:
+        raise DomainError(FORBIDDEN, "仅超级管理员可创建管理员账号")
     if status_ not in STATUSES:
         raise DomainError(BAD_REQUEST, "状态非法")
 
@@ -511,11 +527,11 @@ def import_users(
                 continue
             if value > 0:
                 candidate_gids.add(value)
-    valid_gids = (
-        {row[0] for row in db.execute(select(Group.id).where(Group.id.in_(candidate_gids))).all()}
-        if candidate_gids
-        else set()
-    )
+    valid_gids: set[int] = set()
+    candidate_list = sorted(candidate_gids)
+    for start in range(0, len(candidate_list), _GID_PREFETCH_CHUNK):
+        chunk = candidate_list[start : start + _GID_PREFETCH_CHUNK]
+        valid_gids |= {row[0] for row in db.execute(select(Group.id).where(Group.id.in_(chunk))).all()}
 
     for idx, r in enumerate(rows, start=1):
         email = normalize_email(str(r.get("email") or ""))

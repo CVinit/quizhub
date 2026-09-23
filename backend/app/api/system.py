@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 
@@ -48,6 +49,31 @@ _LOGO_CONTENT_TYPES = {
 _LOGO_MAX_BYTES = 2 * 1024 * 1024
 
 
+def _store_logo(db: Session, content: bytes, ext: str) -> str:
+    """同步写盘、清理历史 Logo 并更新 site_logo 设置，返回访问路径。
+
+    固定文件名 `logo<ext>` 覆盖旧 Logo，并清掉历史遗留的其它 `logo.*`（含不受支持的 logo.svg）。
+
+    Args:
+        db: 数据库会话。
+        content: 图片字节。
+        ext: 受支持的扩展名（含点）。
+
+    Returns:
+        站点 Logo 的访问路径（`/files/logo<ext>`）。
+    """
+    filename = f"logo{ext}"
+    save_path = FILES_DIR / filename
+    save_path.write_bytes(content)
+    for stale in FILES_DIR.glob("logo.*"):
+        if stale != save_path:
+            stale.unlink(missing_ok=True)
+    url = f"/files/{filename}"
+    # 存相对路径，域名无关，前后端同源可直接用
+    update_settings_svc(db, "general", {"site_logo": url})
+    return url
+
+
 @router.post("/logo")
 async def upload_logo(
     file: UploadFile = File(...),
@@ -74,18 +100,9 @@ async def upload_logo(
             raise HTTPException(status.HTTP_413_CONTENT_TOO_LARGE, f"Logo 不能超过 {limit_kb}KB")
         chunks.append(chunk)
     content = b"".join(chunks)
-    # 固定文件名 logo<ext>，覆盖旧 Logo，避免残留堆积
-    filename = f"logo{ext}"
-    save_path = FILES_DIR / filename
-    save_path.write_bytes(content)
-    # 同一 Logo 只保留当前扩展名：清掉历史遗留的其它 logo.*（含不受支持的 logo.svg）
-    for stale in FILES_DIR.glob("logo.*"):
-        if stale != save_path:
-            stale.unlink(missing_ok=True)
-    # 访问路径（main.py 挂载 /files 到 data/files 目录）
-    url = f"/files/{filename}"
-    # 更新设置项 site_logo（存相对路径，域名无关，前后端同源可直接用）
-    update_settings_svc(db, "general", {"site_logo": url})
+    # 写盘 + 清理历史 Logo + 更新设置都是同步阻塞操作：本路由是 async，直接在事件循环里
+    # 执行会阻塞其它并发请求（慢磁盘时尤其明显），因此丢进线程池（与题库/用户导入同口径）。
+    url = await run_in_threadpool(_store_logo, db, content, ext)
     audit_log(db, user.id, "settings.logo_upload", "setting", "site_logo", {"url": url})
     return {"url": url}
 

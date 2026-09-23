@@ -16,16 +16,18 @@ from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy import select
 
+from app.core.errors import DomainError
 from app.core.security import create_access_token
 from app.database import SessionLocal, db_session, get_db, init_db
 from app.main import create_app
 from app.models.exam import ExamDefinition
-from app.models.group import Group
+from app.models.group import Group, UserGroup
 from app.models.question import Question, QuestionBank
 from app.models.system import AuditLog
 from app.models.user import User
-from app.services import exam_service, question_service
+from app.services import exam_service, question_service, user_service
 from app.utils.excel import HEADERS
 
 
@@ -266,3 +268,61 @@ def test_settings_save_without_enc_key_returns_503(api):
     )
     assert resp.status_code == 503, resp.text
     assert "TRAINING_ENC_KEY" in resp.json()["detail"]
+
+
+# ---------- 9. 用户导入的分组 id 预取分块 ----------
+def test_import_users_prefetches_group_ids_in_chunks(monkeypatch):
+    """预取分块后仍能识别全部合法分组（不会因分块丢数据）。
+
+    单元格上限 1 万字符（约 2500 个 id/行）× 单次 5000 行，理论上能构造出数十万个候选 id，
+    一条 `IN (...)` 会撞上 SQLite 的绑定参数上限（too many SQL variables → 整批 500）。
+    """
+    monkeypatch.setattr(user_service, "_GID_PREFETCH_CHUNK", 1)
+    init_db()
+    with db_session() as db:
+        groups = [Group(name=f"g{i}", type="部门") for i in range(3)]
+        db.add_all(groups)
+        db.flush()
+        admin = _mk_user(db, "chunk@quizhub.com")
+        db.commit()
+        group_ids = [g.id for g in groups]
+
+        rows = [
+            {
+                "email": "chunked@quizhub.com",
+                "name": "分块",
+                "role": "user",
+                "password": "pw123456",
+                "status": "active",
+                "group_ids": group_ids,
+            }
+        ]
+        res = user_service.import_users(db, admin.id, rows, scope=None, actor_role="super_admin")
+        assert res["success"] == 1
+
+        user = db.execute(select(User).where(User.email == "chunked@quizhub.com")).scalar_one()
+        assigned = {r[0] for r in db.execute(select(UserGroup.group_id).where(UserGroup.user_id == user.id)).all()}
+        assert assigned == set(group_ids)
+
+
+# ---------- 10. 服务层授权自证 ----------
+def test_service_layer_rejects_admin_role_without_super_actor():
+    """非超管调用方不得经服务层创建/设置管理员角色。
+
+    路由已有一道校验，这里验证服务层的第二道防线：未来若有人写脚本或新路由直接调用
+    `create_user`/`update_user`，也不会因为绕过路由而提权。
+    """
+    from app.models.user import ROLE_DEPT_ADMIN, ROLE_SUPER_ADMIN
+
+    init_db()
+    with db_session() as db:
+        dept_admin = _mk_user(db, "dept-selfcheck@quizhub.com", "dept_admin")
+        db.commit()
+
+        with pytest.raises(DomainError) as create_exc:
+            user_service.create_user(db, dept_admin.id, "boss@quizhub.com", "老板", ROLE_DEPT_ADMIN, "pw123456")
+        assert create_exc.value.status_code == 403
+
+        with pytest.raises(DomainError) as update_exc:
+            user_service.update_user(db, dept_admin.id, dept_admin.id, None, ROLE_SUPER_ADMIN, None)
+        assert update_exc.value.status_code == 403

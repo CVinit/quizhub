@@ -73,6 +73,7 @@ def create_user(
         payload.group_ids,
         # 部门管理员新增用户时自动归属其部门；与创建同一事务写入，避免二次 commit
         dept_group_id=user.dept_group_id if scope is not None else None,
+        actor_role=user.role,
     )
     return {
         "id": u.id,
@@ -107,6 +108,7 @@ def update_user(
         payload.dept_group_id,
         scope,
         clear_dept_group=clear_dept_group,
+        actor_role=user.role,
     )
     return _to_dict(u)
 
