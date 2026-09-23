@@ -5,7 +5,7 @@
 > 基线提交：`main` @ `c9b59f5`（审查前工作区干净）
 > 审查方式：core/api/schema 人工逐行 + services/utils 分 8 片并行深审 + 测试覆盖映射；
 > 关键结论用仓库自带 `.venv` + 隔离临时库实弹复现（脚本为临时文件，未入库）
-> 整改状态：**20 项已落地**（第二节）+ 3 条产品决策已执行（第三节），全部改动均补回归测试并通过门禁
+> 整改状态：**21 项已落地**（第二节）+ 3 条产品决策已执行（第三节），全部改动均补回归测试并通过门禁
 
 ---
 
@@ -13,7 +13,7 @@
 
 - 分片代理原始结论：**59** 条（P0 12 / P1 31 / P2 16）；另有 schemas+api 补充 14 条（第六节）、测试覆盖 15 条（第五节）。
 - 本轮人工复核：**25** 条（实弹复现或逐行源码确认，见各条「复核」标注）。
-- 本轮已落地：**20 项修复**（第二节）+ **3 条产品决策**（第三节）+ 2 个数据迁移脚本；新增回归测试 142 例（守卫矩阵 72、导入/审计 8、认证与并发 22、统计锁行为 3、本轮其余修复 37）；随排行榜下线移除 11 例。
+- 本轮已落地：**21 项修复**（第二节）+ **3 条产品决策**（第三节）+ 2 个数据迁移脚本；新增回归测试 149 例（守卫矩阵 72、导入/审计 8、认证与并发 22、统计锁行为 3、分层/上限/日志 7、本轮其余修复 37）；随排行榜下线移除 11 例。
 - 待处理：**0 项**（3.1/3.2 均已处理；第五节的「仍待补」为可选后续项）。
 
 
@@ -24,7 +24,7 @@
 
 ---
 
-## 二、已修复项（20 项，含复现证据）
+## 二、已修复项（21 项，含复现证据）
 
 > 改动集中在三类：①校验口径与消费口径不一致；②错误降级约定漏路径；③产品决策的落地与清理。
 > 每项都补了回归测试。
@@ -202,6 +202,33 @@
   `open_workbook()` 补返回类型，`UploadPreview.errors` 由 `list[dict]` 收紧为 `list[RowError]`。
 - **删除无用参数**：`user_excel.preview(db, ...)` 的 `db` 从未使用（调用方却在事务中等待它
   数分钟），签名收紧为 `preview(content, user_id)`，8 处调用点同步更新。
+
+### 21. 分层、性能与可观测性批次
+
+- **服务层/工具层彻底不依赖 FastAPI**（`core/errors.py` 声明的分层约定）：
+  - 新增 `core/status.py`（领域层状态码常量，纯 int、不 import 框架），14 个 service/utils 模块
+    由 `fastapi.status` 迁移过去；`core/background.py` 定义 `BackgroundTaskQueue` Protocol，
+    `auth_service` 不再 import FastAPI 的 `BackgroundTasks`（`review_service`/`exam/admin`
+    的 `bg` 参数也顺带补上类型）；
+  - 新增**结构性守卫测试**：`app/services/**` 与 `app/utils/**` 出现 `import fastapi` 即失败。
+- **密码 72 字节规则收敛**：`core/security.validate_password_bytes()` 成为唯一实现
+  （原先在 schemas/auth、api/users、user_service、user_excel、security 共 6 处各写一份）；
+  `ResetPasswordIn` / `UserCreateIn` 从路由模块移入 `schemas/user.py`。
+- **角色/状态常量**：`models/user.py` 新增 `ROLE_*` / `STATUS_*`，授权分支里 41 处字面量改为常量
+  （拼错的字面量会让安全守卫静默失效，拼错的常量名会直接 NameError）。
+- **性能**：
+  - 组卷来源的标签筛选改用 SQLite JSON1 `json_each` 在 SQL 侧做元素级匹配
+    （原实现把整表 `(id,type,tags)` 拉进 Python；超管不传 bank/group 时即全表载入）；
+  - 用户端可用考试列表加上限（200，候选按 4 倍取，与管理端 `list_exams` 同口径）。
+- **可观测性**：5xx 补结构化日志（方法/路径/客户端 IP，不含 PII），异常仍照常上抛由
+  Starlette 转 500 —— 此前只有 uvicorn 的裸堆栈。
+- **正确性**：
+  - 审计时间边界按「入参是否带偏移」区分语义：不带偏移 = 业务本地时间（按 `BUSINESS_TZ` 解释），
+    带偏移 = 绝对时刻。修掉两个 bug：显式给出的 UTC 零点被静默扩成当天末尾；纯日期下界被当成
+    UTC 零点（Asia/Shanghai 部署下丢掉本地 00:00–08:00 的记录）。
+  - 简答复核不再污染 `objective_score`（该列语义是「客观题得分」，复核得分不属于客观题；
+    原实现只给 score 封顶却同时改两列，超满分时必然分叉）。
+  - 上传时的 `bank_name` 加 100 字符上限（与 `QuestionBankCreate.name` 同口径）。
 
 ---
 
@@ -836,6 +863,10 @@ except RuntimeError as exc:
 > 不 500）、验证码正向断言（原用例只断言错码失败，恒 False 的实现也能全绿）、
 > 认证路由其余端点（弱口令 422 / 未知验证码 400 / 重发在未配置 SMTP 时 503、未知邮箱不泄露）。
 > 「断言查询条数」一项已随 `test_stats_rank.py` 的删除自然消失（排行榜下线时移除）。
+> **本批（2026-09-23 第五批）已补**：分层守卫（services/utils 不得 import fastapi）、
+> 标签筛选下推 SQL、可用考试列表上限、审计时间边界（业务时区 vs 绝对时刻）、
+> `objective_score` 语义、5xx 结构化日志、`bank_name` 长度上限
+> （`tests/test_layering_limits_and_logging.py`，7 例）。
 
 
 ### 分片 B：测试覆盖映射与测试反模式（代理原始结论）
@@ -1021,7 +1052,7 @@ cd backend
 ./.venv/bin/ruff check app tests scripts      # All checks passed!
 ./.venv/bin/ruff format --check app tests scripts
 ./.venv/bin/mypy app                          # Success: no issues found in 70 source files
-./.venv/bin/python -m pytest -q               # 594 passed（新增 142 例、随排行下线移除 11 例；整改前 463）
+./.venv/bin/python -m pytest -q               # 601 passed（新增 149 例、随排行下线移除 11 例；整改前 463）
 
 cd ../frontend
 npx vue-tsc --noEmit                          # 通过（无输出）
