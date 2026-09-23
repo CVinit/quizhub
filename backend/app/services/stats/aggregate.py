@@ -18,9 +18,10 @@ from app.services.stats.common import _date_str, _day_bounds_utc, _utcnow
 
 logger = logging.getLogger("quizhub")
 
-# 考试统计口径（唯一来源，refresh_daily 与 refresh_user_daily 共用）：
-# 只有「已公布」的**正式**考试成绩进入日均聚合（管理端概览按它统计）。
-# - 未公布（含简答待复核）成绩只是客观题小计，提前计入等于把未定成绩算成已得；
+# 考试侧口径（唯一来源，refresh_daily 与 refresh_user_daily 共用）：
+# 考试只参与「当日是否活跃」的判定（聚合行存在 = 当日活跃），不再累计分数/次数
+# （exam_count/exam_score_sum/exam_pass_count 已随排行榜下线移除，2026-09-23）。
+# - 只有「已公布」的**正式**考试成绩算作当日活跃：未公布（含简答待复核）只是客观题小计；
 # - 模拟考是练习性质，明确不计入（见
 #   docs/superpowers/specs/2026-09-17-mock-exam-redesign.md:192）。
 _COUNTABLE_EXAM_TYPE = "formal"
@@ -78,25 +79,22 @@ def refresh_daily(db: Session, date_str: str) -> int:
         .group_by(PracticeRecord.user_id)
     ).all()
 
-    exam_rows = db.execute(
-        select(
-            ExamResult.user_id,
-            func.count().label("cnt"),
-            func.sum(ExamResult.score).label("score"),
-            func.sum(ExamResult.passed).label("pass_cnt"),
-        )
-        .join(ExamDefinition, ExamDefinition.id == ExamResult.exam_definition_id)
-        .where(
-            ExamResult.created_at >= day_start,
-            ExamResult.created_at < day_end,
-            *_countable_exam_conditions(),
-        )
-        .group_by(ExamResult.user_id)
-    ).all()
+    exam_user_ids = {
+        r[0]
+        for r in db.execute(
+            select(ExamResult.user_id)
+            .join(ExamDefinition, ExamDefinition.id == ExamResult.exam_definition_id)
+            .where(
+                ExamResult.created_at >= day_start,
+                ExamResult.created_at < day_end,
+                *_countable_exam_conditions(),
+            )
+            .distinct()
+        ).all()
+    }
 
     practice_map = {r.user_id: r for r in practice_rows}
-    exam_map = {r.user_id: r for r in exam_rows}
-    user_ids = set(practice_map) | set(exam_map)
+    user_ids = set(practice_map) | exam_user_ids
     # 即使当天没有源数据，也必须清理旧聚合，避免删除/更正源数据后继续展示旧结果。
     db.execute(delete(StatsUserDaily).where(StatsUserDaily.date == date_str))
     if not user_ids:
@@ -120,19 +118,14 @@ def refresh_daily(db: Session, date_str: str) -> int:
     written = 0
     for uid in user_ids:
         pr = practice_map.get(uid)
-        er = exam_map.get(uid)
-        group_id = gid_map.get(uid)
         db.add(
             StatsUserDaily(
                 user_id=uid,
                 date=date_str,
-                group_id=group_id,
+                group_id=gid_map.get(uid),
                 answer_count=pr.cnt if pr else 0,
                 correct_count=int(pr.ok or 0) if pr else 0,
                 wrong_count=int(pr.bad or 0) if pr else 0,
-                exam_count=er.cnt if er else 0,
-                exam_score_sum=float(er.score or 0) if er else 0,
-                exam_pass_count=int(er.pass_cnt or 0) if er else 0,
             )
         )
         written += 1
@@ -174,24 +167,24 @@ def refresh_user_daily(db: Session, user_id: int, date_str: str) -> int:
             PracticeRecord.answered_at < day_end,
         )
     ).one()
-    er = db.execute(
-        select(
-            func.count().label("cnt"),
-            func.sum(ExamResult.score).label("score"),
-            func.sum(ExamResult.passed).label("pass_cnt"),
-        )
-        .join(ExamDefinition, ExamDefinition.id == ExamResult.exam_definition_id)
-        .where(
-            ExamResult.user_id == user_id,
-            ExamResult.created_at >= day_start,
-            ExamResult.created_at < day_end,
-            *_countable_exam_conditions(),
-        )
-    ).one()
+    exam_active = (
+        db.execute(
+            select(ExamResult.id)
+            .join(ExamDefinition, ExamDefinition.id == ExamResult.exam_definition_id)
+            .where(
+                ExamResult.user_id == user_id,
+                ExamResult.created_at >= day_start,
+                ExamResult.created_at < day_end,
+                *_countable_exam_conditions(),
+            )
+            .limit(1)
+        ).first()
+        is not None
+    )
 
     # 无源数据也要清理旧聚合，避免删除/更正源数据后继续展示旧结果
     db.execute(delete(StatsUserDaily).where(StatsUserDaily.user_id == user_id, StatsUserDaily.date == date_str))
-    if not pr.cnt and not er.cnt:
+    if not pr.cnt and not exam_active:
         db.commit()
         return 0
 
@@ -210,9 +203,6 @@ def refresh_user_daily(db: Session, user_id: int, date_str: str) -> int:
             answer_count=pr.cnt or 0,
             correct_count=int(pr.ok or 0),
             wrong_count=int(pr.bad or 0),
-            exam_count=er.cnt or 0,
-            exam_score_sum=float(er.score or 0),
-            exam_pass_count=int(er.pass_cnt or 0),
         )
     )
     db.commit()

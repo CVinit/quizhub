@@ -225,11 +225,12 @@ def test_submit_exam_refreshes_daily_stats():
         row = db.execute(
             select(StatsUserDaily).where(StatsUserDaily.user_id == user.id, StatsUserDaily.date == date_str)
         ).scalar_one()
-        assert row.exam_count == 1
+        # 已公布的正式考试算作当日活跃（聚合行存在即活跃）；考试类计数列已随排行榜下线移除
+        assert row is not None
 
 
 def test_mock_exam_result_does_not_enter_daily_stats():
-    """回归：模拟考不进日均聚合（口径见 mock-exam-redesign 规格）。"""
+    """回归：模拟考不算当日活跃（口径见 mock-exam-redesign 规格）。"""
     from app.services import exam_service, stats_service
 
     init_db()
@@ -250,11 +251,11 @@ def test_mock_exam_result_does_not_enter_daily_stats():
         row = db.execute(
             select(StatsUserDaily).where(StatsUserDaily.user_id == user.id, StatsUserDaily.date == date_str)
         ).scalar_one_or_none()
-        assert row is None or row.exam_count == 0
+        assert row is None, "只做了模拟考的用户不应产生当日活跃行"
 
 
 def test_unpublished_formal_result_does_not_enter_daily_stats():
-    """回归：含简答、待复核（published=False）的正式成绩不得提前进榜。"""
+    """回归：含简答、待复核（published=False）的正式成绩不算当日活跃。"""
     from app.services import exam_service, stats_service
 
     init_db()
@@ -292,7 +293,7 @@ def test_unpublished_formal_result_does_not_enter_daily_stats():
         row = db.execute(
             select(StatsUserDaily).where(StatsUserDaily.user_id == user.id, StatsUserDaily.date == date_str)
         ).scalar_one_or_none()
-        assert row is None or row.exam_count == 0
+        assert row is None, "未公布成绩不得产生当日活跃行"
 
 
 # ---------- 5. 删除分组解除部门引用 ----------

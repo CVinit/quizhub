@@ -400,9 +400,10 @@ def test_refresh_daily_tolerates_multiple_timestamp_formats():
         written = stats_service.refresh_daily(db, "2026-03-10")
         assert written == 1
         row = db.execute(select(StatsUserDaily)).scalars().one()
+        # 练习计数照旧；考试侧只参与「当日是否活跃」的判定（行存在即活跃），
+        # exam_count/exam_score_sum 已随排行榜下线移除（2026-09-23）
         assert row.answer_count == 1
-        assert row.exam_count == 1
-        assert row.exam_score_sum == 77.0
+        assert (row.correct_count, row.wrong_count) == (1, 0)
 
 
 def test_date_str_converts_to_business_timezone():

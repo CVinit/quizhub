@@ -1,11 +1,16 @@
-"""统计预聚合表。
+"""统计预聚合表（每日刷新）。
 
-每日刷新；排行查询命中预聚合表。
+当前唯一消费方是管理端概览的「今日活跃」：只按 (user_id, date) 计数，行存在即代表当日活跃。
+2026-09-23 排行榜下线后，考试类聚合列（exam_count / exam_score_sum / exam_pass_count）
+已一并移除——它们不再有读取方，考试只参与「当日是否活跃」的判定（见 stats/aggregate.py）。
+
+注：answer_count / correct_count / wrong_count 目前同样没有读取方，保留用于活动标记与后续
+报表；若确认长期不用，可连同聚合逻辑一起下线（见 docs/backend_review_2026-09-23.md 3.2）。
 """
 
 from __future__ import annotations
 
-from sqlalchemy import Float, ForeignKey, Index, Integer, String, UniqueConstraint, text
+from sqlalchemy import ForeignKey, Index, Integer, String, UniqueConstraint, text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.models.base import PKMixin
@@ -40,6 +45,3 @@ class StatsUserDaily(PKMixin):
     answer_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     correct_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     wrong_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
-    exam_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
-    exam_score_sum: Mapped[float] = mapped_column(Float, default=0, nullable=False)
-    exam_pass_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)

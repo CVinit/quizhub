@@ -24,6 +24,7 @@ from app.models.user import User
 from app.services import exam_service, system_service
 
 _MIGRATION = Path(__file__).resolve().parent.parent / "scripts" / "migrate_2026_09_23.py"
+_STATS_MIGRATION = Path(__file__).resolve().parent.parent / "scripts" / "migrate_2026_09_23_stats_exam_columns.py"
 
 
 def _mk_user(db, email: str = "mock@example.com") -> User:
@@ -133,11 +134,12 @@ def test_rank_setting_is_gone():
 
 
 # ---------- 3. 迁移脚本 ----------
-def _load_migration():
-    spec = importlib.util.spec_from_file_location("migrate_2026_09_23", _MIGRATION)
+def _load_migration(path: Path | None = None, name: str = "migrate_2026_09_23"):
+    target = path or _MIGRATION
+    spec = importlib.util.spec_from_file_location(name, target)
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)
-    sys.modules["migrate_2026_09_23"] = module
+    sys.modules[name] = module
     spec.loader.exec_module(module)
     return module
 
@@ -156,4 +158,37 @@ def test_migration_removes_legacy_rank_setting(tmp_path):
     # 幂等：再跑一次不报错、不误删其它设置
     assert module.remove_legacy_rank_setting(conn) == 0
     assert [row[0] for row in conn.execute("SELECT key FROM settings").fetchall()] == ["site_name"]
+    conn.close()
+
+
+def test_stats_migration_drops_exam_columns_and_keeps_rows(tmp_path):
+    """3.2：stats_user_daily 的考试类列下线（存量库经重建迁移，数据保留、幂等）。"""
+    from app.models.stats import StatsUserDaily
+
+    module = _load_migration(_STATS_MIGRATION, "migrate_2026_09_23_stats")
+    conn = sqlite3.connect(str(tmp_path / "t.db"))
+    conn.execute("CREATE TABLE users (id INTEGER PRIMARY KEY)")
+    conn.execute("CREATE TABLE groups (id INTEGER PRIMARY KEY)")
+    conn.execute(
+        "CREATE TABLE stats_user_daily ("
+        "id INTEGER PRIMARY KEY, user_id INTEGER NOT NULL, date VARCHAR NOT NULL, group_id INTEGER,"
+        " answer_count INTEGER NOT NULL DEFAULT 0, correct_count INTEGER NOT NULL DEFAULT 0,"
+        " wrong_count INTEGER NOT NULL DEFAULT 0, exam_count INTEGER NOT NULL DEFAULT 0,"
+        " exam_score_sum FLOAT NOT NULL DEFAULT 0, exam_pass_count INTEGER NOT NULL DEFAULT 0,"
+        " CONSTRAINT uq_user_daily UNIQUE (user_id, date, group_id))"
+    )
+    conn.execute("INSERT INTO users (id) VALUES (1)")
+    conn.execute("INSERT INTO stats_user_daily (user_id, date, answer_count) VALUES (1, '2026-09-23', 3)")
+    conn.execute("INSERT INTO stats_user_daily (user_id, date, exam_count) VALUES (1, '2026-09-22', 1)")
+    conn.commit()
+
+    assert module.needs_rebuild(conn) is True
+    assert module.rebuild_table(conn) == 2
+    conn.commit()
+
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(stats_user_daily)").fetchall()}
+    assert columns == {c.name for c in StatsUserDaily.__table__.columns}, "迁移后的表必须与当前模型一致"
+    assert conn.execute("SELECT answer_count FROM stats_user_daily WHERE date = '2026-09-23'").fetchone()[0] == 3
+    # 幂等：再次执行无变更
+    assert module.needs_rebuild(conn) is False
     conn.close()
