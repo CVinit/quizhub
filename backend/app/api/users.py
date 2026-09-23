@@ -5,51 +5,18 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile, status
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
 from sqlalchemy.orm import Session
 
 from app.core.deps import dept_scope_ids, require_admin
-from app.core.limits import MAX_ID_LIST_LEN
 from app.core.uploads import read_limited
 from app.database import get_db
-from app.models.user import User
+from app.models.user import ROLE_SUPER_ADMIN, ROLE_USER, User
 from app.schemas.group import UserGroupAssign
-from app.schemas.user import UserUpdate
+from app.schemas.user import ResetPasswordIn, UserCreateIn, UserUpdate
 from app.services import user_service
 from app.utils import user_excel
 
 router = APIRouter(prefix="/admin/users", tags=["users"])
-
-
-class ResetPasswordIn(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    new_password: str = Field(min_length=6, max_length=72)
-
-    @field_validator("new_password")
-    @classmethod
-    def validate_password_bytes(cls, value: str) -> str:
-        if len(value.encode("utf-8")) > 72:
-            raise ValueError("密码 UTF-8 编码后不能超过 72 字节")
-        return value
-
-
-class UserCreateIn(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    email: EmailStr
-    name: str = Field(default="", max_length=50)
-    role: str = Field(default="user")
-    password: str = Field(min_length=6, max_length=72)
-    status: str = Field(default="active")
-    group_ids: list[int] = Field(default_factory=list, max_length=MAX_ID_LIST_LEN)
-
-    @field_validator("password")
-    @classmethod
-    def validate_password_bytes(cls, value: str) -> str:
-        if len(value.encode("utf-8")) > 72:
-            raise ValueError("密码 UTF-8 编码后不能超过 72 字节")
-        return value
 
 
 @router.get("")
@@ -87,7 +54,7 @@ def create_user(
 
     部门管理员只能把用户分配到其部门子树内的分组。
     """
-    if payload.role != "user" and user.role != "super_admin":
+    if payload.role != ROLE_USER and user.role != ROLE_SUPER_ADMIN:
         raise HTTPException(status.HTTP_403_FORBIDDEN, "仅超级管理员可创建管理员账号")
     scope = dept_scope_ids(db, user)
     # 部门管理员创建的用户必须归属其范围内分组，且分配的分组也在范围内
@@ -126,7 +93,7 @@ def update_user(
     user: User = Depends(require_admin),
 ):
     # 角色变更仅超级管理员可执行（部门管理员不得提权）
-    if payload.role is not None and user.role != "super_admin":
+    if payload.role is not None and user.role != ROLE_SUPER_ADMIN:
         raise HTTPException(status.HTTP_403_FORBIDDEN, "仅超级管理员可修改用户角色")
     scope = dept_scope_ids(db, user)
     # 显式传 null 表示「清空部门归属」；未传字段则保持不变（PATCH 语义）
@@ -237,9 +204,9 @@ def import_users(
     # 与手动新增一致：非超级管理员不得导入管理员账号（垂直越权防护）。
     # 先 peek（不消费）做角色校验，通过后再 consume：校验不通过不作废本次预览。
     rows = user_excel.peek_preview(confirm_token, user.id)
-    if user.role != "super_admin":
+    if user.role != ROLE_SUPER_ADMIN:
         for r in rows:
-            if str(r.get("role") or "user") != "user":
+            if str(r.get("role") or ROLE_USER) != ROLE_USER:
                 raise HTTPException(status.HTTP_403_FORBIDDEN, "仅超级管理员可创建管理员账号")
     rows = user_excel.consume_preview(confirm_token, user.id)
     scope = dept_scope_ids(db, user)

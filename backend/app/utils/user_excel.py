@@ -11,7 +11,6 @@ import uuid
 from io import BytesIO
 from typing import Any, TypedDict
 
-from fastapi import status
 from openpyxl import Workbook
 from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
@@ -19,7 +18,8 @@ from openpyxl.utils import get_column_letter
 from app.core.email import normalize_email
 from app.core.errors import DomainError
 from app.core.preview_cache import BoundedTTLCache
-from app.core.security import hash_password
+from app.core.security import MAX_PASSWORD_BYTES, hash_password
+from app.core.status import BAD_REQUEST, FORBIDDEN
 from app.utils.excel import MAX_CELL_CHARS, headers_match, open_workbook, validate_workbook_archive
 
 HEADERS = ["邮箱", "姓名", "角色", "初始密码", "状态", "分组ID"]
@@ -172,10 +172,10 @@ def _parse_row(row: tuple, r_idx: int) -> dict:
         error = error or "初始密码不能为空"
     elif len(password) < 6:
         error = error or "初始密码至少 6 位"
-    elif len(password.encode("utf-8")) > 72:
+    elif len(password.encode("utf-8")) > MAX_PASSWORD_BYTES:
         # bcrypt 上限：不在这里拦，预览阶段会在 hash_password 处整份文件报错，
         # 且错误信息不指向具体行，其它合法行一起丢失。
-        error = error or "初始密码 UTF-8 编码后不能超过 72 字节"
+        error = error or f"初始密码 UTF-8 编码后不能超过 {MAX_PASSWORD_BYTES} 字节"
 
     return {
         "row_index": r_idx,
@@ -284,10 +284,10 @@ def peek_preview(confirm_token: str, user_id: int) -> list[dict]:
     """
     peeked = _preview_cache.peek(confirm_token)
     if peeked is None:
-        raise DomainError(status.HTTP_400_BAD_REQUEST, "预览已过期，请重新上传")
+        raise DomainError(BAD_REQUEST, "预览已过期，请重新上传")
     rows, owner = peeked
     if int(owner) != user_id:
-        raise DomainError(status.HTTP_403_FORBIDDEN, "无权导入他人预览数据")
+        raise DomainError(FORBIDDEN, "无权导入他人预览数据")
     return rows
 
 
@@ -295,13 +295,13 @@ def consume_preview(confirm_token: str, user_id: int) -> list[dict]:
     """取出并消费预览暂存的有效行（校验 token 绑定用户）。"""
     peeked = _preview_cache.peek(confirm_token)
     if peeked is None:
-        raise DomainError(status.HTTP_400_BAD_REQUEST, "预览已过期，请重新上传")
+        raise DomainError(BAD_REQUEST, "预览已过期，请重新上传")
     _rows, owner = peeked
     if int(owner) != user_id:
         # 不消费他人条目：越权尝试不应使受害者的预览失效
-        raise DomainError(status.HTTP_403_FORBIDDEN, "无权导入他人预览数据")
+        raise DomainError(FORBIDDEN, "无权导入他人预览数据")
     taken = _preview_cache.take(confirm_token)
     if taken is None:
-        raise DomainError(status.HTTP_400_BAD_REQUEST, "预览已过期，请重新上传")
+        raise DomainError(BAD_REQUEST, "预览已过期，请重新上传")
     rows, _owner = taken
     return rows

@@ -4,11 +4,11 @@ from __future__ import annotations
 
 import json
 
-from fastapi import status
 from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
 
 from app.core.errors import DomainError
+from app.core.status import BAD_REQUEST
 from app.models.exam import ExamDefinition, ExamQuestion
 from app.models.question import Question, QuestionBank
 from app.models.record import ExamSession
@@ -35,7 +35,7 @@ def _normalize_bank_ids(bank_ids) -> list[int]:
     out: list[int] = []
     for bid in bank_ids or []:
         if isinstance(bid, bool) or not isinstance(bid, int):
-            raise DomainError(status.HTTP_400_BAD_REQUEST, "题库 id 必须是整数")
+            raise DomainError(BAD_REQUEST, "题库 id 必须是整数")
         if bid not in out:
             out.append(bid)
     return sorted(out)
@@ -136,7 +136,7 @@ def build_mock_spec(db: Session, bank_ids, size, type_quota=None, allocation="au
     avail = _mock_avail_by_type(db, scope)
     avail_total = sum(avail.values())
     if avail_total <= 0:
-        raise DomainError(status.HTTP_400_BAD_REQUEST, "所选范围内没有可用题目")
+        raise DomainError(BAD_REQUEST, "所选范围内没有可用题目")
 
     # 题量校验与下调：范围内题量不足时把目标题量下调到可满足的最大值，
     # 否则用户无论怎么填题型都无法满足「Σ手填 == 题量」（见设计文档 §9）。
@@ -145,11 +145,11 @@ def build_mock_spec(db: Session, bank_ids, size, type_quota=None, allocation="au
     if size is None:
         size = MOCK_DEFAULT_SIZE
     if isinstance(size, bool) or not isinstance(size, int):
-        raise DomainError(status.HTTP_400_BAD_REQUEST, "题量必须是整数")
+        raise DomainError(BAD_REQUEST, "题量必须是整数")
     if size <= 0:
-        raise DomainError(status.HTTP_400_BAD_REQUEST, "题量必须大于 0")
+        raise DomainError(BAD_REQUEST, "题量必须大于 0")
     if size > MOCK_MAX_QUESTIONS:
-        raise DomainError(status.HTTP_400_BAD_REQUEST, f"题量不能超过 {MOCK_MAX_QUESTIONS} 题")
+        raise DomainError(BAD_REQUEST, f"题量不能超过 {MOCK_MAX_QUESTIONS} 题")
     effective_size = size
     downgraded = False
     if effective_size > avail_total:
@@ -162,9 +162,9 @@ def build_mock_spec(db: Session, bank_ids, size, type_quota=None, allocation="au
         manual.pop("简答题", None)
         manual = manual or None
         if manual is None:
-            raise DomainError(status.HTTP_400_BAD_REQUEST, "勾选仅客观题后没有可出的题型")
+            raise DomainError(BAD_REQUEST, "勾选仅客观题后没有可出的题型")
     if allocation not in MOCK_ALLOCATIONS:
-        raise DomainError(status.HTTP_400_BAD_REQUEST, f"题型分配方式必须是 {MOCK_ALLOCATIONS} 之一")
+        raise DomainError(BAD_REQUEST, f"题型分配方式必须是 {MOCK_ALLOCATIONS} 之一")
     if manual and allocation == "auto":
         # 用户手填了配额 → 视为手动模式，避免"传了配额却被忽略"
         allocation = "manual"

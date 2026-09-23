@@ -4,7 +4,7 @@
 1. 邮箱大小写归一 —— 大小写变体可登录、不产生重复账号。
 2. list_modes 题库授权 —— 关闭练习的题库不得泄露统计。
 3. 模拟考试按用户隔离 —— 不得复用他人的已固化试卷。
-4. 简答复核成绩封顶 —— score 不超 total_score 且 objective_score 同步。
+4. 简答复核成绩封顶 —— score 不超 total_score，且不改动 objective_score（客观题得分）。
 5. 外键级联 —— 删除有依赖数据的用户/题目不再 IntegrityError。
 6. 统计日期归属 —— 兼容多种时间戳格式且使用业务时区。
 7. _recover_stuck_scoring 作用域 —— 不复活他人会话、不复活无时区脏数据。
@@ -172,7 +172,7 @@ def test_mock_exam_lookup_scoped_by_owner():
 
 
 def test_review_score_capped_and_objective_synced():
-    """复核加分必须封顶于 total_score，并同步 objective_score。"""
+    """复核加分必须封顶于 total_score；objective_score 保持「客观题得分」语义。"""
     with SessionLocal() as db:
         student = User(email="s@x.com", password_hash="h", name="S", role="user", status="active", email_verified=True)
         reviewer = User(
@@ -238,7 +238,7 @@ def test_review_score_capped_and_objective_synced():
         db.refresh(result)
 
         assert result.score == 100, "成绩必须封顶于 total_score"
-        assert result.objective_score == 140, "objective_score 必须同步累加（不得与 score 口径脱节）"
+        assert result.objective_score == 80, "objective_score 是客观题得分，简答复核不得改动"
         assert result.score <= result.total_score
 
 

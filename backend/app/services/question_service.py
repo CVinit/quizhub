@@ -4,13 +4,14 @@ from __future__ import annotations
 
 import logging
 
-from fastapi import status
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, exists, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
+from sqlalchemy.sql.elements import ColumnElement
 
 from app.core.errors import DomainError
 from app.core.like import ESCAPE_CHAR, like_pattern
+from app.core.status import BAD_REQUEST, CONFLICT, FORBIDDEN, NOT_FOUND
 from app.models.exam import ExamQuestion
 from app.models.group import Group
 from app.models.question import QUESTION_TYPE, Question, QuestionBank, QuestionTag
@@ -51,9 +52,9 @@ QUESTION_UPDATABLE_FIELDS = frozenset(
 
 def _validate_group(db: Session, group_id: int | None, scope: set[int] | None) -> None:
     if group_id is not None and not db.get(Group, group_id):
-        raise DomainError(status.HTTP_400_BAD_REQUEST, "分组不存在")
+        raise DomainError(BAD_REQUEST, "分组不存在")
     if scope is not None and (group_id is None or group_id not in scope):
-        raise DomainError(status.HTTP_403_FORBIDDEN, "题目必须归属在可管理分组内")
+        raise DomainError(FORBIDDEN, "题目必须归属在可管理分组内")
 
 
 def _get_allowed_bank(db: Session, bank_id: int | None, scope: set[int] | None) -> QuestionBank | None:
@@ -61,9 +62,9 @@ def _get_allowed_bank(db: Session, bank_id: int | None, scope: set[int] | None) 
         return None
     bank = db.get(QuestionBank, bank_id)
     if not bank:
-        raise DomainError(status.HTTP_400_BAD_REQUEST, "题库不存在")
+        raise DomainError(BAD_REQUEST, "题库不存在")
     if scope is not None and (bank.group_id is None or bank.group_id not in scope):
-        raise DomainError(status.HTTP_403_FORBIDDEN, "无权操作该题库")
+        raise DomainError(FORBIDDEN, "无权操作该题库")
     return bank
 
 
@@ -79,30 +80,30 @@ def _validate_answer_shape(qtype: str, answer: object) -> None:
     """
     if qtype in ("单选题", "多选题"):
         if not isinstance(answer, str) or not answer.strip():
-            raise DomainError(status.HTTP_400_BAD_REQUEST, "选择题答案不能为空")
+            raise DomainError(BAD_REQUEST, "选择题答案不能为空")
         # 单选只允许一个字母：`grade()` 对单选做整串相等比较，接受 "AB"/"Z" 会存下
         # 永远无法作答（或与选项集不符）的题目。Excel 导入路径本就按选项集校验，
         # 两条创建路径必须同口径。
         letters = answer.strip().upper()
         if qtype == "单选题" and len(letters) != 1:
-            raise DomainError(status.HTTP_400_BAD_REQUEST, "单选题答案必须是一个选项字母（如 A）")
+            raise DomainError(BAD_REQUEST, "单选题答案必须是一个选项字母（如 A）")
         if not letters.isalpha() or not letters.isascii():
-            raise DomainError(status.HTTP_400_BAD_REQUEST, "选择题答案必须是选项字母（如 A 或 ABC）")
+            raise DomainError(BAD_REQUEST, "选择题答案必须是选项字母（如 A 或 ABC）")
     elif qtype == "判断题":
         if answer not in ("正确", "错误"):
-            raise DomainError(status.HTTP_400_BAD_REQUEST, "判断题答案必须是 正确/错误")
+            raise DomainError(BAD_REQUEST, "判断题答案必须是 正确/错误")
     elif qtype == "填空题":
         if not isinstance(answer, list) or not answer:
-            raise DomainError(status.HTTP_400_BAD_REQUEST, "填空题答案不能为空")
+            raise DomainError(BAD_REQUEST, "填空题答案不能为空")
         for blanks in answer:
             if not isinstance(blanks, list) or not blanks:
-                raise DomainError(status.HTTP_400_BAD_REQUEST, "填空题每空至少需要一个等价答案")
+                raise DomainError(BAD_REQUEST, "填空题每空至少需要一个等价答案")
     elif qtype == "简答题":
         if not isinstance(answer, str) or not answer.strip():
-            raise DomainError(status.HTTP_400_BAD_REQUEST, "简答题参考答案不能为空")
+            raise DomainError(BAD_REQUEST, "简答题参考答案不能为空")
     elif qtype == "拖拽题":  # noqa: SIM102  类型分派，嵌套 if 比合并成 and 更清晰
         if not isinstance(answer, dict) or not answer:
-            raise DomainError(status.HTTP_400_BAD_REQUEST, "拖拽题答案映射不能为空")
+            raise DomainError(BAD_REQUEST, "拖拽题答案映射不能为空")
 
 
 # ---------- 题库来源 ----------
@@ -152,7 +153,7 @@ def update_bank(db: Session, bank_id: int, payload: QuestionBankUpdate, scope: s
     """更新题库（改名 / 练习开关）。练习开关只影响后续练习入口，历史记录保留。"""
     b = _get_allowed_bank(db, bank_id, scope)
     if b is None:
-        raise DomainError(status.HTTP_404_NOT_FOUND, "题库不存在")
+        raise DomainError(NOT_FOUND, "题库不存在")
     if payload.name is not None:
         b.name = payload.name
     if payload.practice_enabled is not None:
@@ -170,7 +171,7 @@ def delete_bank(db: Session, bank_id: int, scope: set[int] | None = None) -> Non
     """
     b = _get_allowed_bank(db, bank_id, scope)
     if b is None:
-        raise DomainError(status.HTTP_404_NOT_FOUND, "题库不存在")
+        raise DomainError(NOT_FOUND, "题库不存在")
     qids = [r[0] for r in db.execute(select(Question.id).where(Question.bank_id == bank_id)).all()]
     if qids:
         used = db.execute(
@@ -178,7 +179,7 @@ def delete_bank(db: Session, bank_id: int, scope: set[int] | None = None) -> Non
         ).scalar_one()
         if used:
             raise DomainError(
-                status.HTTP_409_CONFLICT,
+                CONFLICT,
                 f"该题库有 {used} 道题被考试引用，无法删除；可改为关闭练习",
             )
         # 先取回被删作答的时间戳，再清理引用这些题目的练习状态，避免留下孤儿数据。
@@ -247,12 +248,12 @@ def _ensure_tags(db: Session, tags: list[str]) -> None:
 
 def create_question(db: Session, payload: QuestionCreate, scope: set[int] | None = None) -> Question:
     if payload.type not in QUESTION_TYPES:
-        raise DomainError(status.HTTP_400_BAD_REQUEST, f"题型必须是 {QUESTION_TYPES} 之一")
+        raise DomainError(BAD_REQUEST, f"题型必须是 {QUESTION_TYPES} 之一")
     _validate_answer_shape(payload.type, payload.answer)
     _validate_group(db, payload.group_id, scope)
     bank = _get_allowed_bank(db, payload.bank_id, scope)
     if bank and bank.group_id is not None and bank.group_id != payload.group_id:
-        raise DomainError(status.HTTP_400_BAD_REQUEST, "题目分组必须与题库分组一致")
+        raise DomainError(BAD_REQUEST, "题目分组必须与题库分组一致")
     if payload.tags:
         _ensure_tags(db, payload.tags)
     q = Question(
@@ -278,11 +279,11 @@ def create_question(db: Session, payload: QuestionCreate, scope: set[int] | None
 def update_question(db: Session, qid: int, payload: QuestionUpdate, scope: set[int] | None = None) -> Question:
     q = db.get(Question, qid)
     if not q:
-        raise DomainError(status.HTTP_404_NOT_FOUND, "题目不存在")
+        raise DomainError(NOT_FOUND, "题目不存在")
     _validate_group(db, q.group_id, scope)
     data = payload.model_dump(exclude_unset=True)
     if "type" in data and data["type"] not in QUESTION_TYPES:
-        raise DomainError(status.HTTP_400_BAD_REQUEST, f"题型必须是 {QUESTION_TYPES} 之一")
+        raise DomainError(BAD_REQUEST, f"题型必须是 {QUESTION_TYPES} 之一")
     # 改题型或改答案时校验答案形状（杜绝空答案进入题库被判满分）
     effective_type = data.get("type", q.type)
     if "type" in data and "answer" not in data:
@@ -292,7 +293,7 @@ def update_question(db: Session, qid: int, payload: QuestionUpdate, scope: set[i
     bank = _get_allowed_bank(db, data.get("bank_id", q.bank_id), scope)
     effective_group = data.get("group_id", q.group_id)
     if bank and bank.group_id is not None and bank.group_id != effective_group:
-        raise DomainError(status.HTTP_400_BAD_REQUEST, "题目分组必须与题库分组一致")
+        raise DomainError(BAD_REQUEST, "题目分组必须与题库分组一致")
     if "answer" in data:
         _validate_answer_shape(effective_type, data["answer"])
     if data.get("tags"):
@@ -302,7 +303,7 @@ def update_question(db: Session, qid: int, payload: QuestionUpdate, scope: set[i
     # 直接变成客户端可写，且改动发生在另一层、评审时不易察觉。
     for key, value in data.items():
         if key not in QUESTION_UPDATABLE_FIELDS:
-            raise DomainError(status.HTTP_400_BAD_REQUEST, f"不允许修改字段: {key}")
+            raise DomainError(BAD_REQUEST, f"不允许修改字段: {key}")
         setattr(q, key, value)
     db.commit()
     db.refresh(q)
@@ -319,14 +320,14 @@ def delete_question(db: Session, qid: int, scope: set[int] | None = None) -> Non
     """
     q = db.get(Question, qid)
     if not q:
-        raise DomainError(status.HTTP_404_NOT_FOUND, "题目不存在")
+        raise DomainError(NOT_FOUND, "题目不存在")
     _validate_group(db, q.group_id, scope)
     used = db.execute(
         select(func.count()).select_from(ExamQuestion).where(ExamQuestion.question_id == qid)
     ).scalar_one()
     if used:
         raise DomainError(
-            status.HTTP_409_CONFLICT,
+            CONFLICT,
             f"该题目被 {used} 场考试引用，无法删除；可将题目移出考试或改用关闭题库练习",
         )
     # 清理引用该题的练习记录与题目状态，避免留下孤儿数据（与 delete_bank 口径一致）
@@ -369,7 +370,7 @@ def type_stats(
 
     用于题型配比编辑时提示“每个题型还剩多少题可选”，配额超过可用量时前端可即时预警。
     """
-    conditions = []
+    conditions: list[ColumnElement[bool]] = []
     if scope is not None:
         conditions.append(Question.group_id.in_(scope))
     if bank_ids:
@@ -378,19 +379,17 @@ def type_stats(
         conditions.append(Question.group_id.in_(group_ids))
 
     counts = {t: 0 for t in QUESTION_TYPES}
-    if not tags:
-        # 无标签筛选时把聚合下推到 SQL：原实现把整表 (id,type,tags) 拉进 Python 再计数
-        agg = select(Question.type, func.count()).where(*conditions).group_by(Question.type)
-        for qtype, total in db.execute(agg).all():
-            if qtype in counts:
-                counts[qtype] = int(total)
-        return counts
+    if tags:
+        # 标签筛选下推到 SQL：用 SQLite JSON1 的 json_each 做**元素级**匹配
+        # （`json_each.value IN (...)`，等价于「任一标签命中」），而不是子串比较。
+        # 原实现把整表 (id,type,tags) 拉进 Python 再过滤：超管不传 bank/group 时
+        # conditions 为空，一次请求即全表载入。
+        tag_values = func.json_each(Question.tags).table_valued("value")
+        conditions.append(exists(select(1).select_from(tag_values).where(tag_values.c.value.in_(tags))))
 
-    # 标签匹配只在 Python 端做，与组卷逻辑保持一致：SQLite 的 JSON 列没有集合包含
-    # 语义，SQL 侧 `.contains(tags)` 是子串比较，会漏掉多标签题目。
-    rows = db.execute(select(Question.id, Question.type, Question.tags).where(*conditions)).all()
-    rows = [r for r in rows if r[2] and any(t in r[2] for t in tags)]
-    for r in rows:
-        if r[1] in counts:
-            counts[r[1]] += 1
+    # 聚合一律下推到 SQL（无标签时原实现已经是这样）
+    agg = select(Question.type, func.count()).where(*conditions).group_by(Question.type)
+    for qtype, total in db.execute(agg).all():
+        if qtype in counts:
+            counts[qtype] = int(total)
     return counts

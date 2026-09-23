@@ -6,12 +6,7 @@ from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
 
 from app.core.email import normalize_email
 from app.core.limits import MAX_ID_LIST_LEN
-
-
-def _validate_password_bytes(value: str) -> str:
-    if len(value.encode("utf-8")) > 72:
-        raise ValueError("密码 UTF-8 编码后不能超过 72 字节")
-    return value
+from app.core.security import validate_password_bytes
 
 
 class SendCodeIn(BaseModel):
@@ -33,7 +28,7 @@ class RegisterIn(BaseModel):
     group_ids: list[int] = Field(default_factory=list, max_length=MAX_ID_LIST_LEN)  # 注册分组（可空）
 
     _norm_email = field_validator("email")(normalize_email)
-    _password_bytes = field_validator("password")(_validate_password_bytes)
+    _password_bytes = field_validator("password")(validate_password_bytes)
 
 
 class VerifyIn(BaseModel):
@@ -78,7 +73,7 @@ class ChangePasswordIn(BaseModel):
     old_password: str = Field(max_length=72)
     new_password: str = Field(min_length=6, max_length=72)
 
-    _password_bytes = field_validator("new_password")(_validate_password_bytes)
+    _password_bytes = field_validator("new_password")(validate_password_bytes)
 
 
 TokenOut.model_rebuild()

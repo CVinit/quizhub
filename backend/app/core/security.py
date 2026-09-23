@@ -17,18 +17,39 @@ from app.config import ACCESS_TOKEN_EXPIRE_MINUTES, ALGORITHM, SECRET_KEY, SETTI
 # 若两处字面量不一致，掩码会被当作真实密文写库，永久破坏已保存的凭据。
 MASKED_SECRET = "******"
 
+# bcrypt 只使用密码的前 72 字节：超长密码会被静默截断（注册时接受、登录时却对不上）。
+# 该规则原先在 schema / service / excel 里各写一份，收敛到此处唯一实现。
+MAX_PASSWORD_BYTES = 72
+
+
+def validate_password_bytes(value: str) -> str:
+    """校验密码的 UTF-8 字节长度（bcrypt 上限）。
+
+    Args:
+        value: 明文密码。
+
+    Returns:
+        原值（便于直接作为 Pydantic field_validator 使用）。
+
+    Raises:
+        ValueError: 超过 `MAX_PASSWORD_BYTES`（由 Pydantic 转 422）。
+    """
+    if len(value.encode("utf-8")) > MAX_PASSWORD_BYTES:
+        raise ValueError(f"密码 UTF-8 编码后不能超过 {MAX_PASSWORD_BYTES} 字节")
+    return value
+
 
 def hash_password(password: str) -> str:
     pwd = password.encode("utf-8")
-    if len(pwd) > 72:
-        raise ValueError("密码 UTF-8 编码后不能超过 72 字节")
+    if len(pwd) > MAX_PASSWORD_BYTES:
+        raise ValueError(f"密码 UTF-8 编码后不能超过 {MAX_PASSWORD_BYTES} 字节")
     return bcrypt.hashpw(pwd, bcrypt.gensalt()).decode("utf-8")
 
 
 def verify_password(plain: str, hashed: str) -> bool:
     try:
         pwd = plain.encode("utf-8")
-        if len(pwd) > 72:
+        if len(pwd) > MAX_PASSWORD_BYTES:
             return False
         return bcrypt.checkpw(pwd, hashed.encode("utf-8"))
     except (ValueError, TypeError):

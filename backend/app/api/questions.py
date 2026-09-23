@@ -185,7 +185,7 @@ async def upload_preview(
     file: UploadFile = File(...),
     group_id: int | None = Form(None),
     bank_id: int | None = Form(None),
-    bank_name: str = Form(""),
+    bank_name: str = Form("", max_length=100),  # 与 QuestionBankCreate.name 同一上限
     db: Session = Depends(get_db),
     user: User = Depends(require_admin),
 ):

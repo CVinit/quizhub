@@ -24,7 +24,7 @@ from app.api import users as users_router
 from app.core.errors import DomainError
 from app.core.logconfig import configure_logging
 from app.core.rate_limit import get_client_ip
-from app.core.request_context import set_request_ip
+from app.core.request_context import get_request_ip, set_request_ip
 from app.database import init_db
 
 logger = logging.getLogger("quizhub")
@@ -77,7 +77,25 @@ def create_app() -> FastAPI:
         path = request.url.path.lower()
         if path.startswith("/files/") and path.endswith(_PUBLIC_BLOCKED_SUFFIXES):
             return PlainTextResponse("Not Found", status_code=404)
-        response = await call_next(request)
+        try:
+            response = await call_next(request)
+        except Exception:
+            # 5xx 此前只留 uvicorn 的裸堆栈：这里补一条带方法/路径/客户端 IP 的结构化
+            # 日志（不含请求体与 PII），便于线上定位；异常照旧向上抛，由 Starlette 转 500。
+            logger.exception(
+                "[api] 未处理异常 method=%s path=%s ip=%s",
+                request.method,
+                request.url.path,
+                get_request_ip(),
+            )
+            raise
+        if response.status_code >= 500:
+            logger.error(
+                "[api] 服务端错误 method=%s path=%s status=%s",
+                request.method,
+                request.url.path,
+                response.status_code,
+            )
         response.headers.setdefault("X-Content-Type-Options", "nosniff")
         response.headers.setdefault("X-Frame-Options", "SAMEORIGIN")
         response.headers.setdefault("Referrer-Policy", "same-origin")

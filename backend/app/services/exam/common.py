@@ -5,12 +5,12 @@ from __future__ import annotations
 import logging
 from datetime import datetime, timedelta, timezone
 
-from fastapi import status
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.core.deps import subtree_map
 from app.core.errors import DomainError
+from app.core.status import BAD_REQUEST
 from app.core.timeutil import business_tz
 from app.core.timeutil import utcnow_iso as _now
 from app.models.exam import ExamDefinition, ExamQuestion, PaperTemplate
@@ -93,7 +93,7 @@ def _parse_time(value: str) -> datetime:
     try:
         parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
     except ValueError:
-        raise DomainError(status.HTTP_400_BAD_REQUEST, "考试时间配置无效") from None
+        raise DomainError(BAD_REQUEST, "考试时间配置无效") from None
     if parsed.tzinfo is None:
         # 无偏移值来自管理端日期选择器（value-format 不带时区），语义是**业务本地时间**。
         # 原实现按 UTC 解析，Asia/Shanghai 部署下考试时段整体偏移 8 小时。

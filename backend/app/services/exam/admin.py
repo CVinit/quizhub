@@ -5,12 +5,13 @@ from __future__ import annotations
 import logging
 from typing import cast
 
-from fastapi import status
 from sqlalchemy import delete, exists, func, or_, select
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.orm import Session
 
+from app.core.background import BackgroundTaskQueue
 from app.core.errors import DomainError
+from app.core.status import BAD_REQUEST, CONFLICT, FORBIDDEN, NOT_FOUND
 from app.models.exam import ExamDefinition, ExamQuestion
 from app.models.group import Group, UserGroup
 from app.models.question import Question, QuestionBank
@@ -84,23 +85,23 @@ def _check_exam_scope(db: Session, e: ExamDefinition, scope: set[int] | None) ->
     判定统一由 `exam_in_scope` 表达，与概览计数、考试列表共用同一实现。
     """
     if not exam_in_scope(e.group_ids, scope):
-        raise DomainError(status.HTTP_403_FORBIDDEN, "无权操作该考试")
+        raise DomainError(FORBIDDEN, "无权操作该考试")
 
 
 def _validate_exam_group_ids(db: Session, group_ids: list[int] | None, scope: set[int] | None) -> None:
     """创建/更新考试时校验指派分组均在调用者数据范围内（防指派到其他部门）。"""
     if scope is not None and not group_ids:
-        raise DomainError(status.HTTP_403_FORBIDDEN, "部门管理员必须指定本部门考试分组")
+        raise DomainError(FORBIDDEN, "部门管理员必须指定本部门考试分组")
     if not group_ids:
         return
     existing = {row[0] for row in db.execute(select(Group.id).where(Group.id.in_(group_ids))).all()}
     if existing != set(group_ids):
-        raise DomainError(status.HTTP_400_BAD_REQUEST, "考试指派分组不存在")
+        raise DomainError(BAD_REQUEST, "考试指派分组不存在")
     if scope is None:
         return
     for gid in group_ids:
         if gid not in scope:
-            raise DomainError(status.HTTP_403_FORBIDDEN, "无权指派该分组")
+            raise DomainError(FORBIDDEN, "无权指派该分组")
 
 
 def _validate_exam_question_scope(
@@ -121,7 +122,7 @@ def _validate_exam_question_scope(
     if scope is None:
         return
     if paper_template_id is not None:
-        raise DomainError(status.HTTP_403_FORBIDDEN, "部门管理员不能使用全局试卷模板")
+        raise DomainError(FORBIDDEN, "部门管理员不能使用全局试卷模板")
     if manual_questions:
         rows = db.execute(
             select(Question.id, Question.group_id, QuestionBank.group_id)
@@ -130,7 +131,7 @@ def _validate_exam_question_scope(
         ).all()
         allowed = {row[0] for row in rows if row[1] in scope or row[2] in scope}
         if allowed != set(manual_questions):
-            raise DomainError(status.HTTP_403_FORBIDDEN, "考试包含范围外题目")
+            raise DomainError(FORBIDDEN, "考试包含范围外题目")
         return
     source_groups = (rules or {}).get("group_ids") or []
     source_banks = (rules or {}).get("bank_ids") or []
@@ -140,11 +141,11 @@ def _validate_exam_question_scope(
         }
         # group_id 为 NULL 的全局题库不在任何部门范围内，同样判 403（fail-closed）
         if not bank_groups or not bank_groups.issubset(scope):
-            raise DomainError(status.HTTP_403_FORBIDDEN, "组卷包含范围外题库")
+            raise DomainError(FORBIDDEN, "组卷包含范围外题库")
     if source_groups and not set(source_groups).issubset(scope):
-        raise DomainError(status.HTTP_403_FORBIDDEN, "组卷包含范围外题目")
+        raise DomainError(FORBIDDEN, "组卷包含范围外题目")
     if not source_banks and not source_groups:
-        raise DomainError(status.HTTP_403_FORBIDDEN, "部门管理员组卷必须限定本部门题库或题目分组")
+        raise DomainError(FORBIDDEN, "部门管理员组卷必须限定本部门题库或题目分组")
 
 
 def list_results(
@@ -237,12 +238,12 @@ def _validate_exam_window(start_at: str | None, end_at: str | None) -> None:
     if not start_at or not end_at:
         return
     if _parse_time(end_at) <= _parse_time(start_at):
-        raise DomainError(status.HTTP_400_BAD_REQUEST, "考试结束时间必须晚于开始时间")
+        raise DomainError(BAD_REQUEST, "考试结束时间必须晚于开始时间")
 
 
 def create_exam(db: Session, payload, user: User, scope: set[int] | None = None) -> dict:
     if scope is not None and payload.type != "formal":
-        raise DomainError(status.HTTP_403_FORBIDDEN, "部门管理员只能创建正式考试")
+        raise DomainError(FORBIDDEN, "部门管理员只能创建正式考试")
     _validate_exam_group_ids(db, payload.group_ids, scope)
     _validate_exam_question_scope(db, payload.manual_questions, payload.rules, payload.paper_template_id, scope)
     _validate_exam_window(payload.start_at, payload.end_at)
@@ -350,7 +351,7 @@ def _recompute_published_pass(db: Session, exam_id: int, pass_score: float) -> i
 def update_exam(db: Session, exam_id: int, payload: dict, scope: set[int] | None = None) -> dict:
     e = db.get(ExamDefinition, exam_id)
     if not e:
-        raise DomainError(status.HTTP_404_NOT_FOUND, "考试不存在")
+        raise DomainError(NOT_FOUND, "考试不存在")
     _check_exam_scope(db, e, scope)
     if "group_ids" in payload:
         _validate_exam_group_ids(db, payload.get("group_ids"), scope)
@@ -382,7 +383,7 @@ def update_exam(db: Session, exam_id: int, payload: dict, scope: set[int] | None
         if frozen or attempts:
             if not payload.get("confirm_reset"):
                 raise DomainError(
-                    status.HTTP_409_CONFLICT,
+                    CONFLICT,
                     detail={
                         "code": "exam_reset_required",
                         "msg": (
@@ -450,14 +451,14 @@ def delete_exam(db: Session, exam_id: int, scope: set[int] | None = None) -> Non
     """
     e = db.get(ExamDefinition, exam_id)
     if not e:
-        raise DomainError(status.HTTP_404_NOT_FOUND, "考试不存在")
+        raise DomainError(NOT_FOUND, "考试不存在")
     _check_exam_scope(db, e, scope)
     sessions = db.execute(
         select(func.count()).select_from(ExamSession).where(ExamSession.exam_definition_id == exam_id)
     ).scalar_one()
     if sessions:
         raise DomainError(
-            status.HTTP_409_CONFLICT,
+            CONFLICT,
             f"该考试已有 {sessions} 条作答记录，无法删除；请改用「归档」（归档后对用户隐藏，成绩仍可追溯）",
         )
     # 一并清理成绩/复核等无会话关联的残留（防御历史脏数据导致外键失败）
@@ -476,7 +477,7 @@ def archive_exam(db: Session, exam_id: int, scope: set[int] | None = None) -> di
     """
     e = db.get(ExamDefinition, exam_id)
     if not e:
-        raise DomainError(status.HTTP_404_NOT_FOUND, "考试不存在")
+        raise DomainError(NOT_FOUND, "考试不存在")
     _check_exam_scope(db, e, scope)
     e.status = "archived"
     db.commit()
@@ -488,26 +489,28 @@ def unarchive_exam(db: Session, exam_id: int, scope: set[int] | None = None) -> 
     """取消归档：恢复为已发布（重新对用户可见）。"""
     e = db.get(ExamDefinition, exam_id)
     if not e:
-        raise DomainError(status.HTTP_404_NOT_FOUND, "考试不存在")
+        raise DomainError(NOT_FOUND, "考试不存在")
     _check_exam_scope(db, e, scope)
     if e.status != "archived":
-        raise DomainError(status.HTTP_400_BAD_REQUEST, "该考试未处于归档状态")
+        raise DomainError(BAD_REQUEST, "该考试未处于归档状态")
     e.status = "published"
     db.commit()
     db.refresh(e)
     return {"id": e.id, "name": e.name, "status": e.status}
 
 
-def publish_exam(db: Session, exam_id: int, scope: set[int] | None = None, bg=None) -> dict:
+def publish_exam(
+    db: Session, exam_id: int, scope: set[int] | None = None, bg: BackgroundTaskQueue | None = None
+) -> dict:
     e = db.get(ExamDefinition, exam_id)
     if not e:
-        raise DomainError(status.HTTP_404_NOT_FOUND, "考试不存在")
+        raise DomainError(NOT_FOUND, "考试不存在")
     _check_exam_scope(db, e, scope)
     # 发布前固化卷面并校验非空：否则可发布一张 0 题试卷，考生交白卷即得 total_score=0
     from app.services.exam.sessions import _ensure_exam_questions
 
     if not _ensure_exam_questions(db, e):
-        raise DomainError(status.HTTP_400_BAD_REQUEST, "该考试没有可用题目，无法发布；请先配置组卷来源")
+        raise DomainError(BAD_REQUEST, "该考试没有可用题目，无法发布；请先配置组卷来源")
     e.status = "published"
     db.commit()
     db.refresh(e)

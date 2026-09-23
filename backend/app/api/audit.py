@@ -9,6 +9,7 @@ from fastapi import APIRouter, Body, Depends, HTTPException, Path, Query, Reques
 from sqlalchemy.orm import Session
 
 from app.core.deps import dept_scope_ids, get_current_user, require_admin
+from app.core.timeutil import business_tz
 from app.database import get_db
 from app.models.user import User
 from app.services import audit_service
@@ -53,17 +54,23 @@ def list_logs(
 def _iso_bound(value: datetime | None, *, end_of_day: bool = False) -> str | None:
     """把查询时间归一为与 created_at 同格式的 UTC ISO 字符串。
 
-    `created_at` 以「UTC ISO + 偏移」存储，按字符串字典序比较。纯日期入参
-    （如 to=2026-02-13）会被解析为当天 00:00，若直接当上界使用，
-    `created_at <= "2026-02-13T00:00:00+00:00"` 仍会排除当天绝大多数记录；
-    因此作为上界时必须补到当天末尾。带偏移的时间统一换算为 UTC 后再比较。
+    `created_at` 以「UTC ISO + 偏移」存储，按字符串字典序比较。两种入参语义不同：
+    - **带偏移**（`2026-02-13T08:00+08:00`）：就是绝对时刻，换算成 UTC 即可；
+    - **不带偏移**（纯日期 `2026-02-13`，或无偏移的本地时间）：语义是**业务本地时间**
+      （与考试时段解析同一口径），必须按 `BUSINESS_TZ` 解释后再换算成 UTC。
+
+    作为上界时，纯日期要补到当天末尾，否则 `created_at <= 当天 00:00` 会排除当天
+    绝大多数记录。判据是「入参是否带偏移」，而不是「换算后是否为 00:00」——后者会把
+    显式给出的 UTC 零点（如 `2026-02-13T08:00+08:00`）静默扩成当天末尾。
     """
     if value is None:
         return None
-    value = value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value.astimezone(timezone.utc)
-    if end_of_day and value.time() == time(0, 0):
-        value = value + timedelta(days=1) - timedelta(microseconds=1)
-    return value.isoformat()
+    if value.tzinfo is None:
+        local = value.replace(tzinfo=business_tz())
+        if end_of_day and value.time() == time(0, 0):
+            local = local + timedelta(days=1) - timedelta(microseconds=1)
+        return local.astimezone(timezone.utc).isoformat()
+    return value.astimezone(timezone.utc).isoformat()
 
 
 # ---------- 草稿（用户端，长表单自动保存）----------

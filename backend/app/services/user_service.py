@@ -6,7 +6,6 @@ import logging
 from collections import defaultdict
 from typing import cast
 
-from fastapi import status
 from sqlalchemy import delete, exists, func, or_, select, update
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.exc import SQLAlchemyError
@@ -15,9 +14,20 @@ from sqlalchemy.orm import Session
 from app.core.email import normalize_email
 from app.core.errors import DomainError
 from app.core.like import ESCAPE_CHAR, like_pattern
-from app.core.security import hash_password
+from app.core.security import hash_password, validate_password_bytes
+from app.core.status import BAD_REQUEST, FORBIDDEN, NOT_FOUND
 from app.models.group import Group, UserGroup
-from app.models.user import USER_ROLE, USER_STATUS, User
+from app.models.user import (
+    ROLE_DEPT_ADMIN,
+    ROLE_SUPER_ADMIN,
+    ROLE_USER,
+    STATUS_ACTIVE,
+    STATUS_DISABLED,
+    STATUS_PENDING,
+    USER_ROLE,
+    USER_STATUS,
+    User,
+)
 from app.services.audit_service import log as audit_log
 
 logger = logging.getLogger("quizhub")
@@ -27,7 +37,7 @@ logger = logging.getLogger("quizhub")
 ROLES = USER_ROLE
 STATUSES = USER_STATUS
 # 管理员角色集合：非超级管理员不得管理这些账号（见 _check_manage_permission）
-ADMIN_ROLES = ("dept_admin", "super_admin")
+ADMIN_ROLES = (ROLE_DEPT_ADMIN, ROLE_SUPER_ADMIN)
 
 
 def list_users(
@@ -97,7 +107,7 @@ def _check_scope(db: Session, actor: int, user_id: int, scope: set[int] | None) 
 
     if not user_in_scope(db, user_id, scope):
         logger.warning("[authz] 越权拒绝：actor=%s target_user=%s scope_size=%s", actor, user_id, len(scope or ()))
-        raise DomainError(status.HTTP_403_FORBIDDEN, "无权操作该用户")
+        raise DomainError(FORBIDDEN, "无权操作该用户")
 
 
 def _check_manage_permission(db: Session, actor: int, target: User) -> None:
@@ -108,14 +118,14 @@ def _check_manage_permission(db: Session, actor: int, target: User) -> None:
     因此管理动作除了范围校验，还必须做角色层级校验：管理员账号只归超级管理员管。
     """
     actor_user = db.get(User, actor)
-    if actor_user is None or (actor_user.role != "super_admin" and target.role in ADMIN_ROLES):
+    if actor_user is None or (actor_user.role != ROLE_SUPER_ADMIN and target.role in ADMIN_ROLES):
         logger.warning(
             "[authz] 越权拒绝：actor=%s target_user=%s target_role=%s",
             actor,
             target.id,
             target.role,
         )
-        raise DomainError(status.HTTP_403_FORBIDDEN, "仅超级管理员可管理管理员账号")
+        raise DomainError(FORBIDDEN, "仅超级管理员可管理管理员账号")
 
 
 def _other_active_super_admin_exists(exclude_id: int):
@@ -127,16 +137,18 @@ def _other_active_super_admin_exists(exclude_id: int):
     from sqlalchemy.orm import aliased
 
     other = aliased(User)
-    return exists(select(other.id).where(other.role == "super_admin", other.status == "active", other.id != exclude_id))
+    return exists(
+        select(other.id).where(other.role == ROLE_SUPER_ADMIN, other.status == STATUS_ACTIVE, other.id != exclude_id)
+    )
 
 
 def approve(db: Session, actor: int, user_id: int, scope: set[int] | None = None) -> User:
     _check_scope(db, actor, user_id, scope)
     u = _get(db, user_id)
     _check_manage_permission(db, actor, u)
-    if u.status != "pending":
-        raise DomainError(status.HTTP_400_BAD_REQUEST, "该用户非待审批状态")
-    u.status = "active"
+    if u.status != STATUS_PENDING:
+        raise DomainError(BAD_REQUEST, "该用户非待审批状态")
+    u.status = STATUS_ACTIVE
     db.commit()
     audit_log(db, actor, "user.approve", "user", user_id)
     db.refresh(u)
@@ -149,9 +161,9 @@ def set_status(db: Session, actor: int, user_id: int, enabled: bool, scope: set[
     _check_manage_permission(db, actor, u)
     # 与 delete_user 同级的兜底：禁用是非 active 用户被 get_current_user 直接 403，
     # 且恢复角色只允许超管，因此把自己/最后一个 active 超管禁用会让系统永久失去管理入口。
-    if not enabled and u.role == "super_admin" and u.status == "active":
+    if not enabled and u.role == ROLE_SUPER_ADMIN and u.status == STATUS_ACTIVE:
         if actor == user_id:
-            raise DomainError(status.HTTP_400_BAD_REQUEST, "不能禁用当前登录账号")
+            raise DomainError(BAD_REQUEST, "不能禁用当前登录账号")
         # 原子守卫：并发禁用两个互为「最后一个」的超管时，先到者成功、后到者匹配 0 行 → 400，
         # 不会出现两边都读到「对方仍 active」而最终 0 个可用超管的锁死状态。
         # 不再先跑一次 COUNT 预检查：WHERE 里的 EXISTS 与随后的 rowcount 才是权威判据，
@@ -160,18 +172,18 @@ def set_status(db: Session, actor: int, user_id: int, enabled: bool, scope: set[
             CursorResult,
             db.execute(
                 update(User)
-                .where(User.id == user_id, User.status == "active", _other_active_super_admin_exists(user_id))
-                .values(status="disabled")
+                .where(User.id == user_id, User.status == STATUS_ACTIVE, _other_active_super_admin_exists(user_id))
+                .values(status=STATUS_DISABLED)
                 .execution_options(synchronize_session=False)
             ),
         )
         if guarded.rowcount == 0:
-            raise DomainError(status.HTTP_400_BAD_REQUEST, "不能禁用最后一个超级管理员账号")
+            raise DomainError(BAD_REQUEST, "不能禁用最后一个超级管理员账号")
         db.commit()
         audit_log(db, actor, "user.disable", "user", user_id)
         db.refresh(u)
         return u
-    u.status = "active" if enabled else "disabled"
+    u.status = STATUS_ACTIVE if enabled else STATUS_DISABLED
     db.commit()
     audit_log(db, actor, "user.enable" if enabled else "user.disable", "user", user_id)
     db.refresh(u)
@@ -189,18 +201,18 @@ def delete_user(db: Session, actor: int, actor_role: str, user_id: int, scope: s
     from app.models.system import AuditLog, Draft
     from app.models.user import EmailVerification
 
-    if actor_role != "super_admin":
-        raise DomainError(status.HTTP_403_FORBIDDEN, "仅超级管理员可删除用户")
+    if actor_role != ROLE_SUPER_ADMIN:
+        raise DomainError(FORBIDDEN, "仅超级管理员可删除用户")
     if actor == user_id:
-        raise DomainError(status.HTTP_400_BAD_REQUEST, "不能删除当前登录账号")
+        raise DomainError(BAD_REQUEST, "不能删除当前登录账号")
     _check_scope(db, actor, user_id, scope)
     u = _get(db, user_id)
-    if u.role == "super_admin":
+    if u.role == ROLE_SUPER_ADMIN:
         remaining = db.execute(
-            select(func.count()).select_from(User).where(User.role == "super_admin", User.id != user_id)
+            select(func.count()).select_from(User).where(User.role == ROLE_SUPER_ADMIN, User.id != user_id)
         ).scalar_one()
         if remaining == 0:
-            raise DomainError(status.HTTP_400_BAD_REQUEST, "不能删除最后一个超级管理员账号")
+            raise DomainError(BAD_REQUEST, "不能删除最后一个超级管理员账号")
 
     # 本人考试会话 → 成绩 → 简答复核，按外键依赖顺序清理
     session_ids = [r[0] for r in db.execute(select(ExamSession.id).where(ExamSession.user_id == user_id)).all()]
@@ -230,14 +242,18 @@ def delete_user(db: Session, actor: int, actor_role: str, user_id: int, scope: s
             delete(User)
             .where(
                 User.id == user_id,
-                or_(User.role != "super_admin", User.status != "active", _other_active_super_admin_exists(user_id)),
+                or_(
+                    User.role != ROLE_SUPER_ADMIN,
+                    User.status != STATUS_ACTIVE,
+                    _other_active_super_admin_exists(user_id),
+                ),
             )
             .execution_options(synchronize_session="fetch")
         ),
     )
     if removed.rowcount == 0:
         db.rollback()
-        raise DomainError(status.HTTP_400_BAD_REQUEST, "不能删除最后一个超级管理员账号")
+        raise DomainError(BAD_REQUEST, "不能删除最后一个超级管理员账号")
     db.commit()
     # 审计只记非 PII 标识：邮箱在应用日志/排行榜/邮件异常各处均已脱敏，
     # 审计明细也不应成为唯一泄露点（与 user.create 的明细口径一致）。
@@ -260,7 +276,7 @@ def reset_password(
     u = _get(db, user_id)
     _check_manage_permission(db, actor, u)
     if len(new_password) < 6:
-        raise DomainError(status.HTTP_400_BAD_REQUEST, "密码至少 6 位")
+        raise DomainError(BAD_REQUEST, "密码至少 6 位")
     u.password_hash = hash_password(new_password)
     u.token_version += 1
     db.commit()
@@ -292,24 +308,24 @@ def update_user(
         changes["name"] = name
     if role is not None:
         if role not in ROLES:
-            raise DomainError(status.HTTP_400_BAD_REQUEST, "角色非法")
+            raise DomainError(BAD_REQUEST, "角色非法")
         if u.role != role:
             # 降级最后一个 active 超管同样会永久锁死管理入口，与 delete_user 保持一致拒绝
-            if u.role == "super_admin" and role != "super_admin" and u.status == "active":
+            if u.role == ROLE_SUPER_ADMIN and role != ROLE_SUPER_ADMIN and u.status == STATUS_ACTIVE:
                 # 原子守卫（并发降级/禁用竞争）；rowcount 是权威判据，无需前置 COUNT
                 guarded = cast(
                     CursorResult,
                     db.execute(
                         update(User)
                         .where(
-                            User.id == user_id, User.role == "super_admin", _other_active_super_admin_exists(user_id)
+                            User.id == user_id, User.role == ROLE_SUPER_ADMIN, _other_active_super_admin_exists(user_id)
                         )
                         .values(role=role)
                         .execution_options(synchronize_session=False)
                     ),
                 )
                 if guarded.rowcount == 0:
-                    raise DomainError(status.HTTP_400_BAD_REQUEST, "不能降级最后一个超级管理员账号")
+                    raise DomainError(BAD_REQUEST, "不能降级最后一个超级管理员账号")
                 changes["role"] = role
             else:
                 # 角色变更需超级管理员权限（由调用方在路由层校验），此处仅记录
@@ -321,12 +337,12 @@ def update_user(
     elif dept_group_id is not None:
         # 部门管理员只能把目标用户迁到自己范围内的分组
         if scope is not None and dept_group_id not in scope:
-            raise DomainError(status.HTTP_403_FORBIDDEN, "无权将用户迁移到该部门")
+            raise DomainError(FORBIDDEN, "无权将用户迁移到该部门")
         # 分组必须存在：users.dept_group_id 有指向 groups.id 的外键且运行期
         # PRAGMA foreign_keys=ON，直接写入不存在的 id 会在 commit 抛 IntegrityError → 500。
         # 与 assign_groups 的分组存在性校验同口径。
         if not db.get(Group, dept_group_id):
-            raise DomainError(status.HTTP_400_BAD_REQUEST, "分组不存在")
+            raise DomainError(BAD_REQUEST, "分组不存在")
         u.dept_group_id = dept_group_id
         changes["dept_group_id"] = dept_group_id
     db.commit()
@@ -355,12 +371,12 @@ def assign_groups(
         valid = {r[0] for r in db.execute(select(Group.id).where(Group.id.in_(gids))).all()}
         missing = [gid for gid in gids if gid not in valid]
         if missing:
-            raise DomainError(status.HTTP_400_BAD_REQUEST, f"分组不存在: {missing}")
+            raise DomainError(BAD_REQUEST, f"分组不存在: {missing}")
     # 部门管理员只能分配其范围内的分组
     if scope is not None:
         for gid in gids:
             if gid not in scope:
-                raise DomainError(status.HTTP_403_FORBIDDEN, "无权分配该分组")
+                raise DomainError(FORBIDDEN, "无权分配该分组")
     db.execute(delete(UserGroup).where(UserGroup.user_id == user_id))
     for gid in gids:
         db.add(UserGroup(user_id=user_id, group_id=gid))
@@ -371,7 +387,7 @@ def assign_groups(
 def _get(db: Session, user_id: int) -> User:
     u = db.get(User, user_id)
     if not u:
-        raise DomainError(status.HTTP_404_NOT_FOUND, "用户不存在")
+        raise DomainError(NOT_FOUND, "用户不存在")
     return u
 
 
@@ -389,9 +405,9 @@ def create_user(
     actor: int,
     email: str,
     name: str = "",
-    role: str = "user",
+    role: str = ROLE_USER,
     password: str | None = None,
-    status_: str = "active",
+    status_: str = STATUS_ACTIVE,
     group_ids: list[int] | None = None,
     dept_group_id: int | None = None,
 ) -> User:
@@ -407,18 +423,18 @@ def create_user(
     """
     email = normalize_email(email)
     if not email or "@" not in email:
-        raise DomainError(status.HTTP_400_BAD_REQUEST, "邮箱格式不正确")
+        raise DomainError(BAD_REQUEST, "邮箱格式不正确")
     if role not in ROLES:
-        raise DomainError(status.HTTP_400_BAD_REQUEST, "角色非法")
+        raise DomainError(BAD_REQUEST, "角色非法")
     if status_ not in STATUSES:
-        raise DomainError(status.HTTP_400_BAD_REQUEST, "状态非法")
+        raise DomainError(BAD_REQUEST, "状态非法")
 
     existing = db.execute(select(User).where(User.email == email)).scalar_one_or_none()
     if existing:
-        raise DomainError(status.HTTP_400_BAD_REQUEST, "该邮箱已存在")
+        raise DomainError(BAD_REQUEST, "该邮箱已存在")
 
     if not password or len(password) < 6:
-        raise DomainError(status.HTTP_400_BAD_REQUEST, "密码至少 6 位")
+        raise DomainError(BAD_REQUEST, "密码至少 6 位")
 
     gids = _normalize_group_ids(db, group_ids)
     user = User(
@@ -456,7 +472,7 @@ def import_users(
     actor: int,
     rows: list[dict],
     scope: set[int] | None = None,
-    actor_role: str = "user",
+    actor_role: str = ROLE_USER,
     dept_group_id: int | None = None,
 ) -> dict:
     """批量导入用户（管理员已预览确认）。rows 每项含 email/name/role/password/status/group_ids。
@@ -511,13 +527,13 @@ def import_users(
             seen_emails.add(email)
             if email in existing_emails:
                 raise ValueError("该邮箱已存在")
-            role = str(r.get("role") or "user").strip() or "user"
+            role = str(r.get("role") or ROLE_USER).strip() or ROLE_USER
             if role not in ROLES:
                 raise ValueError(f"角色非法: {role}")
             # 仅超级管理员可导入管理员账号（垂直越权防护）
-            if role in ("dept_admin", "super_admin") and actor_role != "super_admin":
+            if role in (ROLE_DEPT_ADMIN, ROLE_SUPER_ADMIN) and actor_role != ROLE_SUPER_ADMIN:
                 raise ValueError("仅超级管理员可创建管理员账号")
-            st = str(r.get("status") or "active").strip() or "active"
+            st = str(r.get("status") or STATUS_ACTIVE).strip() or STATUS_ACTIVE
             if st not in STATUSES:
                 raise ValueError(f"状态非法: {st}")
             # 预览阶段已算好 bcrypt 哈希（明文不进入进程内缓存）。
@@ -529,8 +545,7 @@ def import_users(
                     raise ValueError("初始密码不能为空")
                 if len(pwd) < 6:
                     raise ValueError("密码至少 6 位")
-                if len(pwd.encode("utf-8")) > 72:
-                    raise ValueError("密码 UTF-8 编码后不能超过 72 字节")
+                validate_password_bytes(pwd)  # bcrypt 上限统一由 core.security 判定
                 pwd_hash = hash_password(pwd)
             name = str(r.get("name") or "").strip() or email.split("@")[0]
             # 去重 + 只保留真实存在的分组（与模板说明的「非法分组ID将被忽略」一致）

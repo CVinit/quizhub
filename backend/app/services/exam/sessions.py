@@ -4,13 +4,13 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
-from fastapi import status
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.core.deps import subtree_map
 from app.core.errors import DomainError
+from app.core.status import BAD_REQUEST, CONFLICT, FORBIDDEN, NOT_FOUND
 from app.models.exam import ExamDefinition, ExamQuestion, PaperTemplate
 from app.models.group import UserGroup
 from app.models.question import DEFAULT_QUESTION_SCORE, Question
@@ -29,8 +29,13 @@ from app.services.exam.common import (
 from app.services.exam.scoring import _recover_stuck_scoring
 from app.services.paper_service import generate_paper
 
-
 # ---------- 用户端：可用考试 ----------
+# 可用考试列表上限。可见性判定依赖 JSON 列（指派分组），无法可靠下推 SQL，
+# 因此与管理端 list_exams 同口径：按 limit 的若干倍取候选，再在 Python 侧过滤。
+_AVAILABLE_MAX = 200
+_AVAILABLE_FETCH_FACTOR = 4
+
+
 def list_available(db: Session, user: User) -> list[dict]:
     """返回当前用户可参加的考试。
 
@@ -53,6 +58,7 @@ def list_available(db: Session, user: User) -> list[dict]:
                 ExamDefinition.type == "formal",  # 仅正式考试进入可用列表
             )
             .order_by(ExamDefinition.id.desc())
+            .limit(_AVAILABLE_MAX * _AVAILABLE_FETCH_FACTOR)
         )
         .scalars()
         .all()
@@ -75,6 +81,7 @@ def list_available(db: Session, user: User) -> list[dict]:
             visible.append((e, "max_reached", attempts))
             continue
         visible.append((e, "available", attempts))
+    visible = visible[:_AVAILABLE_MAX]
     counts = _exam_question_counts(db, [e for e, _state, _attempts in visible])
     return [_exam_brief(e, state, attempts, total_questions=counts.get(e.id, 0)) for e, state, attempts in visible]
 
@@ -83,9 +90,9 @@ def list_available(db: Session, user: User) -> list[dict]:
 def start_exam(db: Session, user: User, exam_id: int) -> dict:
     e = db.get(ExamDefinition, exam_id)
     if not e:
-        raise DomainError(status.HTTP_404_NOT_FOUND, "考试不存在")
+        raise DomainError(NOT_FOUND, "考试不存在")
     if e.status not in ("published", "ongoing"):
-        raise DomainError(status.HTTP_400_BAD_REQUEST, "考试未开放")
+        raise DomainError(BAD_REQUEST, "考试未开放")
     # 权限：正式考试须在指派分组内且在时段窗内（start_exam 与 list_available 复用同一校验，
     # 防止用户猜枚举 exam_id 开考未指派/未到时段的考试）
     if e.type == "formal":
@@ -95,14 +102,14 @@ def start_exam(db: Session, user: User, exam_id: int) -> dict:
         if user.dept_group_id:
             user_group_ids.add(user.dept_group_id)
         if not _user_can_access_exam(e, user_group_ids, subtree_map(db)):
-            raise DomainError(status.HTTP_403_FORBIDDEN, "您不在该考试指派范围内")
+            raise DomainError(FORBIDDEN, "您不在该考试指派范围内")
         ok, _state = _within_time_window(e, datetime.now(timezone.utc))
         if not ok:
-            raise DomainError(status.HTTP_400_BAD_REQUEST, "考试不在开放时段")
+            raise DomainError(BAD_REQUEST, "考试不在开放时段")
     elif e.created_by != user.id:
         # 模拟考试定义是「开考用户私有」的：mock 定义全局可见（list_available 已按 type 过滤），
         # 若不校验 created_by，任何登录用户枚举 exam_id 就能启动他人的模拟考并固化其试题。
-        raise DomainError(status.HTTP_404_NOT_FOUND, "考试不存在")
+        raise DomainError(NOT_FOUND, "考试不存在")
     # 是否有进行中的会话
     ongoing = db.execute(
         select(ExamSession).where(
@@ -121,18 +128,18 @@ def start_exam(db: Session, user: User, exam_id: int) -> dict:
                 _recover_stuck_scoring(db, user_id=user.id)
                 db.refresh(ongoing)
                 if ongoing.status != "in_progress":
-                    raise DomainError(status.HTTP_409_CONFLICT, "试卷正在结算中，请稍后重试")
+                    raise DomainError(CONFLICT, "试卷正在结算中，请稍后重试")
         return _session_payload(db, ongoing, e)
 
     # 未结束的会话也算占用次数
     attempts = _count_attempts(db, exam_id, user.id)
     if e.max_attempts and attempts >= e.max_attempts:
-        raise DomainError(status.HTTP_400_BAD_REQUEST, "已达最大尝试次数")
+        raise DomainError(BAD_REQUEST, "已达最大尝试次数")
 
     # 固化题目（若尚未固化）；空卷直接拒绝，避免考生交白卷后按 total_score=0 判分
     qids = _ensure_exam_questions(db, e)
     if not qids:
-        raise DomainError(status.HTTP_400_BAD_REQUEST, "该考试没有可用题目，请联系管理员")
+        raise DomainError(BAD_REQUEST, "该考试没有可用题目，请联系管理员")
 
     # 创建会话
     sess = ExamSession(
@@ -178,7 +185,7 @@ def _ensure_exam_questions(db: Session, e: ExamDefinition) -> list[int]:
     if e.manual_questions:
         qids = list(e.manual_questions)
         if len(qids) != len(set(qids)):
-            raise DomainError(status.HTTP_400_BAD_REQUEST, "同一考试不能重复添加题目")
+            raise DomainError(BAD_REQUEST, "同一考试不能重复添加题目")
     elif e.paper_template_id:
         tpl = db.get(PaperTemplate, e.paper_template_id)
         if tpl and tpl.question_ids:
@@ -214,14 +221,14 @@ def _persist_exam_questions(db: Session, exam_id: int, qids: list[int], scores: 
     会被整体改写成 2.0，使 total_score 与及格判定双错。
     """
     if len(qids) != len(set(qids)):
-        raise DomainError(status.HTTP_400_BAD_REQUEST, "同一考试不能重复添加题目")
+        raise DomainError(BAD_REQUEST, "同一考试不能重复添加题目")
     question_scores = {
         row[0]: (float(row[1]) if row[1] is not None else DEFAULT_QUESTION_SCORE)
         for row in db.execute(select(Question.id, Question.score).where(Question.id.in_(qids))).all()
     }
     missing = set(qids) - set(question_scores)
     if missing:
-        raise DomainError(status.HTTP_400_BAD_REQUEST, "考试包含不存在的题目")
+        raise DomainError(BAD_REQUEST, "考试包含不存在的题目")
     # 并发兜底：唯一约束 + 插入前复核，避免双请求都读到 existing=[] 后重复插入
     already = db.execute(select(ExamQuestion.id).where(ExamQuestion.exam_definition_id == exam_id).limit(1)).first()
     if already:
@@ -312,7 +319,7 @@ def session_detail(db: Session, user: User, session_id: int) -> dict:
     """按会话 id 返回进行中考试的完整题目与会话状态（用于断点续答）。"""
     sess = db.get(ExamSession, session_id)
     if not sess or sess.user_id != user.id:
-        raise DomainError(status.HTTP_404_NOT_FOUND, "考试会话不存在")
+        raise DomainError(NOT_FOUND, "考试会话不存在")
     if sess.status != "in_progress":
         # 已交卷，返回状态供前端跳成绩；剩余时间对已结束会话无意义，固定为 0
         return {
@@ -329,5 +336,5 @@ def session_detail(db: Session, user: User, session_id: int) -> dict:
         }
     e = db.get(ExamDefinition, sess.exam_definition_id)
     if not e:
-        raise DomainError(status.HTTP_404_NOT_FOUND, "考试定义不存在")
+        raise DomainError(NOT_FOUND, "考试定义不存在")
     return _session_payload(db, sess, e)

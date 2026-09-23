@@ -10,6 +10,15 @@ from app.models.base import PKMixin, TimestampMixin
 USER_ROLE = ("user", "dept_admin", "super_admin")
 USER_STATUS = ("active", "pending", "disabled")
 
+# 角色/状态常量：授权分支一律引用常量而不是字面量 —— 拼错的字面量会让安全守卫
+# 静默失效（比较永远为假），而拼错的常量名会直接 NameError。
+ROLE_USER = "user"
+ROLE_DEPT_ADMIN = "dept_admin"
+ROLE_SUPER_ADMIN = "super_admin"
+STATUS_ACTIVE = "active"
+STATUS_PENDING = "pending"
+STATUS_DISABLED = "disabled"
+
 
 class User(PKMixin, TimestampMixin):
     __tablename__ = "users"

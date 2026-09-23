@@ -7,12 +7,13 @@ from collections.abc import Callable
 from datetime import datetime, timezone
 from typing import cast
 
-from fastapi import status
 from sqlalchemy import and_, case, func, select, update
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.orm import Session
 
+from app.core.background import BackgroundTaskQueue
 from app.core.errors import DomainError
+from app.core.status import BAD_REQUEST, FORBIDDEN, NOT_FOUND
 from app.models.exam import ExamDefinition, ExamQuestion
 from app.models.question import Question
 from app.models.record import ExamResult, ShortAnswerReview
@@ -131,10 +132,10 @@ def review(
         {"success": True, "verdict": verdict}
     """
     if verdict not in ("pass", "fail", "partial"):
-        raise DomainError(status.HTTP_400_BAD_REQUEST, "verdict 必须是 pass/fail/partial")
+        raise DomainError(BAD_REQUEST, "verdict 必须是 pass/fail/partial")
     r = db.get(ShortAnswerReview, review_id)
     if not r:
-        raise DomainError(status.HTTP_404_NOT_FOUND, "复核记录不存在")
+        raise DomainError(NOT_FOUND, "复核记录不存在")
 
     # 单题复核 IDOR 防护：review_id 可枚举，list_pending 的 scope 过滤不足以拦住直接
     # POST /admin/review/{id}。此处对归属考生做 user_in_scope 校验，部门管理员不得
@@ -143,16 +144,16 @@ def review(
         from app.core.deps import user_in_scope
 
         if not user_in_scope(db, r.user_id, scope):
-            raise DomainError(status.HTTP_403_FORBIDDEN, "无权复核该题")
+            raise DomainError(FORBIDDEN, "无权复核该题")
 
     result = db.get(ExamResult, r.exam_result_id)
     if not result:
-        raise DomainError(status.HTTP_404_NOT_FOUND, "成绩记录不存在")
+        raise DomainError(NOT_FOUND, "成绩记录不存在")
 
     # 计算本题分值并校验 partial_score 上限（防超分）
     eqs = _get_exam_question_score(db, result.exam_definition_id, r.question_id)
     if eqs is None:
-        raise DomainError(status.HTTP_400_BAD_REQUEST, "复核题目不属于该考试")
+        raise DomainError(BAD_REQUEST, "复核题目不属于该考试")
     # 增量必须按 verdict 显式取值（fail 的得分是 0.0，而不是 None）。
     # 原实现 `delta = eqs if verdict == "pass" else partial_score` 在 fail 时
     # partial_score 为 None，使 SQL 中 `score + NULL` 与标量 `min(total_score, NULL)`
@@ -163,9 +164,9 @@ def review(
         delta = float(eqs)
     elif verdict == "partial":
         if partial_score is None:
-            raise DomainError(status.HTTP_400_BAD_REQUEST, "partial 必须提供 partial_score")
+            raise DomainError(BAD_REQUEST, "partial 必须提供 partial_score")
         if partial_score < 0 or partial_score > eqs:
-            raise DomainError(status.HTTP_400_BAD_REQUEST, f"partial_score 必须在 0~{eqs} 之间")
+            raise DomainError(BAD_REQUEST, f"partial_score 必须在 0~{eqs} 之间")
         delta = float(partial_score)
     else:  # fail
         delta = 0.0
@@ -187,20 +188,19 @@ def review(
         ),
     )
     if claimed.rowcount == 0:
-        raise DomainError(status.HTTP_400_BAD_REQUEST, "该题已复核")
+        raise DomainError(BAD_REQUEST, "该题已复核")
 
     # 原子自增成绩，避免并发复核读-改-写丢失更新。
-    # 必须同时满足两点，否则成绩会失真：
-    # 1) 以 total_score 封顶：多次复核不同题目累加可能超过满分（如 108/100）；
-    # 2) 同步 objective_score：该列是 score 的组成部分，只加 score 会让
-    #    任何按 objective_score 重算的报告与 score 永久不一致。
+    # 以 total_score 封顶：多次复核不同题目累加可能超过满分（如 108/100）。
+    #
+    # 只更新 score，**不动 objective_score**：该列的语义是「客观题得分」
+    # （scoring 阶段写入，见 exam/scoring.py），简答复核得分不属于客观题。
+    # 原实现把复核增量同时加到两列：既污染了列语义，又因为只有 score 封顶，
+    # 在超满分场景下两列必然分叉（注释里自称的一致性并未达成）。
     db.execute(
         update(ExamResult)
         .where(ExamResult.id == result.id)
-        .values(
-            score=func.min(ExamResult.total_score, ExamResult.score + delta),
-            objective_score=ExamResult.objective_score + delta,
-        )
+        .values(score=func.min(ExamResult.total_score, ExamResult.score + delta))
     )
     db.commit()
     # 复核改分会影响该考生当日成绩聚合，即时刷新其当日行。
@@ -224,7 +224,9 @@ def _get_exam_question_score(db: Session, exam_id: int, qid: int) -> float | Non
     return eq.score if eq else None
 
 
-def publish_results(db: Session, exam_id: int, scope: set[int] | None = None, bg=None) -> dict:
+def publish_results(
+    db: Session, exam_id: int, scope: set[int] | None = None, bg: BackgroundTaskQueue | None = None
+) -> dict:
     """公布某考试所有成绩（要求该考试所有简答已复核）。
 
     同时处理「无简答但 show_score_immediately=False」的成绩公布场景：
@@ -235,12 +237,12 @@ def publish_results(db: Session, exam_id: int, scope: set[int] | None = None, bg
 
     e = db.get(ExamDefinition, exam_id)
     if not e:
-        raise DomainError(status.HTTP_404_NOT_FOUND, "考试不存在")
+        raise DomainError(NOT_FOUND, "考试不存在")
     # 部门管理员数据范围校验：与 exam/admin 共用 exam_in_scope（子集口径）
     from app.services.exam_service import exam_in_scope
 
     if not exam_in_scope(e.group_ids, scope):
-        raise DomainError(status.HTTP_403_FORBIDDEN, "无权操作该考试")
+        raise DomainError(FORBIDDEN, "无权操作该考试")
 
     # 只取关键列，避免把每条成绩实例化为 ORM 对象后逐行 flush（写事务时间随人数线性增长）
     stmt = select(ExamResult.id, ExamResult.user_id, ExamResult.exam_session_id, ExamResult.created_at).where(

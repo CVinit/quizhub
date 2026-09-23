@@ -6,12 +6,12 @@ import logging
 from datetime import datetime, timedelta, timezone
 from typing import cast
 
-from fastapi import status
 from sqlalchemy import select, update
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.orm import Session
 
 from app.core.errors import DomainError
+from app.core.status import BAD_REQUEST, CONFLICT, NOT_FOUND
 from app.models.exam import ExamDefinition, ExamQuestion
 from app.models.question import Question
 from app.models.record import ExamResult, ExamSession, ShortAnswerReview
@@ -32,21 +32,21 @@ def submit_answer(db: Session, user: User, session_id: int, qid: int, answer, ve
     """
     sess = db.get(ExamSession, session_id)
     if not sess or sess.user_id != user.id:
-        raise DomainError(status.HTTP_404_NOT_FOUND, "考试会话不存在")
+        raise DomainError(NOT_FOUND, "考试会话不存在")
     if sess.status != "in_progress":
-        raise DomainError(status.HTTP_400_BAD_REQUEST, "考试已结束，无法作答")
+        raise DomainError(BAD_REQUEST, "考试已结束，无法作答")
     e = db.get(ExamDefinition, sess.exam_definition_id)
     if not e:
-        raise DomainError(status.HTTP_404_NOT_FOUND, "考试定义不存在")
+        raise DomainError(NOT_FOUND, "考试定义不存在")
     if _is_overtime(e, sess):
-        raise DomainError(status.HTTP_400_BAD_REQUEST, "考试已超时，请提交试卷")
+        raise DomainError(BAD_REQUEST, "考试已超时，请提交试卷")
     if not db.execute(
         select(ExamQuestion.id).where(
             ExamQuestion.exam_definition_id == sess.exam_definition_id,
             ExamQuestion.question_id == qid,
         )
     ).first():
-        raise DomainError(status.HTTP_400_BAD_REQUEST, "题目不属于当前考试")
+        raise DomainError(BAD_REQUEST, "题目不属于当前考试")
 
     # 合并答案（基于本次读取的 answers 快照）
     answers = dict(sess.answers or {})
@@ -64,7 +64,7 @@ def submit_answer(db: Session, user: User, session_id: int, qid: int, answer, ve
     )
     if result.rowcount == 0:
         # version 已被他人改动 或 会话已结束 → 冲突
-        raise DomainError(status.HTTP_409_CONFLICT, "数据版本冲突，请刷新后重试")
+        raise DomainError(CONFLICT, "数据版本冲突，请刷新后重试")
 
     db.commit()
     return {"version": new_version}
@@ -127,11 +127,11 @@ def _recover_stuck_scoring(db: Session, user_id: int | None = None) -> int:
 def submit_exam(db: Session, user: User, session_id: int) -> dict:
     sess = db.get(ExamSession, session_id)
     if not sess or sess.user_id != user.id:
-        raise DomainError(status.HTTP_404_NOT_FOUND, "考试会话不存在")
+        raise DomainError(NOT_FOUND, "考试会话不存在")
 
     e = db.get(ExamDefinition, sess.exam_definition_id)
     if not e:
-        raise DomainError(status.HTTP_404_NOT_FOUND, "考试定义不存在")
+        raise DomainError(NOT_FOUND, "考试定义不存在")
 
     # 正式考试截止时间校验：超过 end_at 仍允许交卷但判为超时（成绩置 0），
     # 避免仅靠前端计时、用户越过截止时间仍正常得分。
@@ -161,7 +161,7 @@ def submit_exam(db: Session, user: User, session_id: int) -> dict:
             }
         if existing and not existing.published:
             return {"need_review": True, "message": "含简答题，待管理员复核后公布成绩", "overtime": existing.overtime}
-        raise DomainError(status.HTTP_400_BAD_REQUEST, "考试已结束")
+        raise DomainError(BAD_REQUEST, "考试已结束")
 
     # 锁定成功后，answers 必须以数据库当前值为准：本函数入口的 db.get(ExamSession) 读到的是
     # 进入函数时的快照，而在「读快照 → 滞后的 submit_answer 提交并 commit → 本请求锁定 scoring」
@@ -272,7 +272,7 @@ def submit_exam(db: Session, user: User, session_id: int) -> dict:
 def get_result(db: Session, user: User, session_id: int) -> dict:
     sess = db.get(ExamSession, session_id)
     if not sess or sess.user_id != user.id:
-        raise DomainError(status.HTTP_404_NOT_FOUND, "考试会话不存在")
+        raise DomainError(NOT_FOUND, "考试会话不存在")
     result = db.execute(select(ExamResult).where(ExamResult.exam_session_id == session_id)).scalar_one_or_none()
     if not result:
         return {"published": False, "message": "成绩尚未生成"}

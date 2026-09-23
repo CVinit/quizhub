@@ -12,11 +12,11 @@ import uuid
 from dataclasses import dataclass
 from io import BytesIO
 
-from fastapi import status
 from sqlalchemy.orm import Session
 
 from app.core.errors import DomainError
 from app.core.preview_cache import BoundedTTLCache
+from app.core.status import BAD_REQUEST, FORBIDDEN
 from app.models.question import Question, QuestionBank
 from app.schemas.question import UploadImportResult, UploadPreview, UploadPreviewRow
 from app.utils.excel import PARSE_ROW_MAX, parse_workbook
@@ -96,15 +96,15 @@ def do_import(db: Session, confirm_token: str, user_id: int, scope: set[int] | N
     # 任一校验失败都不应把上传者本人的预览作废、逼其重新上传。
     peeked = _preview_cache.peek(confirm_token)
     if peeked is None:
-        raise DomainError(status.HTTP_400_BAD_REQUEST, "预览已过期，请重新上传")
+        raise DomainError(BAD_REQUEST, "预览已过期，请重新上传")
     peeked_entry, owner_id = peeked
     if int(owner_id) != user_id:
-        raise DomainError(status.HTTP_403_FORBIDDEN, "无权导入他人预览数据")
+        raise DomainError(FORBIDDEN, "无权导入他人预览数据")
     _validate_scope(db, peeked_entry.group_id, peeked_entry.bank_id, scope)
 
     taken = _preview_cache.take(confirm_token)
     if taken is None:
-        raise DomainError(status.HTTP_400_BAD_REQUEST, "预览已过期，请重新上传")
+        raise DomainError(BAD_REQUEST, "预览已过期，请重新上传")
     entry, _owner = taken
     rows = entry.rows
     group_id = entry.group_id
@@ -123,7 +123,7 @@ def do_import(db: Session, confirm_token: str, user_id: int, scope: set[int] | N
         # 预览与确认之间题库可能已被删除：显式报错，避免后续访问 bank 属性变成 500
         existing = db.get(QuestionBank, bank_id)
         if existing is None:
-            raise DomainError(status.HTTP_400_BAD_REQUEST, "题库不存在")
+            raise DomainError(BAD_REQUEST, "题库不存在")
         bank = existing
     bank_id = bank.id
     # 题目分组必须与题库分组一致（question_service.update_question 维护同一不变量）。
@@ -171,17 +171,17 @@ def _validate_scope(db: Session, group_id: int | None, bank_id: int | None, scop
     from app.models.group import Group
 
     if group_id is not None and not db.get(Group, group_id):
-        raise DomainError(status.HTTP_400_BAD_REQUEST, "分组不存在")
+        raise DomainError(BAD_REQUEST, "分组不存在")
     if scope is not None and (group_id is None or group_id not in scope):
-        raise DomainError(status.HTTP_403_FORBIDDEN, "无权导入到该分组")
+        raise DomainError(FORBIDDEN, "无权导入到该分组")
     if bank_id:
         bank = db.get(QuestionBank, bank_id)
         if not bank:
-            raise DomainError(status.HTTP_400_BAD_REQUEST, "题库不存在")
+            raise DomainError(BAD_REQUEST, "题库不存在")
         if scope is not None and (bank.group_id is None or bank.group_id not in scope):
-            raise DomainError(status.HTTP_403_FORBIDDEN, "无权导入到该题库")
+            raise DomainError(FORBIDDEN, "无权导入到该题库")
         if group_id is not None and bank.group_id is not None and group_id != bank.group_id:
-            raise DomainError(status.HTTP_400_BAD_REQUEST, "导入分组必须与题库分组一致")
+            raise DomainError(BAD_REQUEST, "导入分组必须与题库分组一致")
 
 
 def _ensure_unique_tags(db: Session, tags: list[str]) -> None:

@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-from fastapi import status
 from sqlalchemy import func, select
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Session
 
 from app.core.errors import DomainError
+from app.core.status import BAD_REQUEST, FORBIDDEN, NOT_FOUND
 from app.core.timeutil import utcnow_iso as _now
 from app.models.question import Question
 from app.models.record import PracticeRecord, QuestionState
@@ -41,7 +41,7 @@ def _assert_bank_practice_enabled(db: Session, bank_id: int) -> None:
 
     bank = db.get(QuestionBank, bank_id)
     if not bank or not bank.practice_enabled:
-        raise DomainError(status.HTTP_403_FORBIDDEN, "该题库未开放练习")
+        raise DomainError(FORBIDDEN, "该题库未开放练习")
 
 
 def _get_practice_question(db: Session, question_id: int) -> Question:
@@ -54,9 +54,9 @@ def _get_practice_question(db: Session, question_id: int) -> Question:
     """
     q = db.get(Question, question_id)
     if not q:
-        raise DomainError(status.HTTP_404_NOT_FOUND, "题目不存在")
+        raise DomainError(NOT_FOUND, "题目不存在")
     if q.bank_id is None:
-        raise DomainError(status.HTTP_403_FORBIDDEN, "该题库未开放练习")
+        raise DomainError(FORBIDDEN, "该题库未开放练习")
     _assert_bank_practice_enabled(db, q.bank_id)
     return q
 
@@ -138,7 +138,7 @@ def start_practice(
     为空时限定在全部「开放练习」的题库内（排除 practice_enabled=False 的题库）。
     """
     if mode not in PRACTICE_MODES:
-        raise DomainError(status.HTTP_400_BAD_REQUEST, f"模式必须是 {PRACTICE_MODES} 之一")
+        raise DomainError(BAD_REQUEST, f"模式必须是 {PRACTICE_MODES} 之一")
     # 限制返回数量上限，避免无界加载
     if limit is None or limit > PRACTICE_LIMIT_MAX:
         limit = PRACTICE_LIMIT_MAX
@@ -181,7 +181,7 @@ def start_practice(
         rows = list(db.execute(stmt).scalars().all())
     elif mode == "type":
         if not type_:
-            raise DomainError(status.HTTP_400_BAD_REQUEST, "按题型练习需指定题型")
+            raise DomainError(BAD_REQUEST, "按题型练习需指定题型")
         stmt = select(Question).where(Question.type == type_, Question.bank_id.in_(scope_bank_ids))
         rows = list(db.execute(stmt.order_by(Question.id).limit(limit)).scalars().all())
     elif mode == "random":
@@ -356,7 +356,7 @@ def short_eval(db: Session, user_id: int, question_id: int, mastered: bool) -> N
     """简答自评：掌握→correct 且移出错题本；需复习→wrong。"""
     q = _get_practice_question(db, question_id)
     if q.type != "简答题":
-        raise DomainError(status.HTTP_400_BAD_REQUEST, "只有简答题可以自评")
+        raise DomainError(BAD_REQUEST, "只有简答题可以自评")
     now = _now()
     # 更新最近的练习记录自评
     rec = db.execute(
@@ -366,9 +366,9 @@ def short_eval(db: Session, user_id: int, question_id: int, mastered: bool) -> N
         .limit(1)
     ).scalar_one_or_none()
     if not rec:
-        raise DomainError(status.HTTP_400_BAD_REQUEST, "请先提交简答答案")
+        raise DomainError(BAD_REQUEST, "请先提交简答答案")
     if rec.self_eval is not None:
-        raise DomainError(status.HTTP_400_BAD_REQUEST, "该简答题已经自评")
+        raise DomainError(BAD_REQUEST, "该简答题已经自评")
     rec.self_eval = mastered
     rec.is_correct = mastered
     db.execute(

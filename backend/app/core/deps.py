@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session
 from app.core.security import decode_access_token
 from app.database import get_db
 from app.models.group import Group, UserGroup
-from app.models.user import User
+from app.models.user import ROLE_DEPT_ADMIN, ROLE_SUPER_ADMIN, STATUS_ACTIVE, User
 
 oauth2 = OAuth2PasswordBearer(tokenUrl="/api/auth/login", auto_error=False)
 
@@ -32,7 +32,7 @@ def get_current_user(
     except (TypeError, ValueError):
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "凭证无效或已过期") from None
     user = db.get(User, subject)
-    if not user or user.status != "active":
+    if not user or user.status != STATUS_ACTIVE:
         raise HTTPException(status.HTTP_403_FORBIDDEN, "用户不可用")
     if token_version != user.token_version:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "凭证已失效，请重新登录")
@@ -49,8 +49,8 @@ def require_role(*roles: str):
     return _dep
 
 
-require_admin = require_role("dept_admin", "super_admin")
-require_super = require_role("super_admin")
+require_admin = require_role(ROLE_DEPT_ADMIN, ROLE_SUPER_ADMIN)
+require_super = require_role(ROLE_SUPER_ADMIN)
 
 
 def subtree_ids(db: Session, group_id: int) -> set[int]:
@@ -111,9 +111,9 @@ def dept_scope_ids(db: Session, user: User) -> set[int] | None:
     （后者对子树中每个节点各发一条 SELECT，在 42 个管理端调用点、大部门下会放大成
     每请求上百次查询）。
     """
-    if user.role == "super_admin":
+    if user.role == ROLE_SUPER_ADMIN:
         return None
-    if user.role == "dept_admin" and user.dept_group_id:
+    if user.role == ROLE_DEPT_ADMIN and user.dept_group_id:
         return subtree_map(db).get(user.dept_group_id, {user.dept_group_id})
     return set()
 

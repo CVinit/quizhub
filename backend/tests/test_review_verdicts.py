@@ -163,7 +163,8 @@ def test_review_pass_adds_full_question_score():
         db.expire_all()
         after = db.get(ExamResult, result.id)
         assert after.score == 5.0
-        assert after.objective_score == 5.0  # 派生列必须与 score 同步
+        # objective_score 是「客观题得分」：简答复核得分不计入该列（见 exam/scoring.py）
+        assert after.objective_score == 0
 
 
 def test_review_partial_adds_given_score():
@@ -176,7 +177,7 @@ def test_review_partial_adds_given_score():
         db.expire_all()
         after = db.get(ExamResult, result.id)
         assert after.score == 3.0
-        assert after.objective_score == 3.0
+        assert after.objective_score == 0
 
 
 def test_review_score_capped_at_total_score():

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from fastapi import status
 from sqlalchemy import delete, select, update
 from sqlalchemy.orm import Session
 
@@ -11,6 +10,7 @@ from app.core.deps import subtree_ids
 # subtree_ids 统一由 core.deps 提供，避免「授权数据范围」与「成环检测」各持一份实现而漂移：
 # 两份副本一旦不一致，可能导致越权可见或环检测失效。
 from app.core.errors import DomainError
+from app.core.status import BAD_REQUEST, NOT_FOUND
 from app.models.exam import ExamDefinition, PaperTemplate
 from app.models.group import GROUP_TYPE, Group, UserGroup
 from app.models.user import User
@@ -67,11 +67,11 @@ def build_tree(db: Session, scope: set[int] | None = None) -> list[dict]:
 
 def create_group(db: Session, payload: GroupCreate) -> Group:
     if payload.type not in GROUP_TYPES:
-        raise DomainError(status.HTTP_400_BAD_REQUEST, f"分组类型必须是 {GROUP_TYPES} 之一")
+        raise DomainError(BAD_REQUEST, f"分组类型必须是 {GROUP_TYPES} 之一")
     if payload.parent_id is not None:
         parent = db.get(Group, payload.parent_id)
         if not parent:
-            raise DomainError(status.HTTP_400_BAD_REQUEST, "父分组不存在")
+            raise DomainError(BAD_REQUEST, "父分组不存在")
         # 新建分组无后代，不可能成环
     g = Group(name=payload.name, type=payload.type, parent_id=payload.parent_id, sort=payload.sort)
     db.add(g)
@@ -83,17 +83,17 @@ def create_group(db: Session, payload: GroupCreate) -> Group:
 def update_group(db: Session, group_id: int, payload: GroupUpdate) -> Group:
     g = db.get(Group, group_id)
     if not g:
-        raise DomainError(status.HTTP_404_NOT_FOUND, "分组不存在")
+        raise DomainError(NOT_FOUND, "分组不存在")
     data = payload.model_dump(exclude_unset=True)
     if "type" in data and data["type"] not in GROUP_TYPES:
-        raise DomainError(status.HTTP_400_BAD_REQUEST, f"分组类型必须是 {GROUP_TYPES} 之一")
+        raise DomainError(BAD_REQUEST, f"分组类型必须是 {GROUP_TYPES} 之一")
     if "parent_id" in data and data["parent_id"] is not None:
         if data["parent_id"] == group_id:
-            raise DomainError(status.HTTP_400_BAD_REQUEST, "父分组不能是自身")
+            raise DomainError(BAD_REQUEST, "父分组不能是自身")
         if not db.get(Group, data["parent_id"]):
-            raise DomainError(status.HTTP_400_BAD_REQUEST, "父分组不存在")
+            raise DomainError(BAD_REQUEST, "父分组不存在")
         if _would_cycle(db, data["parent_id"], group_id):
-            raise DomainError(status.HTTP_400_BAD_REQUEST, "分组层级存在环")
+            raise DomainError(BAD_REQUEST, "分组层级存在环")
     for k, v in data.items():
         setattr(g, k, v)
     db.commit()
@@ -104,15 +104,15 @@ def update_group(db: Session, group_id: int, payload: GroupUpdate) -> Group:
 def delete_group(db: Session, group_id: int) -> None:
     g = db.get(Group, group_id)
     if not g:
-        raise DomainError(status.HTTP_404_NOT_FOUND, "分组不存在")
+        raise DomainError(NOT_FOUND, "分组不存在")
     # 子孙存在则禁止删除
     if _has_children(db, group_id):
-        raise DomainError(status.HTTP_400_BAD_REQUEST, "存在子分组，请先删除子分组")
+        raise DomainError(BAD_REQUEST, "存在子分组，请先删除子分组")
     # 题库/题目归属该分组则禁止删除，避免外键约束失败与数据孤儿
     if _has_question_banks(db, group_id):
-        raise DomainError(status.HTTP_400_BAD_REQUEST, "该分组下存在题库，请先迁移或解除题库归属")
+        raise DomainError(BAD_REQUEST, "该分组下存在题库，请先迁移或解除题库归属")
     if _has_questions(db, group_id):
-        raise DomainError(status.HTTP_400_BAD_REQUEST, "该分组下存在题目，请先迁移或解除题目归属")
+        raise DomainError(BAD_REQUEST, "该分组下存在题目，请先迁移或解除题目归属")
     # 解除用户关联
     db.execute(delete(UserGroup).where(UserGroup.group_id == group_id))
     # 部门管理员的归属部门引用该分组时必须置空。模型声明为 ON DELETE SET NULL，但

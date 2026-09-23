@@ -9,16 +9,17 @@ import logging
 from datetime import datetime, timedelta, timezone
 from typing import cast
 
-from fastapi import BackgroundTasks, status
 from sqlalchemy import case, select, update
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.orm import Session
 
+from app.core.background import BackgroundTaskQueue
 from app.core.email import normalize_email
 from app.core.errors import DomainError
 from app.core.request_context import get_request_ip
 from app.core.security import create_access_token, gen_verify_code, hash_password, verify_password
-from app.models.user import EmailVerification, User
+from app.core.status import BAD_REQUEST, FORBIDDEN, SERVICE_UNAVAILABLE, UNAUTHORIZED
+from app.models.user import ROLE_USER, STATUS_ACTIVE, STATUS_DISABLED, STATUS_PENDING, EmailVerification, User
 from app.services import mail_service
 from app.services.system_service import get_settings
 
@@ -40,7 +41,7 @@ def _allowed_suffixes(db: Session) -> list[str]:
 
 def _ensure_registration_open(db: Session) -> None:
     if get_settings(db, "register").get("register_open", "true").lower() != "true":
-        raise DomainError(status.HTTP_403_FORBIDDEN, "当前未开放注册")
+        raise DomainError(FORBIDDEN, "当前未开放注册")
 
 
 def allowed_register_group_ids(db: Session) -> set[int]:
@@ -69,12 +70,12 @@ def check_email_suffix(db: Session, email: str) -> None:
     low = normalize_email(email)
     if not any(low.endswith(suf) for suf in suffixes):
         raise DomainError(
-            status.HTTP_400_BAD_REQUEST,
+            BAD_REQUEST,
             "该邮箱后缀不允许注册，请使用企业/机构邮箱",
         )
 
 
-def send_code(db: Session, email: str, bg: BackgroundTasks) -> None:
+def send_code(db: Session, email: str, bg: BackgroundTaskQueue) -> None:
     """发送注册验证码：校验后缀与是否已注册后，生成验证码并入队邮件。
 
     防探测：邮箱已注册时**不抛错、不发信**，与未注册走完全相同的成功响应，
@@ -97,7 +98,7 @@ def send_code(db: Session, email: str, bg: BackgroundTasks) -> None:
         mail_service.ensure_configured(settings)
     except mail_service.MailError as exc:
         raise DomainError(
-            status.HTTP_503_SERVICE_UNAVAILABLE,
+            SERVICE_UNAVAILABLE,
             "邮件服务尚未配置，暂时无法发送验证码，请联系管理员",
         ) from exc
     existing = db.execute(select(User).where(User.email == email)).scalar_one_or_none()
@@ -124,7 +125,7 @@ def register(
     password: str,
     name: str,
     code: str,
-    bg: BackgroundTasks,
+    bg: BackgroundTaskQueue,
     group_ids: list[int] | None = None,
 ) -> User:
     """凭邮箱验证码完成注册（自验证：注册即 email_verified=True）。
@@ -140,29 +141,29 @@ def register(
     group_required = settings.get("register_group_required", "false").lower() == "true"
     gids = list(dict.fromkeys(group_ids or []))
     if group_required and not gids:
-        raise DomainError(status.HTTP_400_BAD_REQUEST, "请至少选择一个分组")
+        raise DomainError(BAD_REQUEST, "请至少选择一个分组")
     # 校验分组 id 合法存在，防止伪造
     if gids:
         from app.models.group import Group
 
         allowed = allowed_register_group_ids(db)
         if not set(gids).issubset(allowed):
-            raise DomainError(status.HTTP_403_FORBIDDEN, "所选分组不允许公开注册加入")
+            raise DomainError(FORBIDDEN, "所选分组不允许公开注册加入")
         valid = {r[0] for r in db.execute(select(Group.id).where(Group.id.in_(gids))).all()}
         if set(gids) != valid:
-            raise DomainError(status.HTTP_400_BAD_REQUEST, "所选分组无效，请重新选择")
+            raise DomainError(BAD_REQUEST, "所选分组无效，请重新选择")
     # 表单校验通过后再消费验证码
     if not _consume_code(db, email, code):
-        raise DomainError(status.HTTP_400_BAD_REQUEST, "验证码错误或已过期")
+        raise DomainError(BAD_REQUEST, "验证码错误或已过期")
     existing = db.execute(select(User).where(User.email == email)).scalar_one_or_none()
     if existing:
-        raise DomainError(status.HTTP_400_BAD_REQUEST, "该邮箱已注册")
+        raise DomainError(BAD_REQUEST, "该邮箱已注册")
     user = User(
         email=email,
         password_hash=hash_password(password),
         name=name or email.split("@")[0],
-        role="user",
-        status="pending" if need_approve else "active",
+        role=ROLE_USER,
+        status=STATUS_PENDING if need_approve else STATUS_ACTIVE,
         email_verified=True,
     )
     db.add(user)
@@ -238,12 +239,12 @@ def verify_email(db: Session, email: str, code: str) -> None:
     email = normalize_email(email)
     ev = _latest_unused(db, email)
     if not ev:
-        raise DomainError(status.HTTP_400_BAD_REQUEST, "验证码不存在或已使用")
+        raise DomainError(BAD_REQUEST, "验证码不存在或已使用")
     if datetime.fromisoformat(ev.expire_at) < datetime.now(timezone.utc):
-        raise DomainError(status.HTTP_400_BAD_REQUEST, "验证码已过期")
+        raise DomainError(BAD_REQUEST, "验证码已过期")
     if ev.code != code:
         _record_code_failure(db, ev.id)
-        raise DomainError(status.HTTP_400_BAD_REQUEST, "验证码错误")
+        raise DomainError(BAD_REQUEST, "验证码错误")
     # 原子消费：与 _consume_code 同口径。原实现是 ORM 读-判-写（`ev.used = True`），
     # 并发携带同一验证码的两个请求都可能通过校验，使一次性验证码可被重放。
     consumed = cast(
@@ -260,20 +261,20 @@ def verify_email(db: Session, email: str, code: str) -> None:
         ),
     )
     if consumed.rowcount != 1:
-        raise DomainError(status.HTTP_400_BAD_REQUEST, "验证码不存在或已使用")
+        raise DomainError(BAD_REQUEST, "验证码不存在或已使用")
     user = db.execute(select(User).where(User.email == email)).scalar_one_or_none()
     if not user:
-        raise DomainError(status.HTTP_400_BAD_REQUEST, "验证码无效")
+        raise DomainError(BAD_REQUEST, "验证码无效")
     user.email_verified = True
     if (
-        user.status == "pending"
+        user.status == STATUS_PENDING
         and get_settings(db, "register").get("new_user_need_approve", "false").lower() != "true"
     ):
-        user.status = "active"
+        user.status = STATUS_ACTIVE
     db.commit()
 
 
-def resend(db: Session, email: str, bg: BackgroundTasks) -> None:
+def resend(db: Session, email: str, bg: BackgroundTaskQueue) -> None:
     """旧版：给已注册但未验证用户重发验证码（兼容旧 verify 页面）。
 
     与 `send_code` 同口径：SMTP 未配置时 fail-closed 抛 503，避免静默丢信。
@@ -284,7 +285,7 @@ def resend(db: Session, email: str, bg: BackgroundTasks) -> None:
         mail_service.ensure_configured(settings)
     except mail_service.MailError as exc:
         raise DomainError(
-            status.HTTP_503_SERVICE_UNAVAILABLE,
+            SERVICE_UNAVAILABLE,
             "邮件服务尚未配置，暂时无法发送验证码，请联系管理员",
         ) from exc
     user = db.execute(select(User).where(User.email == email)).scalar_one_or_none()
@@ -322,19 +323,19 @@ def login(db: Session, email: str, password: str) -> dict:
         # （与 send_code 的静默防枚举一致）。该 hash 不对应任何真实账号。
         verify_password(password, _DUMMY_PASSWORD_HASH)
         logger.warning("[auth] 登录失败：账号不存在 ip=%s", get_request_ip())
-        raise DomainError(status.HTTP_401_UNAUTHORIZED, "邮箱或密码错误")
+        raise DomainError(UNAUTHORIZED, "邮箱或密码错误")
     if not verify_password(password, user.password_hash):
         logger.warning("[auth] 登录失败：密码错误 user_id=%s ip=%s", user.id, get_request_ip())
-        raise DomainError(status.HTTP_401_UNAUTHORIZED, "邮箱或密码错误")
+        raise DomainError(UNAUTHORIZED, "邮箱或密码错误")
     if not user.email_verified:
         logger.warning("[auth] 登录失败：邮箱未验证 user_id=%s", user.id)
-        raise DomainError(status.HTTP_403_FORBIDDEN, "请先完成邮箱验证")
-    if user.status == "disabled":
+        raise DomainError(FORBIDDEN, "请先完成邮箱验证")
+    if user.status == STATUS_DISABLED:
         logger.warning("[auth] 登录失败：账号已禁用 user_id=%s ip=%s", user.id, get_request_ip())
-        raise DomainError(status.HTTP_403_FORBIDDEN, "账号已被禁用")
-    if user.status == "pending":
+        raise DomainError(FORBIDDEN, "账号已被禁用")
+    if user.status == STATUS_PENDING:
         logger.warning("[auth] 登录失败：账号待审批 user_id=%s", user.id)
-        raise DomainError(status.HTTP_403_FORBIDDEN, "账号待管理员审批")
+        raise DomainError(FORBIDDEN, "账号待管理员审批")
     token = create_access_token(user.id, {"role": user.role, "ver": user.token_version})
     return {"access_token": token, "token_type": "bearer", "user": user}
 
@@ -342,7 +343,7 @@ def login(db: Session, email: str, password: str) -> dict:
 def change_password(db: Session, user: User, old: str, new: str) -> None:
     if not verify_password(old, user.password_hash):
         logger.warning("[auth] 修改密码失败：原密码错误 user_id=%s", user.id)
-        raise DomainError(status.HTTP_400_BAD_REQUEST, "原密码错误")
+        raise DomainError(BAD_REQUEST, "原密码错误")
     user.password_hash = hash_password(new)
     user.token_version += 1
     db.commit()

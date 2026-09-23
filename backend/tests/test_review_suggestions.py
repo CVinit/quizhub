@@ -23,7 +23,7 @@ from sqlalchemy import select
 from app.api.audit import _iso_bound
 from app.core.deps import user_ids_subquery
 from app.core.errors import DomainError
-from app.core.timeutil import utcnow_iso
+from app.core.timeutil import business_tz, utcnow_iso
 from app.database import db_session, init_db
 from app.models.exam import ExamDefinition
 from app.models.group import Group, UserGroup
@@ -208,14 +208,23 @@ def test_login_password_length_is_bounded():
 
 # ---------- S5：审计时间上界 ----------
 def test_iso_bound_normalizes_date_and_offsets():
+    """不带偏移 = 业务本地时间；带偏移 = 绝对时刻（判据是「是否带偏移」而非「是否为 00:00」）。"""
     assert _iso_bound(None) is None
-    assert _iso_bound(datetime(2026, 2, 13)).startswith("2026-02-13T00:00:00")
-    # 纯日期作为上界补到当天末尾，否则当天记录会被整体排除
-    upper = _iso_bound(datetime(2026, 2, 13), end_of_day=True)
-    assert upper.startswith("2026-02-13T23:59:59.999999")
-    # 带偏移的时间换算为 UTC
+
+    # 纯日期：按业务时区解释（Asia/Shanghai 下 UTC 前一天 16:00）
+    local_midnight = datetime(2026, 2, 13, tzinfo=business_tz()).astimezone(timezone.utc)
+    assert _iso_bound(datetime(2026, 2, 13)) == local_midnight.isoformat()
+
+    # 作为上界补到「业务当天」末尾
+    local_end = (datetime(2026, 2, 13, 23, 59, 59, 999999, tzinfo=business_tz())).astimezone(timezone.utc)
+    assert _iso_bound(datetime(2026, 2, 13), end_of_day=True) == local_end.isoformat()
+
+    # 带偏移的时间换算为 UTC（不补末尾）
     aware = _iso_bound(datetime(2026, 2, 13, 8, 0, tzinfo=timezone.utc))
     assert aware.startswith("2026-02-13T08:00:00")
+
+    # 显式 UTC 零点也是绝对时刻：end_of_day 不得把它扩成当天末尾
+    assert _iso_bound(datetime(2026, 2, 13, tzinfo=timezone.utc), end_of_day=True).startswith("2026-02-13T00:00:00")
 
 
 # ---------- S6：错题/标记先过滤题库再 LIMIT ----------

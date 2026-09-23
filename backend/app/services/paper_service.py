@@ -20,11 +20,11 @@ from __future__ import annotations
 
 import random
 
-from fastapi import status
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.core.errors import DomainError
+from app.core.status import BAD_REQUEST
 from app.models.question import DEFAULT_QUESTION_SCORE, Question
 from app.services.question_service import QUESTION_TYPES
 
@@ -105,27 +105,27 @@ def allocate_quota(
     而不是静默改写用户输入，避免系统悄悄改掉用户填的数字。
     """
     if allocation not in ALLOCATION_MODES:
-        raise DomainError(status.HTTP_400_BAD_REQUEST, f"题型分配策略必须是 {ALLOCATION_MODES} 之一")
+        raise DomainError(BAD_REQUEST, f"题型分配策略必须是 {ALLOCATION_MODES} 之一")
     avail = avail or {}
     unknown = [t for t in avail if t not in QUESTION_TYPES]
     if unknown:
-        raise DomainError(status.HTTP_400_BAD_REQUEST, f"未知题型：{'、'.join(unknown)}")
+        raise DomainError(BAD_REQUEST, f"未知题型：{'、'.join(unknown)}")
 
     if manual_quota:
         unknown_manual = [t for t in manual_quota if t not in QUESTION_TYPES]
         if unknown_manual:
-            raise DomainError(status.HTTP_400_BAD_REQUEST, f"未知题型：{'、'.join(unknown_manual)}")
+            raise DomainError(BAD_REQUEST, f"未知题型：{'、'.join(unknown_manual)}")
         bad = [t for t, n in manual_quota.items() if not isinstance(n, int) or isinstance(n, bool) or n < 0]
         if bad:
-            raise DomainError(status.HTTP_400_BAD_REQUEST, "题型数量必须是非负整数")
+            raise DomainError(BAD_REQUEST, "题型数量必须是非负整数")
         quota = {t: int(n) for t, n in manual_quota.items() if int(n) > 0}
         over = [f"{t}（可用 {avail.get(t, 0)} 题）" for t, n in quota.items() if n > avail.get(t, 0)]
         if over:
-            raise DomainError(status.HTTP_400_BAD_REQUEST, f"题型数量超出可用题量：{'、'.join(over)}")
+            raise DomainError(BAD_REQUEST, f"题型数量超出可用题量：{'、'.join(over)}")
         quota_sum = sum(quota.values())
         if quota_sum != size:
             raise DomainError(
-                status.HTTP_400_BAD_REQUEST,
+                BAD_REQUEST,
                 f"各题型数量合计 {quota_sum} 题，与设定题量 {size} 题不一致",
             )
         return quota
@@ -133,7 +133,7 @@ def allocate_quota(
     # 自动分配：按可用题量加权（等量策略下各题型权重相同）
     usable = {t: max(0, int(avail.get(t, 0))) for t in QUESTION_TYPES if int(avail.get(t, 0)) > 0}
     if not usable:
-        raise DomainError(status.HTTP_400_BAD_REQUEST, "所选范围内没有可用题目")
+        raise DomainError(BAD_REQUEST, "所选范围内没有可用题目")
     weights = {t: 1.0 for t in usable} if allocation == "even" else {t: float(n) for t, n in usable.items()}
     quota = largest_remainder(weights, size)
     # largest_remainder 可能给某种题型分配超过其可用量的数量（权重小但余数补偿），
@@ -181,33 +181,33 @@ def generate_paper(db: Session, config: dict, scope: set[int] | None = None) -> 
     allow_dup = config.get("allow_duplicate", False)
     max_q = config.get("max_questions", 100)
     if not isinstance(max_q, int) or isinstance(max_q, bool) or not 1 <= max_q <= 1000:
-        raise DomainError(status.HTTP_400_BAD_REQUEST, "max_questions 必须在 1~1000 之间")
+        raise DomainError(BAD_REQUEST, "max_questions 必须在 1~1000 之间")
     if allow_dup:
-        raise DomainError(status.HTTP_400_BAD_REQUEST, "当前试卷模型不支持重复题目")
+        raise DomainError(BAD_REQUEST, "当前试卷模型不支持重复题目")
     if not isinstance(type_quota, dict) or any(
         not isinstance(quota, int) or isinstance(quota, bool) or quota < 0 or quota > 1000
         for quota in type_quota.values()
     ):
-        raise DomainError(status.HTTP_400_BAD_REQUEST, "题型数量配置无效")
+        raise DomainError(BAD_REQUEST, "题型数量配置无效")
     if not isinstance(difficulty_dist, dict):
-        raise DomainError(status.HTTP_400_BAD_REQUEST, "难度配比配置无效")
+        raise DomainError(BAD_REQUEST, "难度配比配置无效")
     try:
         ratios = [float(ratio) for ratio in difficulty_dist.values()]
         difficulty_keys = {int(key) for key in difficulty_dist}
     except (TypeError, ValueError):
-        raise DomainError(status.HTTP_400_BAD_REQUEST, "难度配比配置无效") from None
+        raise DomainError(BAD_REQUEST, "难度配比配置无效") from None
     if (
         any(ratio < 0 or ratio > 1 for ratio in ratios)
         or sum(ratios) > 1.000001
         or not difficulty_keys.issubset({1, 2, 3})
     ):
-        raise DomainError(status.HTTP_400_BAD_REQUEST, "难度配比必须是 1~3 的非负比例，合计不能超过 1")
+        raise DomainError(BAD_REQUEST, "难度配比必须是 1~3 的非负比例，合计不能超过 1")
     bank_ids = config.get("bank_ids") or []
     group_ids = config.get("group_ids") or []
     tags = config.get("tags") or []
     order_mode = config.get("order_mode") or DEFAULT_ORDER_MODE
     if order_mode not in ORDER_MODES:
-        raise DomainError(status.HTTP_400_BAD_REQUEST, f"出题顺序必须是 {ORDER_MODES} 之一")
+        raise DomainError(BAD_REQUEST, f"出题顺序必须是 {ORDER_MODES} 之一")
 
     rng = random.Random(seed)
 
@@ -226,7 +226,7 @@ def generate_paper(db: Session, config: dict, scope: set[int] | None = None) -> 
     # 静默截断会让「抽到的题」与实际池子不一致且难以察觉）。
     if len(candidates) > _CANDIDATE_MAX:
         raise DomainError(
-            status.HTTP_400_BAD_REQUEST,
+            BAD_REQUEST,
             f"可用题目超过 {_CANDIDATE_MAX} 道，请缩小题库/分组/标签范围后重试",
         )
     # 标签匹配只在 Python 端做：SQLite 的 JSON 列没有真正的集合包含语义，
