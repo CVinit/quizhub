@@ -716,3 +716,63 @@ cd backend
 验证结论：连跑 3 轮全部成功且幂等；`stats_user_daily` 考试类列移除、索引按模型重建；
 `max_questions_per_exam` 遗留行清理；`PRAGMA integrity_check` = ok、`foreign_key_check` 为空、
 用户/题目/考试行数不变。
+
+---
+
+## 后端全面评审第二轮（/backend-code-review，2026-09-24 续）
+
+> 范围：`backend/app` 全部模块 + `backend/scripts` + `.env.example` + 前端改密衔接
+> 方式：逐条读码 + 隔离临时库实跑复现（3 项 Critical 均先复现、再修复、再回归）
+> 验证：`ruff check` / `ruff format --check` / `mypy app` 全绿，`pytest -q` **695 passed**（基线 642，覆盖率 94%）
+> 完整报告：[docs/backend_review_2026-09-24_round2.md](backend_review_2026-09-24_round2.md)
+
+### 一、Critical（3 项）
+
+| # | 问题 | 复现结论 | 修复 |
+| --- | --- | --- | --- |
+| C1 | 组卷配置（`rules`/`config`）只校验体积、不校验结构，而展示路径对 `type_quota` 的值直接 `int()` | `POST /admin/exams` 传 `rules={"type_quota":{"单选题":"abc"}}` → **201 落库**；此后 `GET /admin/exams` 与 `GET /exams/available` **双双 500**（已发布考试改 rules + `confirm_reset=true` 时，该指派分组下所有考生都打不开考试列表），且列表本身打不开 → 无法从界面修复 | 抽出 `paper_service.validate_config`（不查库）并在 `create_exam`/`update_exam` 入口调用；`exam/common` 的题数展示改防御式取值（`_quota_total` / `_list_len`），历史脏数据也能照常列表 |
+| C2 | 手工建题/改题绕过「答案形状」不变式（Excel 路径有、手工路径没有） | 6 例全部 ACCEPTED：填空答案空位数与题干不一致、单选 `options=[]`/`None`、拖拽映射与左右项分叉、多选 `"AA"`、以及**只改 options/题干时不重校答案**（答案越界仍落库） | 空位数口径收敛到 `utils/question_text.count_blanks`（两条路径共用）；`_validate_answer_shape` 增加题干/左右项参数；`update_question` 改为「题型/选项/题干/答案/左右项任一变化就按生效组合重校」 |
+| C3 | `.env.example` 给出的 Fernet 密钥生成命令 `secrets.token_urlsafe(32)` 产出 43 字符无 padding，`Fernet()` 直接拒绝 | 按该命令部署后 `PUT /system/settings`（SMTP 密码）→ **400 `Fernet key must be 32 url-safe base64-encoded bytes.`**；加密设置读取静默降级为空串 → SMTP 密码永远存不进去 | 文档改为 `base64.urlsafe_b64encode(secrets.token_bytes(32))`（与 `docs/deployment.md`/`start.sh` 对齐）；`config._check_enc_key` 启动期校验并给出可复制命令；`_fernet()` 抛中文 `RuntimeError` → 路由 503 可操作提示 |
+
+### 二、Suggestions（6 项）
+
+| # | 问题 | 修复 |
+| --- | --- | --- |
+| S1 | 非 multipart 请求体无全局上限：字段级上限都在 body 完整解析之后才生效，未登录的 `/api/auth/login` 即可打内存 | 新增 `core/body_limit.py`（ASGI 中间件）：`Content-Length` 预检 + 边收边计数，超 1MB 返回 413；multipart 不受影响（其上限由 `upload_max_size_mb` + `read_limited` 决定）；注册在 CORS 内层，413 同样带跨域头 |
+| S2 | 改密会把**当前会话**也踢下线（注释却写「其它会话」），前端拿到旧 token 继续用 → 「修改成功」后第一个请求 401 | 后端返回新签发 token（`ChangePasswordOut`），前端 `auth.setToken()` 就地替换；日志文案改为「此前签发的全部会话已失效并已重新签发凭据」 |
+| S3 | 审计 `user.update` 的 detail 落姓名明文（PII），与 `user.create`/`user.delete` 的口径不一致 | detail 只记字段名（`{"name": "<changed>"}`），仍能看出改了哪个字段 |
+| S4 | 交卷崩溃残留（`scoring` 且无成绩）时二次交卷报 400「考试已结束」，考生最长卡 30 分钟 | 该分支先按同一超时守卫回收并重跑结算（幂等）；仍在结算窗口内返回 409「试卷正在结算中，请稍后重试」 |
+| S5 | 建号时任意 `IntegrityError` 都归因为「该邮箱已存在」；`dept_group_id` 未做存在性校验 | 新增 `core.errors.is_unique_violation` 区分唯一约束/外键并给出对应文案；`create_user` 补分组存在性校验（与 `update_user` 同口径） |
+| S6 | 4 处零覆盖：难度配比分枝、SMTP 主机 SSRF 拒绝分支、`GET /system/settings` 掩码逻辑、`ensure_defaults` | 新增 `tests/test_review_2026_09_24_coverage.py`（16 例）：难度配比/余数补给/全池回补、`127.0.0.1`/`localhost`/`169.254.169.254`/`0.0.0.0` 拒绝而私网中继放行、掩码不回传明文且不覆盖真实密文、默认设置幂等 |
+
+### 三、Nits（5 项）
+
+| # | 问题 | 修复 |
+| --- | --- | --- |
+| N1 | 两行超过 120 字符（模板下载的 `Content-Disposition`） | 文件名抽成模块常量，xlsx 媒体类型收敛到 `utils.excel.XLSX_MEDIA_TYPE` |
+| N2 | `_recover_stuck_scoring(user_id=None)` 无生产调用方（docstring 声称有启动维护路径） | 在 `lifespan` 启动维护中调用一次并记 WARNING |
+| N3 | `publish_exam` 的 `first_publish = status != "published"` → 归档后重新发布会对全员重复群发通知 | 判据改为 `status == "draft"`（只有 draft→published 才通知） |
+| N4 | `GET /admin/users`、`GET /admin/question-banks` 返回无约束手拼 dict | 新增 `UserListOut`/`UserListItemOut`/`QuestionBankItemOut` 并挂 `response_model` |
+| N5 | `/files/*.svg` 的提前 404 未带安全响应头 | 抽出 `_apply_security_headers()`，两个返回点共用 |
+
+### 四、本轮验证
+
+```bash
+cd backend
+.venv/bin/python -m ruff check app scripts tests           # All checks passed!
+.venv/bin/python -m ruff format --check app scripts tests  # 138 files already formatted
+.venv/bin/python -m mypy app                               # Success: no issues found in 76 source files
+.venv/bin/python -m pytest -q --cov=app                    # 695 passed，覆盖率 94%（基线 642 / 93%）
+
+cd ../frontend
+npm run format:check && npm run lint && npm run typecheck && npm run test   # 71 passed
+```
+
+关键结论的实跑复现（隔离临时库，脚本未入库）：
+
+1. `create_exam(rules={"type_quota": {"单选题": "abc"}})` → 400「题型数量配置无效」（修复前 201 落库）；
+2. 库中已存在畸形 rules 时 `list_exams` / `list_available` 均正常返回（修复前 `ValueError: invalid literal for int()` → 500）；
+3. 手工建题 4 类畸形形状 → 400（修复前全部 ACCEPTED），且「只改选项」也会按新选项集重校答案；
+4. 按 `.env.example` 新命令生成密钥 → `Fernet()` 接受；旧命令产物仍被拒（文档已标注不可用）；
+5. 2MB JSON → 413 且带 `access-control-allow-origin`（修复前会被完整读入内存）；multipart 1.2MB 上传不被该阈值拦截；
+6. 改密后旧 token → 401、响应中的新 token → 200（修复前新 token 不存在，用户被迫重新登录）。
