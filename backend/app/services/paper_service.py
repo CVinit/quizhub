@@ -162,33 +162,39 @@ def _clamp_and_redistribute(quota: dict[str, int], avail: dict[str, int], size: 
     return {t: n for t, n in quota.items() if n > 0}
 
 
-def generate_paper(db: Session, config: dict, scope: set[int] | None = None) -> dict:
-    """按规则生成试卷，返回 {question_ids:[...], scores:{qid:score}, total_score}。
+def validate_config(config: object) -> None:
+    """校验组卷配置的结构（不查库、不抽题）。
+
+    与 `generate_paper` 共用同一实现，但必须在**创建/更新考试与模板**时就调用：
+    `ExamCreateIn.rules` / `ExamUpdateIn.rules` 是裸 dict（只限体积），若不在入口校验，
+    畸形 rules 会落库，而展示路径（`exam/common._exam_question_count`）对 `type_quota`
+    的值直接 `int()` —— 一条坏数据就会让「管理端考试列表」与「用户端可用考试」整体
+    500（已实跑复现），且管理员无法从界面修复（列表本身打不开）。
 
     Args:
-        db: 数据库会话。
-        config: 组卷规则（题型配额、难度配比、来源筛选、顺序模式、随机种子等）。
-        scope: 调用者可访问的分组 id 集合；None 表示不限制（超级管理员）。
-            非 None 时作为硬上限与请求内的 group_ids 取交集，
-            防止部门管理员通过伪造 group_ids 抽到其他部门的题目。
+        config: 组卷规则（题型配额、难度配比、来源筛选、顺序模式等）。
 
-    Returns:
-        含 question_ids / scores / total_score 的字典。
+    Raises:
+        DomainError: 400，配置结构非法。
     """
-    type_quota: dict[str, int] = config.get("type_quota") or {}
-    difficulty_dist: dict[str, float] = config.get("difficulty_dist") or {}
-    seed = config.get("seed")
-    allow_dup = config.get("allow_duplicate", False)
+    if not isinstance(config, dict):
+        raise DomainError(BAD_REQUEST, "组卷配置必须是对象")
+    type_quota = config.get("type_quota") or {}
+    difficulty_dist = config.get("difficulty_dist") or {}
     max_q = config.get("max_questions", 100)
     if not isinstance(max_q, int) or isinstance(max_q, bool) or not 1 <= max_q <= 1000:
         raise DomainError(BAD_REQUEST, "max_questions 必须在 1~1000 之间")
-    if allow_dup:
+    if config.get("allow_duplicate"):
         raise DomainError(BAD_REQUEST, "当前试卷模型不支持重复题目")
     if not isinstance(type_quota, dict) or any(
         not isinstance(quota, int) or isinstance(quota, bool) or quota < 0 or quota > 1000
         for quota in type_quota.values()
     ):
         raise DomainError(BAD_REQUEST, "题型数量配置无效")
+    # 未知题型名的配额永远抽不到题（恒为空），属无法满足的配置：入口拒绝，而不是静默出 0 题
+    unknown_types = [t for t in type_quota if t not in QUESTION_TYPES]
+    if unknown_types:
+        raise DomainError(BAD_REQUEST, f"未知题型：{'、'.join(str(t) for t in unknown_types)}")
     if not isinstance(difficulty_dist, dict):
         raise DomainError(BAD_REQUEST, "难度配比配置无效")
     try:
@@ -202,12 +208,37 @@ def generate_paper(db: Session, config: dict, scope: set[int] | None = None) -> 
         or not difficulty_keys.issubset({1, 2, 3})
     ):
         raise DomainError(BAD_REQUEST, "难度配比必须是 1~3 的非负比例，合计不能超过 1")
+    for field in ("bank_ids", "group_ids", "tags"):
+        value = config.get(field)
+        if value is not None and not isinstance(value, list):
+            raise DomainError(BAD_REQUEST, f"{field} 必须是数组")
+    order_mode = config.get("order_mode") or DEFAULT_ORDER_MODE
+    if order_mode not in ORDER_MODES:
+        raise DomainError(BAD_REQUEST, f"出题顺序必须是 {ORDER_MODES} 之一")
+
+
+def generate_paper(db: Session, config: dict, scope: set[int] | None = None) -> dict:
+    """按规则生成试卷，返回 {question_ids:[...], scores:{qid:score}, total_score}。
+
+    Args:
+        db: 数据库会话。
+        config: 组卷规则（题型配额、难度配比、来源筛选、顺序模式、随机种子等）。
+        scope: 调用者可访问的分组 id 集合；None 表示不限制（超级管理员）。
+            非 None 时作为硬上限与请求内的 group_ids 取交集，
+            防止部门管理员通过伪造 group_ids 抽到其他部门的题目。
+
+    Returns:
+        含 question_ids / scores / total_score 的字典。
+    """
+    validate_config(config)
+    type_quota: dict[str, int] = config.get("type_quota") or {}
+    difficulty_dist: dict[str, float] = config.get("difficulty_dist") or {}
+    seed = config.get("seed")
+    max_q = config.get("max_questions", 100)
     bank_ids = config.get("bank_ids") or []
     group_ids = config.get("group_ids") or []
     tags = config.get("tags") or []
     order_mode = config.get("order_mode") or DEFAULT_ORDER_MODE
-    if order_mode not in ORDER_MODES:
-        raise DomainError(BAD_REQUEST, f"出题顺序必须是 {ORDER_MODES} 之一")
 
     rng = random.Random(seed)
 

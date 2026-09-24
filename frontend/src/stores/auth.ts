@@ -143,6 +143,11 @@ export const useAuthStore = defineStore('auth', {
       safeStorage.removeItem(TOKEN_KEY)
       safeStorage.removeItem(USER_KEY)
     },
+    /** 就地替换本地凭据：用于服务端**重新签发** token 的场景（如改密后旧 token 立即失效）。 */
+    setToken(token: string) {
+      this.token = token
+      safeStorage.setItem(TOKEN_KEY, token)
+    },
     async logout() {
       this.clear()
     },

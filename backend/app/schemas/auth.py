@@ -76,4 +76,16 @@ class ChangePasswordIn(BaseModel):
     _password_bytes = field_validator("new_password")(validate_password_bytes)
 
 
+class ChangePasswordOut(BaseModel):
+    """改密响应。
+
+    改密会让此前签发的**全部** token 失效（含本次请求携带的那个），因此必须回传新 token：
+    前端拿到后就地替换本地凭据，否则用户会在「修改成功」后的第一个请求上被踢回登录页。
+    """
+
+    success: bool = True
+    access_token: str
+    token_type: str = "bearer"
+
+
 TokenOut.model_rebuild()

@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import base64
 import logging
 import os
 import secrets
@@ -42,10 +43,50 @@ SECRET_KEY = _secret_key()
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24 * 7  # 7 天
 
-# Fernet 密钥（用于加密 SMTP 密码等敏感设置）；32 url-safe base64 字节
+# Fernet 密钥（用于加密 SMTP 密码等敏感设置）；32 字节 url-safe base64（44 字符）
 SETTINGS_ENC_KEY = os.getenv("TRAINING_ENC_KEY", "")
+# 生成命令（写进错误提示，避免运维再踩「token_urlsafe(32) 产出 43 字符被 Fernet 拒绝」的坑）
+ENC_KEY_GEN_CMD = (
+    'python3 -c "import base64,secrets; print(base64.urlsafe_b64encode(secrets.token_bytes(32)).decode())"'
+)
+
+
+def _check_enc_key(key: str) -> None:
+    """启动期校验 Fernet 密钥格式，非法时给出可直接执行的修复提示。
+
+    Fernet 要求密钥是 **32 字节的 url-safe base64**（44 字符、以 `=` 结尾）。
+    `secrets.token_urlsafe(32)` 产出的是无 padding 的 43 字符串，`Fernet()` 会直接抛
+    `ValueError: Fernet key must be 32 url-safe base64-encoded bytes.` —— 而该异常此前只在
+    管理员保存 SMTP 密码时才暴露（400 + 一句英文），加密设置读取还会静默降级为空串。
+
+    这里在启动时就把问题说清楚（只记 ERROR 不退出：登录/注册/练习等不依赖该密钥的功能
+    应继续可用）。
+
+    Args:
+        key: 环境变量 TRAINING_ENC_KEY 的值（调用方保证非空）。
+    """
+    try:
+        raw = base64.urlsafe_b64decode(key.encode())
+    except ValueError as exc:  # binascii.Error 也继承自 ValueError
+        logger.error(
+            "[config] TRAINING_ENC_KEY 不是合法的 url-safe base64（%s）：SMTP 密码等敏感设置将无法保存。"
+            "请用 %s 重新生成。",
+            exc,
+            ENC_KEY_GEN_CMD,
+        )
+        return
+    if len(raw) != 32:
+        logger.error(
+            "[config] TRAINING_ENC_KEY 解码后为 %d 字节，Fernet 要求 32 字节：敏感设置将无法保存。请用 %s 重新生成。",
+            len(raw),
+            ENC_KEY_GEN_CMD,
+        )
+
+
 if not SETTINGS_ENC_KEY:
     logger.warning("TRAINING_ENC_KEY 未设置，写入非空敏感设置将被拒绝。生产环境务必经环境变量注入 Fernet 密钥。")
+else:
+    _check_enc_key(SETTINGS_ENC_KEY)
 
 # 超管初始化账号（init_db.py 使用）
 SUPER_ADMIN_EMAIL = os.getenv("TRAINING_SUPER_ADMIN_EMAIL", "admin@example.com")

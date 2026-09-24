@@ -17,6 +17,7 @@ from app.database import get_db
 from app.models.user import User
 from app.schemas.auth import (
     ChangePasswordIn,
+    ChangePasswordOut,
     LoginIn,
     RegisterIn,
     ResendIn,
@@ -137,15 +138,20 @@ def resend(
     return {"success": True}
 
 
-@router.post("/change-password")
+@router.post("/change-password", response_model=ChangePasswordOut)
 def change_password(
     payload: ChangePasswordIn,
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
+    """修改密码。
+
+    `token_version` 递增会让此前签发的全部 token 立即失效（含本次请求携带的那个），
+    因此响应里同时回传**新签发**的 token，前端须就地替换本地凭据，否则下一次请求即 401。
+    """
     check(f"change-pwd:user:{user.id}", 5, 300, "修改密码")
-    auth_service.change_password(db, user, payload.old_password, payload.new_password)
-    return {"success": True}
+    access_token = auth_service.change_password(db, user, payload.old_password, payload.new_password)
+    return {"success": True, "access_token": access_token, "token_type": "bearer"}
 
 
 def _bad(msg: str) -> HTTPException:

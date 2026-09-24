@@ -7,7 +7,7 @@ import os
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, Request, status
+from fastapi import FastAPI, HTTPException, Request, Response, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
@@ -21,6 +21,7 @@ from app.api import questions as questions_router
 from app.api import records as records_router
 from app.api import system as system_router
 from app.api import users as users_router
+from app.core.body_limit import BodySizeLimitMiddleware
 from app.core.errors import DomainError
 from app.core.logconfig import configure_logging
 from app.core.rate_limit import get_client_ip
@@ -39,6 +40,18 @@ _PUBLIC_BLOCKED_SUFFIXES = (".svg",)
 FRONTEND_DIST = Path(__file__).resolve().parent.parent.parent / "frontend" / "dist"
 
 
+def _apply_security_headers(response: Response) -> Response:
+    """统一安全响应头。
+
+    抽成函数是因为中间件有多个返回点（提前 404、正常响应）：任何一个漏掉，
+    「集中兜底」的意图就落空了（原实现只在正常响应上设置，提前返回的 404 没有）。
+    """
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("X-Frame-Options", "SAMEORIGIN")
+    response.headers.setdefault("Referrer-Policy", "same-origin")
+    return response
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     init_db()
@@ -49,8 +62,16 @@ async def lifespan(app: FastAPI):
 
         with db_session() as db:
             stats_service.startup_refresh(db)
+            # 回收「已置 scoring 但未写成绩」的崩溃残留会话（进程被 kill 时留下）：
+            # 不回收的话，该考生会被 partial unique index 挡住，只能等下一次开考该考试
+            # 时才由 start_exam 兜底回收。
+            from app.services.exam.scoring import _recover_stuck_scoring
+
+            recovered = _recover_stuck_scoring(db)
+            if recovered:
+                logger.warning("[exam] 启动回收了 %d 个卡死的结算会话", recovered)
     except Exception as exc:  # noqa: BLE001
-        logger.exception("[stats] startup refresh failed: %s", exc)
+        logger.exception("[startup] 启动维护失败（统计预聚合/卡死会话回收）: %s", exc)
     yield
 
 
@@ -81,7 +102,7 @@ def create_app() -> FastAPI:
         set_request_ip(get_client_ip(request))
         path = request.url.path.lower()
         if path.startswith("/files/") and path.endswith(_PUBLIC_BLOCKED_SUFFIXES):
-            return PlainTextResponse("Not Found", status_code=404)
+            return _apply_security_headers(PlainTextResponse("Not Found", status_code=404))
         try:
             response = await call_next(request)
         except Exception:
@@ -101,10 +122,13 @@ def create_app() -> FastAPI:
                 request.url.path,
                 response.status_code,
             )
-        response.headers.setdefault("X-Content-Type-Options", "nosniff")
-        response.headers.setdefault("X-Frame-Options", "SAMEORIGIN")
-        response.headers.setdefault("Referrer-Policy", "same-origin")
-        return response
+        return _apply_security_headers(response)
+
+    # 请求体体积兜底（只约束非 multipart）：字段级上限都在 body 完整解析之后才生效，
+    # 这里在解析前拦下超大 JSON（含未登录可达的 /api/auth/login）。
+    # 注册顺序：`add_middleware` 是 insert(0)，越晚注册越靠外 —— 故此处先注册本中间件，
+    # 让随后注册的 CORS 包在最外层，413 响应同样带跨域头。
+    app.add_middleware(BodySizeLimitMiddleware)
 
     # 逗号分隔的来源需逐个 strip：否则 `https://a.com, https://b.com` 的第二项带前导空格，
     # Starlette 精确匹配失败、该来源被静默拒绝。

@@ -22,6 +22,7 @@ from app.schemas.question import (
     QuestionCreate,
     QuestionUpdate,
 )
+from app.utils.question_text import count_blanks
 
 logger = logging.getLogger("quizhub")
 
@@ -91,23 +92,38 @@ def _get_allowed_bank(
     return bank
 
 
-def _validate_answer_shape(qtype: str, answer: object, options: list | None = None) -> None:
-    """按题型校验答案形状，拒绝空答案（防止填空/拖拽空答案经 grade() 恒真被判满分）。
+def _validate_answer_shape(
+    qtype: str,
+    answer: object,
+    options: list | None = None,
+    question_text: str | None = None,
+    *,
+    left_items: list | None = None,
+    right_items: list | None = None,
+) -> None:
+    """按题型校验答案形状，拒绝空答案与「永远判错」的答案。
 
-    - 单选：非空单字符字符串（含一个字母），且必须落在选项集范围内
-    - 多选：非空字符串（一个或多个字母），且必须落在选项集范围内
+    - 单选：非空单字符字母，必须落在选项集范围内；选项必须非空
+    - 多选：非空字母串（不重复），必须落在选项集范围内；选项必须非空
     - 判断：'正确' 或 '错误'
-    - 填空：非空 list 且每个空为非空 list[str]
+    - 填空：非空 list，每个空为非空 list[str]，且空位数与题干空位数一致
     - 简答：非空字符串
-    - 拖拽：非空 dict
+    - 拖拽：非空 dict，且映射与 left_items/right_items 一一对应
+
+    与 Excel 导入路径（`utils/excel._parse_row`）保持同一口径：这两条路径此前只在一侧校验，
+    另一侧能存下「任何作答都判错」的题（空位数不一致、选项为空、答案越界、拖拽映射与
+    左右项分叉），已逐条实跑复现。
 
     Args:
         qtype: 题型（QUESTION_TYPES 之一）。
         answer: 答案（多态，见各分支）。
-        options: 选择题的选项列表；非空时校验答案字母是否在范围内（与 Excel 导入路径同口径）。
+        options: 选择题的选项列表；选择题必须非空，且答案字母须在范围内。
+        question_text: 题干；填空题据此交叉校验空位数（None 表示不校验）。
+        left_items: 拖拽题左项（题项）。
+        right_items: 拖拽题右项（容器）。
 
     Raises:
-        DomainError: 400，答案形状非法或超出选项范围。
+        DomainError: 400，答案形状非法、超出选项范围或与题干/左右项不一致。
     """
     if qtype in ("单选题", "多选题"):
         if not isinstance(answer, str) or not answer.strip():
@@ -120,18 +136,21 @@ def _validate_answer_shape(qtype: str, answer: object, options: list | None = No
             raise DomainError(BAD_REQUEST, "单选题答案必须是一个选项字母（如 A）")
         if not letters.isalpha() or not letters.isascii():
             raise DomainError(BAD_REQUEST, "选择题答案必须是选项字母（如 A 或 ABC）")
-        # 答案字母必须落在选项集内：Excel 导入路径按选项集校验（utils/excel._parse_row），
-        # 手动创建此前只校验「是不是字母」，于是 options=["甲","乙"] + answer="Z" 能入库，
-        # 存下一道永远判错的题。
-        if isinstance(options, list) and options:
-            valid_letters = {chr(ord("A") + i) for i in range(len(options))}
-            out_of_range = sorted(set(letters) - valid_letters)
-            if out_of_range:
-                raise DomainError(
-                    BAD_REQUEST,
-                    f"答案 {'/'.join(out_of_range)} 超出选项范围（共 {len(options)} 个选项，最大 "
-                    f"{max(valid_letters)}）",
-                )
+        # 重复字母（如 "AA"）经 grade() 排序比较后与任何作答都不相等 → 题目永远判错
+        if len(set(letters)) != len(letters):
+            raise DomainError(BAD_REQUEST, "选择题答案不能包含重复字母")
+        # 选项是选择题可作答的前提：空/缺失时前端没有可点选项，任何作答都判错。
+        # Excel 导入路径要求选项非空，手工路径此前用 `if isinstance(options, list) and options:`
+        # 跳过校验，于是 options=[] + answer="A" 能入库。
+        if not isinstance(options, list) or not options:
+            raise DomainError(BAD_REQUEST, "选择题必须提供选项")
+        valid_letters = {chr(ord("A") + i) for i in range(len(options))}
+        out_of_range = sorted(set(letters) - valid_letters)
+        if out_of_range:
+            raise DomainError(
+                BAD_REQUEST,
+                f"答案 {'/'.join(out_of_range)} 超出选项范围（共 {len(options)} 个选项，最大 {max(valid_letters)}）",
+            )
     elif qtype == "判断题":
         if answer not in ("正确", "错误"):
             raise DomainError(BAD_REQUEST, "判断题答案必须是 正确/错误")
@@ -141,12 +160,32 @@ def _validate_answer_shape(qtype: str, answer: object, options: list | None = No
         for blanks in answer:
             if not isinstance(blanks, list) or not blanks:
                 raise DomainError(BAD_REQUEST, "填空题每空至少需要一个等价答案")
+        # 空位数必须与题干一致：判分要求 len(correct_answer) == len(user_answer)，而前端按题干里
+        # 连续下划线数量渲染输入框。少写一个空位即存下一道永远判错的题（Excel 路径已拦，手工路径此前放行）。
+        if question_text is not None:
+            expected_blanks = count_blanks(question_text)
+            if len(answer) != expected_blanks:
+                raise DomainError(
+                    BAD_REQUEST,
+                    f"答案空位数({len(answer)})与题干空位数({expected_blanks})不一致",
+                )
     elif qtype == "简答题":
         if not isinstance(answer, str) or not answer.strip():
             raise DomainError(BAD_REQUEST, "简答题参考答案不能为空")
-    elif qtype == "拖拽题":  # noqa: SIM102  类型分派，嵌套 if 比合并成 and 更清晰
+    elif qtype == "拖拽题":
         if not isinstance(answer, dict) or not answer:
             raise DomainError(BAD_REQUEST, "拖拽题答案映射不能为空")
+        # 拖拽题由左项（题项）拖入右项（容器）作答，判分按映射逐对比较且要求数量相等。
+        # 左项没有对应容器（或容器不在右项里）时，考生无论怎么拖都对不上 → 题目不可作答。
+        # Excel 路径由答案反向构造左右项，天然一致；手工路径此前完全不校验。
+        items = left_items if isinstance(left_items, list) else []
+        containers = right_items if isinstance(right_items, list) else []
+        if not items or not containers or not all(isinstance(i, str) for i in [*items, *containers]):
+            raise DomainError(BAD_REQUEST, "拖拽题必须提供左项与右项（题项与容器）")
+        if not all(isinstance(k, str) and isinstance(v, str) for k, v in answer.items()):
+            raise DomainError(BAD_REQUEST, "拖拽题答案映射必须是「题项:容器」文本对")
+        if set(answer) != set(items) or not set(answer.values()).issubset(set(containers)):
+            raise DomainError(BAD_REQUEST, "拖拽题答案映射必须与左项/右项一一对应")
 
 
 def _count_exams_referencing_questions(db: Session, qids: list[int]) -> int:
@@ -322,7 +361,14 @@ def _ensure_tags(db: Session, tags: list[str]) -> None:
 def create_question(db: Session, payload: QuestionCreate, scope: set[int] | None = None) -> Question:
     if payload.type not in QUESTION_TYPES:
         raise DomainError(BAD_REQUEST, f"题型必须是 {QUESTION_TYPES} 之一")
-    _validate_answer_shape(payload.type, payload.answer, payload.options)
+    _validate_answer_shape(
+        payload.type,
+        payload.answer,
+        payload.options,
+        payload.question,
+        left_items=payload.left_items,
+        right_items=payload.right_items,
+    )
     _validate_group(db, payload.group_id, scope)
     bank = _get_allowed_bank(db, payload.bank_id, scope)
     if bank and bank.group_id is not None and bank.group_id != payload.group_id:
@@ -357,20 +403,26 @@ def update_question(db: Session, qid: int, payload: QuestionUpdate, scope: set[i
     data = payload.model_dump(exclude_unset=True)
     if "type" in data and data["type"] not in QUESTION_TYPES:
         raise DomainError(BAD_REQUEST, f"题型必须是 {QUESTION_TYPES} 之一")
-    # 改题型或改答案时校验答案形状（杜绝空答案进入题库被判满分）；
-    # 选项可能在同一请求里被替换，故按「本次生效的选项集」校验答案字母范围。
+    # 只要「本次生效的题型/选项/题干/答案/左右项」任一变化，就按生效后的组合重跑一次形状校验。
+    # 原实现只在「单独改题型」或「显式传 answer」时校验，于是「只改选项」或「只改题干」可以
+    # 绕过校验，落库一道永远判错的题（已实跑复现：3 选项单选把选项缩成 2 个、答案 C 仍越界）。
     effective_type = data.get("type", q.type)
     effective_options = data.get("options", q.options)
-    if "type" in data and "answer" not in data:
-        _validate_answer_shape(effective_type, q.answer, effective_options)
+    if {"type", "options", "question", "answer", "left_items", "right_items"} & data.keys():
+        _validate_answer_shape(
+            effective_type,
+            data.get("answer", q.answer),
+            effective_options,
+            data.get("question", q.question),
+            left_items=data.get("left_items", q.left_items),
+            right_items=data.get("right_items", q.right_items),
+        )
     if "group_id" in data:
         _validate_group(db, data["group_id"], scope)
     bank = _get_allowed_bank(db, data.get("bank_id", q.bank_id), scope)
     effective_group = data.get("group_id", q.group_id)
     if bank and bank.group_id is not None and bank.group_id != effective_group:
         raise DomainError(BAD_REQUEST, "题目分组必须与题库分组一致")
-    if "answer" in data:
-        _validate_answer_shape(effective_type, data["answer"], effective_options)
     if data.get("tags"):
         _ensure_tags(db, data["tags"])
     # 白名单写入：不依赖 Pydantic schema 的字段列表兜底。

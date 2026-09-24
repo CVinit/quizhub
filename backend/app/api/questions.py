@@ -14,6 +14,7 @@ from app.models.question import QUESTION_TYPE
 from app.models.user import User
 from app.schemas.question import (
     QuestionBankCreate,
+    QuestionBankItemOut,
     QuestionBankOut,
     QuestionBankUpdate,
     QuestionCreate,
@@ -24,13 +25,13 @@ from app.schemas.question import (
 from app.services import import_service, question_service
 from app.services.audit_service import log as audit_log
 from app.services.system_service import get_settings
-from app.utils.excel import build_template
+from app.utils.excel import XLSX_MEDIA_TYPE, build_template
 
 router = APIRouter(prefix="/admin", tags=["questions"])
 
 
 # ---------- 题库来源 ----------
-@router.get("/question-banks")
+@router.get("/question-banks", response_model=list[QuestionBankItemOut])
 def list_banks(
     practice_enabled: bool | None = None,
     db: Session = Depends(get_db),
@@ -168,15 +169,17 @@ def delete_question(qid: int, db: Session = Depends(get_db), user: User = Depend
 
 
 # ---------- 上传 ----------
+# 模板文件名（RFC 5987 百分号编码的中文名）抽成常量：避免超长行，也便于统一维护。
+QUESTION_TEMPLATE_FILENAME = "%E9%A2%98%E5%BA%93%E5%AF%BC%E5%85%A5%E6%A8%A1%E6%9D%BF.xlsx"  # 题库导入模板.xlsx
+
+
 @router.get("/upload/template")
 def download_template(_user: User = Depends(require_admin)):
     buf = build_template()
     return StreamingResponse(
         buf,
-        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        headers={
-            "Content-Disposition": "attachment; filename*=UTF-8''%E9%A2%98%E5%BA%93%E5%AF%BC%E5%85%A5%E6%A8%A1%E6%9D%BF.xlsx"
-        },
+        media_type=XLSX_MEDIA_TYPE,
+        headers={"Content-Disposition": f"attachment; filename*=UTF-8''{QUESTION_TEMPLATE_FILENAME}"},
     )
 
 

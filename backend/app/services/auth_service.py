@@ -16,7 +16,7 @@ from sqlalchemy.orm import Session
 
 from app.core.background import BackgroundTaskQueue
 from app.core.email import normalize_email
-from app.core.errors import DomainError
+from app.core.errors import DomainError, is_unique_violation
 from app.core.request_context import get_request_ip
 from app.core.security import create_access_token, gen_verify_code, hash_password, verify_password
 from app.core.status import BAD_REQUEST, FORBIDDEN, SERVICE_UNAVAILABLE, UNAUTHORIZED
@@ -182,9 +182,13 @@ def register(
         # 并发同邮箱注册（两个请求都通过了上面的 SELECT）时后到者会撞唯一约束：不兜底
         # 会变成 500。此时验证码已被消费，属「一次性验证码 + 唯一约束」叠加的极窄竞态，
         # 文案直接引导用户去登录，避免其反复重试。
+        # 但必须与其它约束区分：分组在校验与写入之间被删除时同样抛 IntegrityError，
+        # 报「该邮箱已注册」会把用户引到错误的下一步（详见 is_unique_violation）。
         db.rollback()
-        logger.warning("[auth] 注册写入违反唯一约束，已回滚：%s", type(exc).__name__)
-        raise DomainError(BAD_REQUEST, "该邮箱已注册，请直接登录") from exc
+        logger.warning("[auth] 注册写入违反约束，已回滚：%s", type(exc).__name__)
+        if is_unique_violation(exc, column="users.email"):
+            raise DomainError(BAD_REQUEST, "该邮箱已注册，请直接登录") from exc
+        raise DomainError(BAD_REQUEST, "注册失败：所选分组已失效，请重新选择后再试") from exc
     db.refresh(user)
     return user
 
@@ -373,13 +377,32 @@ def login(db: Session, email: str, password: str) -> dict:
     return {"access_token": token, "token_type": "bearer", "user": user}
 
 
-def change_password(db: Session, user: User, old: str, new: str) -> None:
+def change_password(db: Session, user: User, old: str, new: str) -> str:
+    """修改密码，并返回**重新签发**的访问令牌。
+
+    `token_version += 1` 会让该用户此前签发的全部 token 立即失效 —— **包括本次请求携带的
+    那一个**。因此必须同时签发新 token 回给调用方：否则前端会继续使用已失效的凭据，
+    用户看到「密码修改成功」后，下一个请求就 401（表现为莫名被踢下线）。
+
+    Args:
+        db: 数据库会话。
+        user: 当前登录用户。
+        old: 原密码。
+        new: 新密码（长度/字节数上限由 schema 校验）。
+
+    Returns:
+        新的访问令牌（旧 token 已全部失效）。
+
+    Raises:
+        DomainError: 400，原密码错误。
+    """
     if not verify_password(old, user.password_hash):
         logger.warning("[auth] 修改密码失败：原密码错误 user_id=%s", user.id)
         raise DomainError(BAD_REQUEST, "原密码错误")
     user.password_hash = hash_password(new)
     user.token_version += 1
     db.commit()
-    # token_version 变更会让该用户其它会话立即失效：属安全相关事件，留痕便于排查
-    # 「莫名被踢下线」类反馈（仅记 user_id，不含邮箱等 PII）
-    logger.info("[auth] 用户 %s 修改密码成功，其它会话已失效", user.id)
+    # token_version 变更会让此前签发的**全部**会话（含当前这个）立即失效：属安全相关事件，
+    # 留痕便于排查「莫名被踢下线」类反馈（仅记 user_id，不含邮箱等 PII）
+    logger.info("[auth] 用户 %s 修改密码成功，此前签发的全部会话已失效并已重新签发凭据", user.id)
+    return create_access_token(user.id, {"role": user.role, "ver": user.token_version})

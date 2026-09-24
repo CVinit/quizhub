@@ -202,9 +202,33 @@ def _exam_brief(
     }
 
 
+def _list_len(value: object) -> int:
+    """JSON 列里「题目 id 列表」的长度（防御式：非列表按 0 处理）。"""
+    return len(value) if isinstance(value, list) else 0
+
+
+def _quota_total(quota: object) -> int:
+    """组卷配额合计的展示题数（防御式：只累加合法的非负整数）。
+
+    展示路径不能假设库中的 rules/config 一定合法：`type_quota` 的值若是字符串或 null，
+    `int()` 会抛异常，使「管理端考试列表」与「用户端可用考试」整体 500（已实跑复现）。
+    入口校验（`paper_service.validate_config`）是第一道防线，这里是第二道：
+    即使历史脏数据已落库，列表也必须照常可读（题数按可识别部分展示）。
+
+    Args:
+        quota: `type_quota` 字段的原始值（任意类型）。
+
+    Returns:
+        合法整数配额之和；非 dict 返回 0。
+    """
+    if not isinstance(quota, dict):
+        return 0
+    return sum(value for value in quota.values() if isinstance(value, int) and not isinstance(value, bool))
+
+
 def _exam_question_count(e: ExamDefinition, db: Session | None = None) -> int:
     """考试题目数的展示口径：手选 > 已固化 > 模板 > 规则配额。"""
-    if e.manual_questions:
+    if isinstance(e.manual_questions, list) and e.manual_questions:
         return len(e.manual_questions)
     if db is not None:
         frozen = db.execute(
@@ -215,13 +239,11 @@ def _exam_question_count(e: ExamDefinition, db: Session | None = None) -> int:
         if e.paper_template_id:
             tpl = db.get(PaperTemplate, e.paper_template_id)
             if tpl:
-                if tpl.question_ids:
-                    return len(tpl.question_ids)
-                quota = (tpl.config or {}).get("type_quota") or {}
-                return sum(int(v) for v in quota.values())
-    rules = e.rules or {}
-    quota = rules.get("type_quota") or {}
-    return sum(int(v) for v in quota.values())
+                if _list_len(tpl.question_ids):
+                    return _list_len(tpl.question_ids)
+                return _quota_total((tpl.config or {}).get("type_quota") if isinstance(tpl.config, dict) else None)
+    rules = e.rules if isinstance(e.rules, dict) else {}
+    return _quota_total(rules.get("type_quota"))
 
 
 def _exam_question_counts(db: Session, exams: list[ExamDefinition]) -> dict[int, int]:
@@ -243,7 +265,7 @@ def _exam_question_counts(db: Session, exams: list[ExamDefinition]) -> dict[int,
     need_frozen: list[ExamDefinition] = []
     tpl_ids: set[int] = set()
     for e in exams:
-        if e.manual_questions:
+        if isinstance(e.manual_questions, list) and e.manual_questions:
             counts[e.id] = len(e.manual_questions)
             continue
         need_frozen.append(e)
@@ -272,12 +294,12 @@ def _exam_question_counts(db: Session, exams: list[ExamDefinition]) -> dict[int,
             continue
         tpl = templates.get(e.paper_template_id) if e.paper_template_id else None
         if tpl is not None:
-            if tpl.question_ids:
-                counts[e.id] = len(tpl.question_ids)
+            if _list_len(tpl.question_ids):
+                counts[e.id] = _list_len(tpl.question_ids)
             else:
-                quota = (tpl.config or {}).get("type_quota") or {}
-                counts[e.id] = sum(int(v) for v in quota.values())
+                config = tpl.config if isinstance(tpl.config, dict) else {}
+                counts[e.id] = _quota_total(config.get("type_quota"))
             continue
-        quota = (e.rules or {}).get("type_quota") or {}
-        counts[e.id] = sum(int(v) for v in quota.values())
+        rules = e.rules if isinstance(e.rules, dict) else {}
+        counts[e.id] = _quota_total(rules.get("type_quota"))
     return counts

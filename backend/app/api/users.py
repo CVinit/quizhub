@@ -12,14 +12,15 @@ from app.core.uploads import read_limited
 from app.database import get_db
 from app.models.user import ROLE_SUPER_ADMIN, ROLE_USER, User
 from app.schemas.group import UserGroupAssign
-from app.schemas.user import ResetPasswordIn, UserCreateIn, UserUpdate
+from app.schemas.user import ResetPasswordIn, UserCreateIn, UserListOut, UserUpdate
 from app.services import user_import_service, user_service
 from app.utils import user_excel
+from app.utils.excel import XLSX_MEDIA_TYPE
 
 router = APIRouter(prefix="/admin/users", tags=["users"])
 
 
-@router.get("")
+@router.get("", response_model=UserListOut)
 def list_users(
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
@@ -158,15 +159,17 @@ def assign_groups(
 
 
 # ---------- 批量导入用户 ----------
+# 模板文件名（RFC 5987 百分号编码的中文名）抽成常量：避免超长行，也便于统一维护。
+USER_TEMPLATE_FILENAME = "%E7%94%A8%E6%88%B7%E5%AF%BC%E5%85%A5%E6%A8%A1%E6%9D%BF.xlsx"  # 用户导入模板.xlsx
+
+
 @router.get("/import/template")
 def download_user_template(_user: User = Depends(require_admin)):
     buf = user_excel.build_template()
     return StreamingResponse(
         buf,
-        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        headers={
-            "Content-Disposition": "attachment; filename*=UTF-8''%E7%94%A8%E6%88%B7%E5%AF%BC%E5%85%A5%E6%A8%A1%E6%9D%BF.xlsx"
-        },
+        media_type=XLSX_MEDIA_TYPE,
+        headers={"Content-Disposition": f"attachment; filename*=UTF-8''{USER_TEMPLATE_FILENAME}"},
     )
 
 

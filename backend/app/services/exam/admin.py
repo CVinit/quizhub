@@ -21,6 +21,7 @@ from app.models.user import User
 from app.services import mail_service
 from app.services.exam.common import _exam_brief, _exam_question_counts, _expand_groups, _parse_time, exam_in_scope
 from app.services.grading import is_passed
+from app.services.paper_service import validate_config
 from app.services.system_service import get_settings
 
 logger = logging.getLogger("quizhub")
@@ -298,6 +299,10 @@ def create_exam(db: Session, payload, user: User, scope: set[int] | None = None)
     # 或落库一个「题数虚高、永远无法开考」的考试（详见两个 helper 的 docstring）。
     _validate_manual_questions(db, payload.manual_questions)
     _validate_paper_template(db, payload.paper_template_id)
+    # 组卷配置的结构必须在入口校验：`_exam_question_count` 会对 type_quota 的值直接 int()，
+    # 畸形 rules 一旦落库，管理端与用户端的考试列表都会 500（详见 validate_config 的 docstring）。
+    # 放在 `_validate_exam_question_scope` 之前：后者也会读取 rules 内的来源字段。
+    validate_config(payload.rules or {})
     _validate_exam_question_scope(db, payload.manual_questions, payload.rules, payload.paper_template_id, scope)
     _validate_exam_window(payload.start_at, payload.end_at)
     e = ExamDefinition(
@@ -412,6 +417,9 @@ def update_exam(db: Session, exam_id: int, payload: dict, scope: set[int] | None
         _validate_manual_questions(db, payload.get("manual_questions"))
     if "paper_template_id" in payload:
         _validate_paper_template(db, payload.get("paper_template_id"))
+    if "rules" in payload:
+        # 与 create_exam 同口径：结构非法一律 400，绝不落库（否则展示路径 int() 抛异常 → 列表 500）
+        validate_config(payload.get("rules"))
     # 只在**组卷来源真的发生变化**时校验题目范围：否则 `payload.get(f, e.f)` 会把
     # 超管配置的存量值（如全局模板）当成本次提交一并复检，使部门管理员连改个考试名
     # 都被 403 永久锁死（存量配置在它被创建时已校验过，无需重复校验）。
@@ -574,7 +582,9 @@ def publish_exam(
         raise DomainError(BAD_REQUEST, "该考试没有可用题目，无法发布；请先配置组卷来源")
     # 通知只在 draft→published 的迁移上发一次：本接口无状态前置校验时，重复点击「发布」
     # （前端按钮双击、网络重试）会对范围内全部活跃用户重复群发考试通知邮件。
-    first_publish = e.status != "published"
+    # 判据是「当前是 draft」而不是「当前不是 published」：后者会让「归档 → 重新发布」
+    # 再次群发一遍（archived/ended 等状态同样满足「不是 published」）。
+    first_publish = e.status == "draft"
     e.status = "published"
     db.commit()
     db.refresh(e)

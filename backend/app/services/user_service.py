@@ -12,7 +12,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.core.email import normalize_email
-from app.core.errors import DomainError
+from app.core.errors import DomainError, is_unique_violation
 from app.core.like import ESCAPE_CHAR, like_pattern
 from app.core.security import hash_password
 from app.core.status import BAD_REQUEST, FORBIDDEN, NOT_FOUND
@@ -312,7 +312,9 @@ def update_user(
     changes: dict = {}
     if name is not None:
         u.name = name
-        changes["name"] = name
+        # 审计只记「改了哪些字段」，不落姓名明文：姓名属 PII，而 audit-logs 接口对部门
+        # 管理员开放、会随分页响应回显。口径与 user.create / user.delete 的 detail 一致。
+        changes["name"] = "<changed>"
     if role is not None:
         if role not in ROLES:
             raise DomainError(BAD_REQUEST, "角色非法")
@@ -449,6 +451,11 @@ def create_user(
     if not password or len(password) < 6:
         raise DomainError(BAD_REQUEST, "密码至少 6 位")
 
+    # 归属部门必须存在：users.dept_group_id 有外键且运行期 PRAGMA foreign_keys=ON，
+    # 直接写入不存在的 id 会在 commit 抛 IntegrityError（与 update_user 同口径先校验）。
+    if dept_group_id is not None and not db.get(Group, dept_group_id):
+        raise DomainError(BAD_REQUEST, "分组不存在")
+
     gids = _normalize_group_ids(db, group_ids)
     user = User(
         email=email,
@@ -469,8 +476,15 @@ def create_user(
         db.commit()
     except IntegrityError as exc:
         db.rollback()
-        logger.warning("[user] 新增用户违反唯一约束，已回滚：%s", type(exc).__name__)
-        raise DomainError(BAD_REQUEST, "该邮箱已存在") from exc
+        logger.warning("[user] 新增用户写入失败，已回滚：%s", type(exc).__name__)
+        # 归因必须区分：邮箱唯一约束 vs 其它（外键等）。统一报「该邮箱已存在」会把
+        # 排查方向引偏（详见 core.errors.is_unique_violation 的 docstring）。
+        detail = (
+            "该邮箱已存在"
+            if is_unique_violation(exc, column="users.email")
+            else "用户数据校验失败：关联的分组不存在或已被删除"
+        )
+        raise DomainError(BAD_REQUEST, detail) from exc
     db.refresh(user)
     audit_log(
         db,

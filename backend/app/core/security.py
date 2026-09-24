@@ -10,7 +10,7 @@ from typing import Any
 import bcrypt
 from jose import JWTError, jwt
 
-from app.config import ACCESS_TOKEN_EXPIRE_MINUTES, ALGORITHM, SECRET_KEY, SETTINGS_ENC_KEY
+from app.config import ACCESS_TOKEN_EXPIRE_MINUTES, ALGORITHM, ENC_KEY_GEN_CMD, SECRET_KEY, SETTINGS_ENC_KEY
 
 # 敏感设置（如 SMTP 密码）在读取接口中的展示掩码。
 # 生产端（API 读取）与消费端（update_settings 跳过写回）必须共用同一常量：
@@ -78,11 +78,24 @@ def gen_verify_code(length: int = 6) -> str:
 
 
 def _fernet() -> Any | None:
+    """构造 Fernet 实例；密钥非法时抛可读的 RuntimeError（而不是 cryptography 的英文 ValueError）。
+
+    路由层把 `RuntimeError` 映射为 503 + 可操作提示，把 `ValueError` 映射为 400 并原样回显消息：
+    因此这里必须统一抛 RuntimeError，否则管理员会看到一句英文的 cryptography 内部错误
+    （「Fernet key must be 32 url-safe base64-encoded bytes.」），无法判断该改什么。
+    """
     if not SETTINGS_ENC_KEY:
         return None
     from cryptography.fernet import Fernet
 
-    return Fernet(SETTINGS_ENC_KEY.encode())
+    try:
+        return Fernet(SETTINGS_ENC_KEY.encode())
+    except (ValueError, TypeError) as exc:
+        # 只回中文可操作提示：cryptography 的原文（"Fernet key must be 32 url-safe
+        # base64-encoded bytes."）对管理员没有增量信息，反而掩盖了「该怎么做」。
+        raise RuntimeError(
+            f"TRAINING_ENC_KEY 格式非法，它必须是 32 字节的 url-safe base64（44 字符）。请用 {ENC_KEY_GEN_CMD} 重新生成"
+        ) from exc
 
 
 def encrypt_value(value: str) -> str:

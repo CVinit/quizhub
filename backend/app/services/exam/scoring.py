@@ -138,15 +138,18 @@ def submit_exam(db: Session, user: User, session_id: int) -> dict:
     overtime = _is_overtime(e, sess)
 
     # 幂等保护：原子把状态置为 scoring，若已非 in_progress 则 rowcount=0，避免重复提交
-    locked = cast(
-        CursorResult,
-        db.execute(
-            update(ExamSession)
-            .where(ExamSession.id == session_id, ExamSession.status == "in_progress")
-            .values(status="scoring", submitted_at=_now())
-        ),
-    )
-    if locked.rowcount == 0:
+    def _lock_for_scoring() -> int:
+        """原子占用结算权（in_progress → scoring），返回受影响行数（0 = 未抢到）。"""
+        return cast(
+            CursorResult,
+            db.execute(
+                update(ExamSession)
+                .where(ExamSession.id == session_id, ExamSession.status == "in_progress")
+                .values(status="scoring", submitted_at=_now())
+            ),
+        ).rowcount
+
+    if _lock_for_scoring() == 0:
         # 已被并发提交或已交卷：返回已有结果（幂等），而非报错
         existing = db.execute(select(ExamResult).where(ExamResult.exam_session_id == session_id)).scalar_one_or_none()
         if existing and existing.published:
@@ -172,7 +175,14 @@ def submit_exam(db: Session, user: User, session_id: int) -> dict:
             if existing.overtime:
                 return {"need_review": False, "overtime": True, "message": "本次考试超时，成绩作废（不计分）"}
             return {"need_review": False, "message": "成绩待管理员公布"}
-        raise DomainError(BAD_REQUEST, "考试已结束")
+        # 无成绩且没抢到锁：会话可能卡在 scoring —— 进程在「置 scoring」与「写 ExamResult」
+        # 之间被中断（kill / 崩溃）。此时考生既不能作答（submit_answer 要求 in_progress）
+        # 也不能交卷，而原实现直接报 400「考试已结束」，最长要等 30 分钟（下一次开考该考试时
+        # 才由 start_exam 的 _recover_stuck_scoring 兜底回收）。
+        # 这里与 start_exam 同口径处理：超时残留先回收、再重跑结算（幂等，ExamResult 只建一次）；
+        # 仍在结算窗口内（并发提交中）则 409 让客户端稍后重试，而不是谎报「考试已结束」。
+        if _recover_stuck_scoring(db, user_id=user.id) == 0 or _lock_for_scoring() == 0:
+            raise DomainError(CONFLICT, "试卷正在结算中，请稍后重试")
 
     # 锁定成功后，answers 必须以数据库当前值为准：本函数入口的 db.get(ExamSession) 读到的是
     # 进入函数时的快照，而在「读快照 → 滞后的 submit_answer 提交并 commit → 本请求锁定 scoring」

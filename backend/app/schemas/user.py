@@ -40,3 +40,31 @@ class UserCreateIn(BaseModel):
     group_ids: list[int] = Field(default_factory=list, max_length=MAX_ID_LIST_LEN)
 
     _password_bytes = field_validator("password")(validate_password_bytes)
+
+
+class UserListItemOut(BaseModel):
+    """用户列表项（管理端）。
+
+    字段与 `user_service.list_users` 的返回结构一一对应；`email` 用 `str` 而非 `EmailStr`：
+    历史数据里有经 Excel 导入的、只校验过含 "@" 的邮箱，用 EmailStr 会让整个列表 500。
+    """
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    email: str
+    name: str
+    role: str
+    status: str
+    email_verified: bool
+    dept_group_id: int | None = None
+    groups: list[int] = Field(default_factory=list)
+
+
+class UserListOut(BaseModel):
+    """用户分页列表响应。"""
+
+    total: int
+    page: int
+    page_size: int
+    items: list[UserListItemOut]

@@ -9,7 +9,6 @@
 from __future__ import annotations
 
 import math
-import re
 from io import BytesIO
 from typing import Any
 from xml.etree.ElementTree import ParseError
@@ -21,10 +20,14 @@ from openpyxl.utils import get_column_letter
 from openpyxl.utils.exceptions import InvalidFileException
 
 from app.schemas.question import RowError, UploadPreview, UploadPreviewRow
+from app.utils.question_text import count_blanks
 
 # openpyxl 在「合法 zip 但非工作簿」时抛出的异常集合。这些都不是 ValueError，
 # 路由只捕获 ValueError → 会变成 500，因此统一包装。
 _WORKBOOK_OPEN_ERRORS = (KeyError, OSError, BadZipFile, InvalidFileException, ParseError)
+
+# xlsx 的媒体类型：题库模板与用户模板的下载响应共用同一字面量（避免两处漂移）
+XLSX_MEDIA_TYPE = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 
 
 def open_workbook(buf: BytesIO) -> Workbook:
@@ -410,7 +413,8 @@ def _parse_row(sheet_name: str, row: tuple, r_idx: int) -> UploadPreviewRow:
                 # （useAnswerDraft 的 /_{2,}/g），判分要求 len(correct_answer) ==
                 # len(user_answer)（grading._grade_fill）。答案少写一个空位会存下一道
                 # 永远判错的题，而预览不报错（已实跑复现），因此在解析阶段就拦下。
-                expected_blanks = _count_blanks(question_text)
+                # 口径与手工建题路径共用 app.utils.question_text.count_blanks。
+                expected_blanks = count_blanks(question_text)
                 if len(answer) != expected_blanks:
                     error = f"答案空位数({len(answer)})与题干空位数({expected_blanks})不一致"
 
@@ -473,21 +477,6 @@ def _parse_row(sheet_name: str, row: tuple, r_idx: int) -> UploadPreviewRow:
         valid=not error,
         error=error,
     )
-
-
-def _count_blanks(question_text: str) -> int:
-    """统计题干中的空位数（连续 2 个及以上下划线算一个空）。
-
-    与前端渲染输入框的口径一致（`frontend/src/composables/useAnswerDraft.ts` 的 `/_{2,}/g`）。
-    题干没有下划线时按 1 个空处理，兼容「答案不在题干中留空位」的写法。
-
-    Args:
-        question_text: 题干原文。
-
-    Returns:
-        空位数（至少 1）。
-    """
-    return len(re.findall(r"_{2,}", question_text)) or 1
 
 
 def _parse_row_group_id(cells: list, col: int) -> tuple[int | None, str]:

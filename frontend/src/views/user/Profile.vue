@@ -47,7 +47,10 @@ const onSubmit = async () => {
   if (!(await validateForm(formRef.value))) return
   loading.value = true
   try {
-    await authApi.changePassword(form.old, form.new)
+    const data = await authApi.changePassword(form.old, form.new)
+    // 改密会让此前签发的全部 token 失效（含当前这个），必须就地换成服务端新签发的那一个，
+    // 否则「修改成功」后的第一个请求就会 401 被踢回登录页。
+    auth.setToken(data.access_token)
     ElMessage.success('密码修改成功')
     form.old = form.new = ''
   } catch {

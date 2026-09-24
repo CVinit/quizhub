@@ -26,6 +26,14 @@ MAX_JSON_BYTES = 64 * 1024
 MAX_SETTING_VALUE_CHARS = 4096
 MAX_SETTING_KEYS = 50
 
+# 单个**非 multipart** 请求体的体积上限（见 core.body_limit 的 ASGI 中间件）。
+# 字段级上限（MAX_ANSWER_BYTES / MAX_JSON_BYTES / password ≤72 等）都在 body 被完整
+# 解析进内存**之后**才生效，因此需要一个解析前的兜底上界：否则任意登录用户（甚至未登录
+# 的 /api/auth/login）发一个超大 JSON 就能把进程内存打满。
+# multipart（上传）不走该阈值：其合法体积由系统设置 upload_max_size_mb 决定，
+# 且 core.uploads.read_limited 已做分块累计。
+MAX_JSON_REQUEST_BYTES = 1024 * 1024
+
 # 练习作答属于高频核心操作，限流阈值只用于兜底防刷，不能影响正常刷题节奏。
 PRACTICE_ANSWER_LIMIT = 600
 PRACTICE_ANSWER_WINDOW_SEC = 300

@@ -22,6 +22,12 @@ class QuestionBankOut(BaseModel):
     practice_enabled: bool = True
 
 
+class QuestionBankItemOut(QuestionBankOut):
+    """题库列表项：在题库响应上补列表页展示用的题数。"""
+
+    question_count: int = 0
+
+
 class QuestionBankCreate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
