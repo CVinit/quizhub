@@ -92,6 +92,24 @@ describe('auth store：本地缓存用户信息的校验', () => {
     expect(localStorage.getItem(TOKEN_KEY)).toBeNull()
     expect(localStorage.getItem(USER_KEY)).toBeNull()
   })
+
+  it('setToken 就地替换凭据（改密后旧 token 立即失效，必须换成服务端新签发的那个）', () => {
+    const auth = useAuthStore()
+    auth.setToken('old-token')
+    expect(auth.token).toBe('old-token')
+    expect(localStorage.getItem(TOKEN_KEY)).toBe('old-token')
+
+    auth.setToken('new-token')
+    expect(auth.token).toBe('new-token')
+    expect(localStorage.getItem(TOKEN_KEY)).toBe('new-token')
+    expect(auth.isLoggedIn).toBe(true)
+    // 只换凭据，不动用户信息（改密不改变身份）
+    expect(auth.user).toBeNull()
+
+    // safeStorage 的「Storage 不可用」内存兜底是模块级状态，会跨用例残留：
+    // 本用例写过凭据后必须清理，否则后面「Storage 不可用」的用例会读到这个 token。
+    auth.clear()
+  })
 })
 
 describe('auth store：Storage 不可用时不崩、不退化为静默失败', () => {
