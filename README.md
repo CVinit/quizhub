@@ -19,7 +19,7 @@
 quizhub/
 ├── backend/              # FastAPI 后端
 │   ├── app/              # api / services / models / schemas / core / utils
-│   ├── scripts/          # init_db.py 建表 + 默认设置 + 超管账号；convert_docx.py
+│   ├── scripts/          # init_db.py 建表 + 默认设置 + 超管账号；migrate_*.py 增量迁移（幂等）；convert_docx.py
 │   ├── tests/            # 单元测试（grading/paper/excel/captcha/rate_limit）
 │   ├── data/             # SQLite 数据库与上传文件（运行时生成）
 │   ├── pyproject.toml    # uv 依赖
@@ -170,4 +170,4 @@ docker compose up -d          # 自动拉取最新镜像并启动
 cd backend && uv run pytest
 ```
 
-覆盖自动判分、试卷生成、Excel 解析、验证码、限流等（30+ 用例）。
+覆盖自动判分、试卷生成、Excel 解析与导入、鉴权与数据范围、限流、并发、迁移脚本等（600+ 用例）。

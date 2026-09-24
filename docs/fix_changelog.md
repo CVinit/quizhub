@@ -625,3 +625,94 @@ SMTP 认证必然失败；而 `/system/smtp/test` 又把发送放进 `Background
 - `tests/test_migration_robustness.py` 增加 users NOCASE 重建的两条回归；`tests/test_excel.py` 增加单选/多选答案形状两条。
 - 因行为按设计变更而调整（原测试固化了旧行为）：`test_send_returns_early_when_host_missing` → `test_send_raises_when_host_missing`；`test_mail_fallback_...` → 经 `send_safely` 验证失败路径不泄露 PII；`test_backup_database_prunes_old_auto_backups` 改用真实 SQLite 库。
 - 领域错误迁移后，测试断言统一为 `pytest.raises((DomainError, HTTPException))` / `except (DomainError, HTTPException)`，兼容依赖层仍抛 `HTTPException` 的场景。
+
+---
+
+## 后端全面评审修复（/backend-code-review，2026-09-24）
+
+> 范围：`backend/app` 全部模块 + `backend/scripts` 迁移 + 测试质量项
+> 方式：逐条读码 + 隔离临时库实跑复现（复现脚本未入库）
+> 验证：`ruff check` 全绿、`mypy app` 无问题、`pytest -q` 全通过
+> 完整报告：[docs/backend_review_2026-09-24.md](backend_review_2026-09-24.md)
+
+### 一、Critical（10 项）
+
+| # | 问题 | 修复 |
+| --- | --- | --- |
+| C1 | 删除分组把「仅指派给该分组」的考试 `group_ids` 清成 `[]`，而空指派 = 全员可见 → 该考试静默对所有人开放 | `group_service._strip_group_from_assignments`：剔除后为空时保留悬空 id（fail-closed）并记 WARNING；包含关系判定改用 `json_each` 下推 SQL |
+| C2 | 图形验证码的 SVG 是答案的确定性函数（用答案作伪随机种子）→ 离线枚举 10⁴ 个答案建「图像→答案」反查表即可 100% 破解 | `core/captcha.py`：干扰线/抖动/噪点改用 `random.SystemRandom()`，同一答案每次渲染不同 |
+| C3 | 用户导入模板自带 `lisi@example.com / 部门管理员 / Abc@12345` 示例行且可被导入 | `utils/user_excel.py`：示例行邮箱加 `EXAMPLE_PREFIX` 前缀并在解析时跳过；示例口令留空作第二道防线；说明页补充提示 |
+| C4 | 手工选题（`manual_questions`）不在删题守卫内：删题后考试永久无法开考/发布 | `question_service`：`delete_question`/`delete_bank` 增加手工选题引用统计（`json_each`）→ 409 |
+| C5 | 题库导入按物理行截断、却用 `total >= PARSE_ROW_MAX` 反推截断 → 前置空行时静默丢数据且不报截断 | `utils/excel.py`：上限改按**数据行**计数并在 break 处显式返回 `truncated`；`import_service` 直接消费该标记 |
+| C6 | `create_exam`/`update_exam` 不校验 `paper_template_id` / `manual_questions` 存在性 → 外键 IntegrityError → 500 / 落库不可开考的考试 | 新增 `_validate_paper_template` / `_validate_manual_questions`；`_commit_exam` 把 IntegrityError 映射为 400 |
+| C7 | `create_user` / `register` 的 check-then-insert 未兜底唯一约束 → 并发同邮箱 500 | 两处 commit 包 `except IntegrityError → rollback → 400`；`register` 的邮箱重复检查提前到消费验证码之前（不再白烧验证码） |
+| C8 | 已交卷待复核（scoring + 有成绩）的会话，`start_exam` 仍返回可续答卷面，但任何作答都被拒 | `exam/sessions.py`：该状态返回 409「本场考试已交卷，成绩待公布或复核」 |
+| C9 | `migrate_2026_09_23_stats_exam_columns.py` 表重建无事务：中断后表缺失、数据滞留 `_old`，重跑报「无需处理」 | 重建与恢复都包显式 `BEGIN…COMMIT`；新增 `needs_recovery()` / `recover_interrupted_rebuild()` 兜底 |
+| C10 | 填空题答案空位数少于题干空位数仍判合法 → 存下永远判错的题 | `utils/excel.py`：按 `_{2,}` 统计题干空位数并交叉校验，不一致则行级报错 |
+
+### 二、Suggestions（10 项）
+
+| # | 问题 | 修复 |
+| --- | --- | --- |
+| S1 | 拖拽题重复左项被静默覆盖 → 不可作答的题 | 解析期检测重复左项 → 行级报错 |
+| S2 | 判断题不接受 Excel 布尔单元格与 `TRUE`/`False` | 归一化为大写并映射 bool |
+| S3 | 「今日活跃」在作答路径（按 `cnt`）与刷新路径（按源行存在）口径不一致 | `refresh_user_daily` 改用当日练习**源行数**判定 |
+| S4 | `create_question` 不校验答案字母是否在选项范围内（与 Excel 路径不一致） | `_validate_answer_shape(qtype, answer, options)` 增加范围校验 |
+| S5 | `admin_overview` 每次请求把全部 formal 考试载入 Python | 子集判定下推 SQL（`json_each` + `NOT EXISTS`） |
+| S6 | `_strip_group_from_assignments` 在写事务内全表加载两张表 | 改用 `json_each` 只取命中行 |
+| S7 | `save_draft` 的每用户草稿上限是 check-then-insert | 上限判定并入 INSERT 的 SELECT（原子），`rowcount == 0` → 400 |
+| S8 | `publish_exam` 无状态前置校验 → 重复点击重复群发通知 | 仅 `draft → published` 迁移时发通知 |
+| S9 | mock 定义复用忽略 `show_analysis` | 复用分支同步更新该列 |
+| S10 | 幂等重复交卷把「未公布」一律报成「含简答待复核」 | 按 `need_review`/`overtime` 分支，与 `get_result` 同口径 |
+
+### 三、Nits（10 项）
+
+| # | 问题 | 修复 |
+| --- | --- | --- |
+| N1 | `user_service.py` 631 行、五类职责 | 拆出 `services/user_import_service.py`（`import_users` + 预取常量），`user_service` 降至 487 行 |
+| N2 | `max_questions_per_exam` 死配置仍在管理端展示 | 从 `DEFAULT_SETTINGS` / 标签表 / 校验分支移除；新增 `migrate_2026_09_24.py` 清理存量行 |
+| N3 | `db_backup` 备份名与清理 glob 可能分叉 → 清理失效、备份无界增长 | 抽出 `_backup_path()` 供写入与清理共用；`_BACKUP_RE` 不再绑定 `.db` 扩展名 |
+| N4 | 模板「所属分组ID」列从不解析（模板承诺不生效） | 解析该列 + 服务层校验存在性/数据范围/与题库分组一致，非法行在预览可见 |
+| N5 | 部门管理员改 `rules` 时被存量 `paper_template_id` 误判 403 | 仅当 payload 真正提交该字段时才做模板检查 |
+| N6 | 测试 Liar：断言不成立或从未到达目标分支 | 改写 8 处（mock 归属查询、mock 清理、最后超管守卫、重复复核、分层守卫、练习上限/题库范围、SPA fallback 404、时间口径镜像） |
+| N7 | 缺失的授权负向测试 | 补 7 组：分组增删 scope、题库/题目 scope、复核列表越界、跨用户作答、部门管理员越界分配、模板路由守卫矩阵、logo 路由 |
+| N8 | `conftest` 用 `setdefault` 设 `TRAINING_ENC_KEY` → 503 用例依赖环境 | 用例内 monkeypatch 该常量 |
+| N9 | `migrate_2026_08_28` 重建 FK 缺 `ON DELETE CASCADE`；事务内 `PRAGMA foreign_keys=ON` 是 no-op | 补 CASCADE；改为 commit 后再重开外键 |
+| N10 | 上轮报告「仅 5 项未落地」的复查判据粒度到文件，漏判 7 条 | 在 09-23 报告追加第八节更正，并改用「逐条定位到行」的判据 |
+
+### 四、产品决策（2026-09-24 已确认，不改动）
+
+- `GET /api/admin/exam-results?outcome=failed` **刻意包含**未公布/待复核的成绩：
+  `passed` 只在公布时被置 True，因此 `passed IS FALSE` 天然包含「尚未公布」，与
+  `outcome=pending` 的重叠是有意为之（管理员要一屏看到所有目前未通过的人）。
+  已在 `services/exam/admin.list_results` 的 docstring 与
+  `tests/test_admin_status_filters.py` 的计数断言注释中记录该决策，避免下次复查再被误报。
+  若日后改为只统计已公布的不及格：`failed` 分支加 `ExamResult.published.is_(True)`，
+  断言从 2 改为 1。
+
+### 五、本轮验证
+
+```bash
+cd backend
+.venv/bin/python -m ruff check app scripts tests           # All checks passed!
+.venv/bin/python -m ruff format --check app scripts tests  # 134 files already formatted
+.venv/bin/python -m mypy app                               # Success: no issues found in 74 source files
+.venv/bin/python -m pytest -q                              # 642 passed（基线 609 passed）
+```
+
+### 六、测试改写过程中新发现并修复
+
+| # | 问题 | 修复 |
+| --- | --- | --- |
+| N11 | 路径参数指定的题库不存在时返回 **400** 而非 404：`_get_allowed_bank` 统一抛 400，使 `update_bank`/`delete_bank` 中紧随其后的 `if b is None: raise 404` 永不可达 | 给 helper 增加 `missing_status`：路径参数来源传 `NOT_FOUND`，请求体引用保持 400；补 404 断言 |
+
+### 七、迁移链集成验证（对开发库 `data/training.db` 的副本按启动顺序跑 3 轮）中发现并修复
+
+| # | 问题 | 影响 | 修复 |
+| --- | --- | --- | --- |
+| M1 | `migrate_2026_09_18.py` 把 `exam_count` / `exam_score_sum` / `exam_pass_count` 硬编码进合并 UPDATE，而这三列已被 `migrate_2026_09_23_stats_exam_columns.py` 删除 | **第二次启动即迁移失败**（`no such column: exam_count`）；entrypoint 用 `set -e` → 容器起不来 | 待累加列改为按表实际 schema 取交集（新增 `_sum_columns`）；补 `test_09_18_runs_after_exam_columns_were_removed` 与 legacy schema 累加用例 |
+| M2 | 09_23 重建 `stats_user_daily` 时在 DROP old 表之前创建索引；SQLite 的 `ALTER TABLE … RENAME` 会把原索引名带到 old 表上 → `index ix_stats_date_user already exists`（本轮改造引入） | 迁移中断（有事务保护，已回滚，数据不丢） | 索引创建移到 DROP old 之后（新增 `_create_indexes`）；补 `test_09_23_stats_rebuild_preserves_rows_and_indexes` 与中断恢复用例 |
+
+验证结论：连跑 3 轮全部成功且幂等；`stats_user_daily` 考试类列移除、索引按模型重建；
+`max_questions_per_exam` 遗留行清理；`PRAGMA integrity_check` = ok、`foreign_key_check` 为空、
+用户/题目/考试行数不变。
