@@ -22,8 +22,28 @@ logger = logging.getLogger("quizhub")
 
 DEFAULT_BACKUP_KEEP = 5
 
-# 仅匹配本模块生成的备份名：<db>.bak-YYYYmmddHHMMSS。人工命名的备份不匹配，因此不会被清理。
-_BACKUP_RE = re.compile(r"\.db\.bak-\d{14}$")
+# 仅匹配本模块生成的备份名：<库文件名>.bak-YYYYmmddHHMMSS（与扩展名无关，
+# 因为库文件不一定叫 *.db）。人工命名的备份（如 .db.bak-before-repair）不匹配，不会被清理。
+_BACKUP_RE = re.compile(r"\.bak-\d{14}$")
+
+
+def _backup_path(db_path: Path, *, when: datetime | None = None) -> Path:
+    """自动备份文件路径：`<库文件名>.bak-<14 位时间戳>`。
+
+    写入与清理必须共用本函数。原先写入用 `Path.with_suffix(".db.bak-…")`（会**替换**
+    后缀），清理却按 `<db_path.name>.bak-*` 匹配：库名不是 `*.db` 时两者分叉
+    （`training.sqlite` 写出 `training.db.bak-*`，清理匹配 0 个），自动备份无界增长 ——
+    正是本模块要消除的故障。
+
+    Args:
+        db_path: 数据库文件路径。
+        when: 时间戳来源（测试可注入）；默认当前时间。
+
+    Returns:
+        备份文件路径。
+    """
+    stamp = (when or datetime.now()).strftime("%Y%m%d%H%M%S")
+    return db_path.parent / f"{db_path.name}.bak-{stamp}"
 
 
 def backup_database(db_path: Path, *, keep: int = DEFAULT_BACKUP_KEEP) -> Path | None:
@@ -39,7 +59,7 @@ def backup_database(db_path: Path, *, keep: int = DEFAULT_BACKUP_KEEP) -> Path |
     """
     if not db_path.exists():
         return None
-    backup = db_path.with_suffix(f".db.bak-{datetime.now().strftime('%Y%m%d%H%M%S')}")
+    backup = _backup_path(db_path)
     # 必须用 SQLite 在线备份 API，不能只复制主库文件：本库启用了 WAL
     # （database.py 的 `PRAGMA journal_mode=WAL`，且该属性持久化在库文件中），
     # 已提交但未 checkpoint 的事务只存在于 -wal 边车文件里（进程被 kill 后是常态），

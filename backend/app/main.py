@@ -33,6 +33,11 @@ logger = logging.getLogger("quizhub")
 # （存储型 XSS）。上传侧已不接受 .svg，这里再兜住历史遗留文件。
 _PUBLIC_BLOCKED_SUFFIXES = (".svg",)
 
+# 前端构建产物目录。抽成模块级常量是为了可测试：SPA fallback 与其中的路径遍历守卫
+# 只在 `dist` 存在时才注册，测试可用 monkeypatch 指向临时目录来真正覆盖这两个分支
+# （原实现把路径写在 create_app 内部，未构建前端的检出里相关用例是恒真的）。
+FRONTEND_DIST = Path(__file__).resolve().parent.parent.parent / "frontend" / "dist"
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -133,7 +138,7 @@ def create_app() -> FastAPI:
         app.mount("/files", StaticFiles(directory=FILES_DIR), name="files")
 
     # 前端静态资源托管（dist 构建产物）
-    dist = Path(__file__).resolve().parent.parent.parent / "frontend" / "dist"
+    dist = FRONTEND_DIST
     if dist.exists():
         app.mount("/assets", StaticFiles(directory=dist / "assets"), name="assets")
         for sub in ("img", "fonts"):

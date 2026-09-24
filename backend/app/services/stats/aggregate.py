@@ -158,6 +158,9 @@ def refresh_user_daily(db: Session, user_id: int, date_str: str) -> int:
     day_start, day_end = _day_bounds_utc(date_str)
     pr = db.execute(
         select(
+            # 当日练习源行数（含尚未自评的简答，is_correct IS NULL）：活跃判定用它，
+            # 不能复用下面的 cnt —— 详见下方「活跃判定」注释。
+            func.count(PracticeRecord.id).label("rows"),
             func.sum(func.iif(PracticeRecord.is_correct.is_not(None), 1, 0)).label("cnt"),
             func.sum(func.iif(PracticeRecord.is_correct.is_(True), 1, 0)).label("ok"),
             func.sum(func.iif(PracticeRecord.is_correct.is_(False), 1, 0)).label("bad"),
@@ -184,7 +187,11 @@ def refresh_user_daily(db: Session, user_id: int, date_str: str) -> int:
 
     # 无源数据也要清理旧聚合，避免删除/更正源数据后继续展示旧结果
     db.execute(delete(StatsUserDaily).where(StatsUserDaily.user_id == user_id, StatsUserDaily.date == date_str))
-    if not pr.cnt and not exam_active:
+    # 活跃判定与 refresh_daily 同口径：只要有当日的练习源行就算活跃（refresh_daily 用
+    # `set(practice_map)`，即"存在任意 practice_records 行"）。原实现用 `pr.cnt`（只计
+    # 已判定对错的记录），于是「只答了一道简答题」的用户在作答路径不写聚合行（非活跃），
+    # 而手动/启动刷新却会写一行（活跃）—— 同一份数据两条路径给出相反结论。
+    if not pr.rows and not exam_active:
         db.commit()
         return 0
 

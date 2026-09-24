@@ -127,8 +127,8 @@ def migrate_exam_question_unique(conn: sqlite3.Connection) -> None:
             seq INTEGER NOT NULL DEFAULT 0,
             score FLOAT NOT NULL DEFAULT 2,
             shuffle_map JSON,
-            CONSTRAINT fk_exam_def FOREIGN KEY (exam_definition_id) REFERENCES exam_definitions (id),
-            CONSTRAINT fk_question FOREIGN KEY (question_id) REFERENCES questions (id)
+            CONSTRAINT fk_exam_def FOREIGN KEY (exam_definition_id) REFERENCES exam_definitions (id) ON DELETE CASCADE,
+            CONSTRAINT fk_question FOREIGN KEY (question_id) REFERENCES questions (id) ON DELETE CASCADE
         )
         """
     )
@@ -140,8 +140,11 @@ def migrate_exam_question_unique(conn: sqlite3.Connection) -> None:
         "SELECT id, exam_definition_id, question_id, seq, score, shuffle_map FROM exam_questions_old"
     )
     conn.execute("DROP TABLE exam_questions_old")
-    conn.execute("PRAGMA foreign_keys=ON")
+    # 必须先结束事务再重开外键：`PRAGMA foreign_keys` 在事务内执行是**静默 no-op**
+    # （实测：事务内执行后 pragma 仍为 0），会让上面的 OFF 延续到连接结束，
+    # 之后任何写操作都失去外键校验。migrate_2026_09_16.py 也是先 commit 再重开。
     conn.commit()
+    conn.execute("PRAGMA foreign_keys=ON")
     logger.info("[migrate] uq_exam_question 已创建")
 
 

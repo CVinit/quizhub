@@ -124,11 +124,16 @@ def start_exam(db: Session, user: User, exam_id: int) -> dict:
         # in_progress，等于绕过了 30 分钟保护，考生可在结算中途重新作答/改答案。
         if ongoing.status == "scoring":
             has_result = db.execute(select(ExamResult.id).where(ExamResult.exam_session_id == ongoing.id)).first()
-            if not has_result:
-                _recover_stuck_scoring(db, user_id=user.id)
-                db.refresh(ongoing)
-                if ongoing.status != "in_progress":
-                    raise DomainError(CONFLICT, "试卷正在结算中，请稍后重试")
+            if has_result:
+                # 已交卷且成绩已落库（含简答待复核、或 show_score_immediately=False 的
+                # 待公布）：此时若照旧返回卷面，会把考生放回考试界面并重新开始倒计时，
+                # 但任何作答都会被 submit_answer 以「考试已结束，无法作答」拒绝 —— 属于
+                # 自相矛盾的可用性缺陷。这里直接返回终态，由前端提示等待公布/复核。
+                raise DomainError(CONFLICT, "本场考试已交卷，成绩待公布或复核")
+            _recover_stuck_scoring(db, user_id=user.id)
+            db.refresh(ongoing)
+            if ongoing.status != "in_progress":
+                raise DomainError(CONFLICT, "试卷正在结算中，请稍后重试")
         return _session_payload(db, ongoing, e)
 
     # 未结束的会话也算占用次数

@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import math
+import re
 from io import BytesIO
 from typing import Any
 from xml.etree.ElementTree import ParseError
@@ -109,14 +110,21 @@ def build_template() -> BytesIO:
         ["选项格式", "单选/多选：每个选项一行，形如 A.选项内容\\nB.选项内容\\nC.选项内容"],
         ["答案格式-单选", "单个字母，如 A"],
         ["答案格式-多选", "多字母连写，如 ABC（不分先后）"],
-        ["答案格式-判断", "正确 或 错误"],
-        ["答案格式-填空", "按空位顺序，空与空之间用 | 分隔；每空若有多个等价答案用 / 分隔。如 答案1/答案1b|答案2"],
+        ["答案格式-判断", "正确 或 错误（也接受 对/错、TRUE/FALSE）"],
+        [
+            "答案格式-填空",
+            "按空位顺序，空与空之间用 | 分隔；每空若有多个等价答案用 / 分隔。如 答案1/答案1b|答案2。"
+            "空位数必须与题干中连续下划线（____）的数量一致",
+        ],
         ["答案格式-简答", "参考答案长文本（不计入自动判分，由人工/自评）"],
-        ["答案格式-拖拽", "题项与正确容器列：每行一对，格式 题项:正确容器，多对换行分隔"],
+        [
+            "答案格式-拖拽",
+            "题项与正确容器列：每行一对，格式 题项:正确容器，多对换行分隔；同一左项不可重复",
+        ],
         ["难度", "1（易）/2（中）/3（难），默认 2"],
         ["知识点标签", "多个标签用英文逗号分隔，如 OpenStack,网络"],
         ["分值", "数字，默认 2"],
-        ["所属分组ID", "可留空，留空时使用上传时选择的分组"],
+        ["所属分组ID", "可留空；留空时使用上传时选择的分组，填写则按行覆盖（需为存在的分组）"],
         ["", ""],
         ["转换 Prompt（供豆包/DeepSeek 将 Word 题库转为本 Excel）：", ""],
         [
@@ -221,6 +229,7 @@ def parse_workbook(buf: BytesIO) -> UploadPreview:
     type_dist: dict[str, int] = {}
 
     matched_sheet = False
+    truncated = False
     try:
         for sheet_name in SHEET_ORDER:
             if sheet_name not in wb.sheetnames:
@@ -240,23 +249,27 @@ def parse_workbook(buf: BytesIO) -> UploadPreview:
                     }
                 )
                 continue
+            data_rows = 0
             for r_idx, row in enumerate(row_iter, start=2):
-                if r_idx > PARSE_ROW_MAX + 1:
-                    break
                 # 模板内置示例行（题干带 EXAMPLE_PREFIX）不是真实数据，直接跳过
                 if row and str(row[0] or "").strip().startswith(EXAMPLE_PREFIX):
                     continue
                 if not row or all(c is None or str(c).strip() == "" for c in row):
                     continue
+                # 行数上限按**数据行**计数（空行/示例行不占额度），并在丢弃时显式置位
+                # `truncated`：原实现按物理行 break，调用方却用 `total >= PARSE_ROW_MAX`
+                # 反推截断 —— 前置空行时会静默丢弃后面的数据行且不报截断（已实跑复现）。
+                if data_rows >= PARSE_ROW_MAX:
+                    truncated = True
+                    break
+                data_rows += 1
                 parsed = _parse_row(sheet_name, row, r_idx)
                 rows.append(parsed)
                 if parsed.valid:
                     type_dist[sheet_name] = type_dist.get(sheet_name, 0) + 1
                 else:
                     errors.append({"sheet": sheet_name, "row": r_idx, "error": parsed.error})
-                if len(rows) >= PARSE_ROW_MAX:
-                    break
-            if len(rows) >= PARSE_ROW_MAX:
+            if truncated:
                 break
     finally:
         wb.close()
@@ -276,6 +289,7 @@ def parse_workbook(buf: BytesIO) -> UploadPreview:
         total=len(rows),
         type_dist=type_dist,
         errors=errors,
+        truncated=truncated,
         all_rows=rows,
     )
 
@@ -365,13 +379,20 @@ def _parse_row(sheet_name: str, row: tuple, r_idx: int) -> UploadPreviewRow:
                 answer = "".join(sorted(ans)) if qtype == "多选题" else ans
 
     elif not error and qtype == "判断题":
-        ans = str(answer_raw or "").strip()
-        if ans in ("正确", "对", "A", "T", "true", "是"):
-            answer = "正确"
-        elif ans in ("错误", "错", "B", "F", "false", "否"):
-            answer = "错误"
+        # openpyxl 读 Excel 布尔单元格返回 Python bool（用户输入 TRUE/FALSE 会被 Excel
+        # 自动转成布尔），文本 "TRUE"/"False" 也很常见。原实现直接与含小写 "true"/"false"
+        # 的字面量集合比较，这两类写法都被判为非法、只有小写 "true" 能通过；而单选题
+        # 分支做了 .upper() 归一化 —— 两条分支口径不一致。这里统一为大写归一 + bool 映射。
+        if isinstance(answer_raw, bool):
+            answer = "正确" if answer_raw else "错误"
         else:
-            error = "判断题答案必须是 正确/错误"
+            ans = str(answer_raw or "").strip().upper()
+            if ans in ("正确", "对", "A", "T", "TRUE", "是"):
+                answer = "正确"
+            elif ans in ("错误", "错", "B", "F", "FALSE", "否"):
+                answer = "错误"
+            else:
+                error = "判断题答案必须是 正确/错误"
 
     elif not error and qtype == "填空题":
         ans = str(answer_raw or "").strip()
@@ -384,6 +405,14 @@ def _parse_row(sheet_name: str, row: tuple, r_idx: int) -> UploadPreviewRow:
             # 每个空位都必须至少有一个可选答案，否则该空永远判错（题目实际不可作答）
             if any(not alternatives for alternatives in answer):
                 error = "填空答案格式错误：每个空位至少需要一个可选答案（用 / 分隔等价答案）"
+            else:
+                # 空位数必须与题干空位数一致：前端按题干里连续下划线数量渲染输入框
+                # （useAnswerDraft 的 /_{2,}/g），判分要求 len(correct_answer) ==
+                # len(user_answer)（grading._grade_fill）。答案少写一个空位会存下一道
+                # 永远判错的题，而预览不报错（已实跑复现），因此在解析阶段就拦下。
+                expected_blanks = _count_blanks(question_text)
+                if len(answer) != expected_blanks:
+                    error = f"答案空位数({len(answer)})与题干空位数({expected_blanks})不一致"
 
     elif not error and qtype == "简答题":
         ans = str(answer_raw or "").strip()
@@ -394,18 +423,28 @@ def _parse_row(sheet_name: str, row: tuple, r_idx: int) -> UploadPreviewRow:
     elif not error and qtype == "拖拽题":
         pairs_text = str(answer_raw or "").strip()
         left_items, right_items, mapping = [], [], {}
+        duplicated: list[str] = []
         for line in pairs_text.splitlines():
             line = line.strip()
             if not line or ":" not in line:
                 continue
             left, right = line.split(":", 1)
             left, right = left.strip(), right.strip()
-            if left and right:
-                left_items.append(left)
-                right_items.append(right)
-                mapping[left] = right
+            if not (left and right):
+                continue
+            if left in mapping:
+                # 左项重复时 mapping 会被覆盖，而 left_items/right_items 仍逐行追加，
+                # 于是「映射数量 < 左项数量」：判分要求两者长度相等（grading._grade_drag），
+                # 该题永远判错，而预览显示 valid。原实现静默覆盖第一对配对。
+                duplicated.append(left)
+                continue
+            left_items.append(left)
+            right_items.append(right)
+            mapping[left] = right
         if not mapping:
             error = "拖拽题题项与正确容器解析为空（格式应为 题项:正确容器，每行一对）"
+        elif duplicated:
+            error = f"拖拽题左项重复：{'、'.join(sorted(set(duplicated)))}"
         else:
             options = None
             answer = mapping
@@ -413,9 +452,10 @@ def _parse_row(sheet_name: str, row: tuple, r_idx: int) -> UploadPreviewRow:
     difficulty = _to_int(cells, _col_index(sheet_name, "难度"), default=2, lo=1, hi=3)
     score, score_error = _parse_score(cells, _col_index(sheet_name, "分值"))
     tags = _parse_tags(cells, _col_index(sheet_name, "知识点标签"))
+    group_id, group_error = _parse_row_group_id(cells, _col_index(sheet_name, "所属分组ID"))
     analysis_col = _col_index(sheet_name, "解析")
     analysis = str(cells[analysis_col] or "").strip() if analysis_col < len(cells) else ""
-    error = error or score_error
+    error = error or score_error or group_error
 
     return UploadPreviewRow(
         type=qtype,
@@ -428,10 +468,52 @@ def _parse_row(sheet_name: str, row: tuple, r_idx: int) -> UploadPreviewRow:
         difficulty=difficulty,
         tags=tags,
         score=score,
+        group_id=group_id,
         row_index=r_idx,
         valid=not error,
         error=error,
     )
+
+
+def _count_blanks(question_text: str) -> int:
+    """统计题干中的空位数（连续 2 个及以上下划线算一个空）。
+
+    与前端渲染输入框的口径一致（`frontend/src/composables/useAnswerDraft.ts` 的 `/_{2,}/g`）。
+    题干没有下划线时按 1 个空处理，兼容「答案不在题干中留空位」的写法。
+
+    Args:
+        question_text: 题干原文。
+
+    Returns:
+        空位数（至少 1）。
+    """
+    return len(re.findall(r"_{2,}", question_text)) or 1
+
+
+def _parse_row_group_id(cells: list, col: int) -> tuple[int | None, str]:
+    """解析「所属分组ID」为 (分组 id, 行级错误)；留空表示沿用上传时选择的分组。
+
+    该列直接决定题目归属，非法值必须按行报错而不是静默忽略：静默忽略会把题目落到上传时
+    选择的（可能是别的部门的）分组，而管理员从预览上看不出来。
+
+    Args:
+        cells: 该行的单元格列表。
+        col: 「所属分组ID」列索引。
+
+    Returns:
+        (分组 id 或 None, 错误文案；无错误时为空串)。
+    """
+    if col >= len(cells) or cells[col] in (None, ""):
+        return None, ""
+    raw = str(cells[col]).strip()
+    try:
+        # float() 中转：兼容 Excel 里以数值形式存在的 id；"inf"/"1e400" 会抛 OverflowError。
+        value = int(float(raw))
+    except (ValueError, TypeError, OverflowError):
+        return None, f"所属分组ID 必须是正整数：{raw!r}"
+    if value <= 0:
+        return None, f"所属分组ID 必须是正整数：{raw!r}"
+    return value, ""
 
 
 def _parse_options(text: str) -> list[str]:

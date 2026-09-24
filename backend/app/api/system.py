@@ -164,7 +164,6 @@ _LABELS = {
     "brand_color": "主题色",
     "default_pass_score": "默认及格线",
     "default_exam_duration_min": "默认考试时长(分钟)",
-    "max_questions_per_exam": "单场最大题数",
     "mock_keep_definitions": "模拟考试保留的未提交试卷数",
     "upload_max_size_mb": "上传大小上限(MB)",
     "upload_allowed_ext": "允许上传扩展名",
@@ -195,7 +194,6 @@ def _value_type(key: str) -> str:
     if key in (
         "default_pass_score",
         "default_exam_duration_min",
-        "max_questions_per_exam",
         "mock_keep_definitions",
         "upload_max_size_mb",
         "smtp_port",

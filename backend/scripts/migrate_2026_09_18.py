@@ -39,6 +39,10 @@ logging.basicConfig(level=logging.INFO, format="%(message)s")
 logger = logging.getLogger("quizhub.migrate")
 
 _TABLE = "stats_user_daily"
+# 待累加的计数/分数列。**按表实际存在的列取交集后使用**（见 _sum_columns）：
+# `exam_count` / `exam_score_sum` / `exam_pass_count` 已被
+# migrate_2026_09_23_stats_exam_columns.py 移除，硬编码会在第二次启动时抛
+# `no such column: exam_count` → 迁移失败；而 entrypoint 用 `set -e`，容器直接起不来。
 _SUM_COLUMNS = (
     "answer_count",
     "correct_count",
@@ -49,6 +53,19 @@ _SUM_COLUMNS = (
 )
 _PARTIAL_INDEX = "uq_user_daily_ungrouped"
 _REDUNDANT_INDEXES = ("ix_stats_user_daily_user_id", "ix_stats_user_daily_date")
+
+
+def _sum_columns(conn: sqlite3.Connection) -> list[str]:
+    """返回该表实际存在的待累加列（与 `_SUM_COLUMNS` 取交集）。
+
+    Args:
+        conn: SQLite 连接。
+
+    Returns:
+        存在的列名列表（保持 `_SUM_COLUMNS` 的顺序）。
+    """
+    present = {row[1] for row in conn.execute(f"PRAGMA table_info({_TABLE})").fetchall()}  # noqa: S608
+    return [column for column in _SUM_COLUMNS if column in present]
 
 
 def _count_duplicate_groups(conn: sqlite3.Connection) -> int:
@@ -69,13 +86,29 @@ def _count_removable_rows(conn: sqlite3.Connection) -> int:
 
 
 def merge_ungrouped_duplicates(conn: sqlite3.Connection) -> int:
-    """把未分组重复行合并到 id 最大的一行，返回删除的行数。"""
+    """把未分组重复行合并到 id 最大的一行，返回删除的行数。
+
+    待累加的列由 `_sum_columns` 按实际 schema 决定：对已被 09_23 迁移重建过的库
+    （无考试类聚合列）也必须能跑，否则第二次启动即失败。
+
+    Args:
+        conn: SQLite 连接。
+
+    Returns:
+        删除的重复行数。
+    """
+    columns = _sum_columns(conn)
+    if not columns:
+        # 理论不可达（answer/correct/wrong_count 两个版本都有）；保守跳过而不是
+        # 在「不能累加」的情况下直接删行，避免丢计数。
+        logger.warning("[migrate] %s 没有可累加的计数列，跳过重复行合并", _TABLE)
+        return 0
     keep_condition = f"id IN (SELECT MAX(id) FROM {_TABLE} WHERE group_id IS NULL GROUP BY user_id, date)"
     sums = ",\n            ".join(
         f"{column} = {column} + COALESCE((SELECT SUM(d.{column}) FROM {_TABLE} d "
         f"WHERE d.user_id = {_TABLE}.user_id AND d.date = {_TABLE}.date "
         f"AND d.group_id IS NULL AND d.id < {_TABLE}.id), 0)"
-        for column in _SUM_COLUMNS
+        for column in columns
     )
     removed = _count_removable_rows(conn)
     # 先累加求和，再删重复行：顺序不能反，否则会丢计数

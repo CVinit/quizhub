@@ -20,7 +20,7 @@ from app.core.errors import DomainError
 from app.core.preview_cache import BoundedTTLCache
 from app.core.security import MAX_PASSWORD_BYTES, hash_password
 from app.core.status import BAD_REQUEST, FORBIDDEN
-from app.utils.excel import MAX_CELL_CHARS, headers_match, open_workbook, validate_workbook_archive
+from app.utils.excel import EXAMPLE_PREFIX, MAX_CELL_CHARS, headers_match, open_workbook, validate_workbook_archive
 
 HEADERS = ["邮箱", "姓名", "角色", "初始密码", "状态", "分组ID"]
 
@@ -76,15 +76,18 @@ def build_template() -> BytesIO:
     widths = [32, 20, 14, 18, 12, 16]
     for i, w in enumerate(widths, 1):
         ws.column_dimensions[get_column_letter(i)].width = w
-    # 示例行
-    ws.append(["zhangsan@example.com", "张三", "普通用户", "", "正常", ""])
-    ws.append(["lisi@example.com", "李四", "部门管理员", "Abc@12345", "正常", "3"])
+    # 示例行：邮箱带 EXAMPLE_PREFIX，解析时整行跳过（与题库模板同一机制）。
+    # 同时把初始密码留空作为第二道防线 —— 万一跳过逻辑回归失效，这两行也会因
+    # 「初始密码不能为空」被判为无效，不会建出一个口令写在模板文件里的管理员账号。
+    ws.append([f"{EXAMPLE_PREFIX}zhangsan@example.com", "张三", "普通用户", "", "正常", ""])
+    ws.append([f"{EXAMPLE_PREFIX}lisi@example.com", "李四", "部门管理员", "", "正常", "3"])
 
     # 说明 Sheet
     ws2 = wb.create_sheet("说明")
     notes = [
         ["用户导入模板说明", ""],
         ["", ""],
+        ["示例行", f"邮箱带 {EXAMPLE_PREFIX} 前缀的示例行不会被导入，可直接在下方追加数据行"],
         ["邮箱", "必填，唯一；重复邮箱该行失败"],
         ["姓名", "可留空，留空时取邮箱 @ 前缀"],
         ["角色", "普通用户 / 部门管理员 / 超级管理员，留空默认普通用户"],
@@ -211,19 +214,24 @@ def preview(content: bytes, user_id: int) -> dict:
             if not headers_match(header, HEADERS):
                 errors.append({"row": 1, "email": "", "error": "表头与模板不一致，请下载最新模板后重新填写"})
             else:
+                data_rows = 0
                 for r_idx, row in enumerate(row_iter, start=2):
-                    if r_idx > _IMPORT_ROW_MAX + 1:
-                        truncated = True
-                        break
+                    # 模板内置示例行（邮箱带 EXAMPLE_PREFIX）不是真实数据，直接跳过：
+                    # 否则用户不删示例行就会把它当成真实用户导入（示例曾带管理员角色与口令）。
+                    if row and str(row[0] or "").strip().startswith(EXAMPLE_PREFIX):
+                        continue
                     if not row or all(c is None or str(c).strip() == "" for c in row):
                         continue
+                    # 上限按**数据行**计数：原实现按物理行 break，前置空行时会误报
+                    # 「超过单次导入上限」（已实跑复现：5000 空行 + 5 个真实用户也报超限）。
+                    if data_rows >= _IMPORT_ROW_MAX:
+                        truncated = True
+                        break
+                    data_rows += 1
                     parsed = _parse_row(row, r_idx)
                     rows.append(parsed)
                     if not parsed["valid"]:
                         errors.append({"row": r_idx, "email": parsed["email"], "error": parsed["error"]})
-                    if len(rows) >= _IMPORT_ROW_MAX:
-                        truncated = True
-                        break
         else:
             # 工作簿里没有「用户」Sheet（表名写错/用了别的模板）：必须给出可见错误，
             # 否则预览会静默返回 0 行，用户完全不知道原因

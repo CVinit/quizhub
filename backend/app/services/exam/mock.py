@@ -368,6 +368,10 @@ def start_mock_exam(
         if _mock_rules_key(e.rules or {}) == key:
             # 范围与配额以本次设置为准（管理员后来关闭某题库时，复用中的定义也须收敛）
             e.rules = rules
+            # show_analysis 不在复用键里（它不影响题目组成），但考生交卷后是否回显解析
+            # 由该列决定（scoring.submit_exam 读 e.show_analysis）：不一起更新就会出现
+            # 「本次勾了回显、却按旧定义的设置不回显」。
+            e.show_analysis = bool(show_analysis)
             db.commit()
             _cleanup_stale_mock_defs(db, user.id, keep_id=e.id, keep=keep_limit)
             return start_exam(db, user, e.id)

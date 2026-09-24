@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from sqlalchemy import delete, select, update
+import logging
+
+from sqlalchemy import delete, exists, func, select, update
 from sqlalchemy.orm import Session
 
 from app.core.deps import subtree_ids
@@ -15,6 +17,8 @@ from app.models.exam import ExamDefinition, PaperTemplate
 from app.models.group import GROUP_TYPE, Group, UserGroup
 from app.models.user import User
 from app.schemas.group import GroupCreate, GroupUpdate
+
+logger = logging.getLogger("quizhub")
 
 # 单一来源：复用模型层常量，避免分组类型白名单在两处漂移
 GROUP_TYPES = GROUP_TYPE
@@ -120,30 +124,54 @@ def delete_group(db: Session, group_id: int) -> None:
     # PRAGMA foreign_keys=ON 下直接删除会 FOREIGN KEY constraint failed → 500。
     # 显式置空既修复该路径，也让行为与模型声明一致。
     db.execute(update(User).where(User.dept_group_id == group_id).values(dept_group_id=None))
-    # 清理考试/模板指派里的悬空 JSON 引用：group_ids 是无外键的 JSON 数组，删除分组后
-    # 残留的 id 会让 `_expand_groups` 找不到分组、而该分组的 user_groups 又已被清空，
-    # 于是「只指派给这个分组的考试」对所有人静默不可见；管理端还会显示一个不在组织树
-    # 里的分组 id。此外 SQLite 会复用被删的最大 rowid，新建分组可能继承旧 id 从而
-    # 意外获得旧考试的可见性 —— 清掉引用后该风险一并消除。
+    # 剔除考试/模板指派里的悬空 JSON 引用（group_ids 是无外键的 JSON 数组）。注意
+    # 剔除后**不能为空**：空指派 = 全员可见，会让「只指派给本分组」的考试静默升级为
+    # 对所有人开放；剔除会删空时保留悬空 id（不可见，fail-closed）并记 WARNING，
+    # 具体口径见 `_strip_group_from_assignments` 的 docstring。
     _strip_group_from_assignments(db, group_id)
     db.delete(g)
     db.commit()
 
 
+def _rows_assigning_group(db: Session, model, group_id: int) -> list:
+    """返回 group_ids 中含 `group_id` 的考试/模板行（SQL 侧用 json_each 判定包含）。
+
+    原实现把两张表全量物化为 ORM 对象再在 Python 里逐行比较：在持有 SQLite 写锁的
+    delete_group 事务内，考试/模板增长后会长时间占锁阻塞其它写请求。
+    """
+    json_values = func.json_each(model.group_ids).table_valued("value")
+    stmt = select(model).where(
+        model.group_ids.is_not(None),
+        exists(select(1).select_from(json_values).where(json_values.c.value == group_id)),
+    )
+    return list(db.execute(stmt).scalars().all())
+
+
 def _strip_group_from_assignments(db: Session, group_id: int) -> None:
     """从考试与试卷模板的指派分组中移除某个分组 id（JSON 列需整体赋新值）。
 
-    两个模型分别处理（而非遍历 `(ExamDefinition, PaperTemplate)`）：后者会让类型检查
-    只看到公共基类 `PKMixin`，`group_ids` 属性不可见。
+    **不变式：绝不能把 group_ids 清空。** 空指派在 `_user_can_access_exam` /
+    `exam_in_scope` 里表示「不限（全员可见）」，而「只指派给被删分组」的考试一旦变成
+    `[]`，就会从「仅该分组可见」静默升级为「所有人可见」—— 这是 fail-open 的信息泄露
+    （已实跑复现）。因此剔除后若为空，保留悬空 id（该考试对所有人不可见，fail-closed），
+    并记 WARNING 提示管理员重新指派。
+
+    悬空 id 的副作用是 SQLite 复用被删分组 rowid 时新分组会继承可见性；该风险远小于
+    「对全员开放」，且删除分组本身会提示管理员重新指派，故按 fail-closed 处理。
     """
-    for row in db.execute(select(ExamDefinition).where(ExamDefinition.group_ids.is_not(None))).scalars().all():
-        ids = list(row.group_ids or [])
-        if group_id in ids:
-            row.group_ids = [gid for gid in ids if gid != group_id]
-    for tpl in db.execute(select(PaperTemplate).where(PaperTemplate.group_ids.is_not(None))).scalars().all():
-        ids = list(tpl.group_ids or [])
-        if group_id in ids:
-            tpl.group_ids = [gid for gid in ids if gid != group_id]
+    for model, label in ((ExamDefinition, "考试"), (PaperTemplate, "试卷模板")):
+        for row in _rows_assigning_group(db, model, group_id):
+            remaining = [gid for gid in (row.group_ids or []) if gid != group_id]
+            if not remaining:
+                logger.warning(
+                    "[group] %s #%s 的指派分组被删空（仅指派给分组 %s），已保留悬空 id 以维持"
+                    "「不可见」；请管理员重新指派，避免其变成全员可见",
+                    label,
+                    row.id,
+                    group_id,
+                )
+                continue
+            row.group_ids = remaining
 
 
 def _would_cycle(db: Session, new_parent: int, group_id: int) -> bool:

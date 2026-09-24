@@ -160,7 +160,18 @@ def submit_exam(db: Session, user: User, session_id: int) -> dict:
                 "overtime": existing.overtime,
             }
         if existing and not existing.published:
-            return {"need_review": True, "message": "含简答题，待管理员复核后公布成绩", "overtime": existing.overtime}
+            # 与 get_result 同口径区分「待复核 / 超时作废 / 待公布」：原实现把任何未公布
+            # 成绩都报成「含简答题，待管理员复核」，而 show_score_immediately=False 或
+            # 超时作废的成绩根本没有复核项，两个接口对同一份成绩给出矛盾解释。
+            if existing.need_review:
+                return {
+                    "need_review": True,
+                    "message": "含简答题，待管理员复核后公布成绩",
+                    "overtime": existing.overtime,
+                }
+            if existing.overtime:
+                return {"need_review": False, "overtime": True, "message": "本次考试超时，成绩作废（不计分）"}
+            return {"need_review": False, "message": "成绩待管理员公布"}
         raise DomainError(BAD_REQUEST, "考试已结束")
 
     # 锁定成功后，answers 必须以数据库当前值为准：本函数入口的 db.get(ExamSession) 读到的是

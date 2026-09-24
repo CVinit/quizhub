@@ -12,7 +12,7 @@ from sqlalchemy.sql.elements import ColumnElement
 from app.core.errors import DomainError
 from app.core.like import ESCAPE_CHAR, like_pattern
 from app.core.status import BAD_REQUEST, CONFLICT, FORBIDDEN, NOT_FOUND
-from app.models.exam import ExamQuestion
+from app.models.exam import ExamDefinition, ExamQuestion
 from app.models.group import Group
 from app.models.question import QUESTION_TYPE, Question, QuestionBank, QuestionTag
 from app.models.record import PracticeRecord, QuestionState
@@ -57,26 +57,57 @@ def _validate_group(db: Session, group_id: int | None, scope: set[int] | None) -
         raise DomainError(FORBIDDEN, "题目必须归属在可管理分组内")
 
 
-def _get_allowed_bank(db: Session, bank_id: int | None, scope: set[int] | None) -> QuestionBank | None:
+def _get_allowed_bank(
+    db: Session,
+    bank_id: int | None,
+    scope: set[int] | None,
+    *,
+    missing_status: int = BAD_REQUEST,
+) -> QuestionBank | None:
+    """按 id 取题库并做数据范围校验。
+
+    Args:
+        db: 数据库会话。
+        bank_id: 题库 id；None 表示「未指定题库」，直接返回 None。
+        scope: 调用者数据范围；None（super_admin）表示全量。
+        missing_status: 题库不存在时使用的状态码。**路径参数**来源（`PUT`/`DELETE`
+            `/admin/question-banks/{id}`）传 `NOT_FOUND`（404）；**请求体**引用
+            （创建/更新题目时指定 `bank_id`）保持 `BAD_REQUEST`（400）——
+            「目标资源不存在」与「请求体非法」是两回事。
+
+    Returns:
+        题库对象；`bank_id` 为 None 时返回 None。
+
+    Raises:
+        DomainError: `missing_status`（题库不存在）或 403（无权操作该题库）。
+    """
     if bank_id is None:
         return None
     bank = db.get(QuestionBank, bank_id)
     if not bank:
-        raise DomainError(BAD_REQUEST, "题库不存在")
+        raise DomainError(missing_status, "题库不存在")
     if scope is not None and (bank.group_id is None or bank.group_id not in scope):
         raise DomainError(FORBIDDEN, "无权操作该题库")
     return bank
 
 
-def _validate_answer_shape(qtype: str, answer: object) -> None:
+def _validate_answer_shape(qtype: str, answer: object, options: list | None = None) -> None:
     """按题型校验答案形状，拒绝空答案（防止填空/拖拽空答案经 grade() 恒真被判满分）。
 
-    - 单选：非空单字符字符串（含一个字母）
-    - 多选：非空字符串（一个或多个字母）
+    - 单选：非空单字符字符串（含一个字母），且必须落在选项集范围内
+    - 多选：非空字符串（一个或多个字母），且必须落在选项集范围内
     - 判断：'正确' 或 '错误'
     - 填空：非空 list 且每个空为非空 list[str]
     - 简答：非空字符串
     - 拖拽：非空 dict
+
+    Args:
+        qtype: 题型（QUESTION_TYPES 之一）。
+        answer: 答案（多态，见各分支）。
+        options: 选择题的选项列表；非空时校验答案字母是否在范围内（与 Excel 导入路径同口径）。
+
+    Raises:
+        DomainError: 400，答案形状非法或超出选项范围。
     """
     if qtype in ("单选题", "多选题"):
         if not isinstance(answer, str) or not answer.strip():
@@ -89,6 +120,18 @@ def _validate_answer_shape(qtype: str, answer: object) -> None:
             raise DomainError(BAD_REQUEST, "单选题答案必须是一个选项字母（如 A）")
         if not letters.isalpha() or not letters.isascii():
             raise DomainError(BAD_REQUEST, "选择题答案必须是选项字母（如 A 或 ABC）")
+        # 答案字母必须落在选项集内：Excel 导入路径按选项集校验（utils/excel._parse_row），
+        # 手动创建此前只校验「是不是字母」，于是 options=["甲","乙"] + answer="Z" 能入库，
+        # 存下一道永远判错的题。
+        if isinstance(options, list) and options:
+            valid_letters = {chr(ord("A") + i) for i in range(len(options))}
+            out_of_range = sorted(set(letters) - valid_letters)
+            if out_of_range:
+                raise DomainError(
+                    BAD_REQUEST,
+                    f"答案 {'/'.join(out_of_range)} 超出选项范围（共 {len(options)} 个选项，最大 "
+                    f"{max(valid_letters)}）",
+                )
     elif qtype == "判断题":
         if answer not in ("正确", "错误"):
             raise DomainError(BAD_REQUEST, "判断题答案必须是 正确/错误")
@@ -104,6 +147,31 @@ def _validate_answer_shape(qtype: str, answer: object) -> None:
     elif qtype == "拖拽题":  # noqa: SIM102  类型分派，嵌套 if 比合并成 and 更清晰
         if not isinstance(answer, dict) or not answer:
             raise DomainError(BAD_REQUEST, "拖拽题答案映射不能为空")
+
+
+def _count_exams_referencing_questions(db: Session, qids: list[int]) -> int:
+    """统计「手工选题」中引用了这些题目的考试数（ExamDefinition.manual_questions）。
+
+    删题守卫原先只统计 `exam_questions`（已固化的卷面），而手工选题的考试在**首次开考/
+    发布前**没有任何固化行，于是管理员能删掉它引用的题目：`manual_questions` 中残留不存在
+    的 id，该考试从此永久无法开考与发布（`_persist_exam_questions` 抛「考试包含不存在的
+    题目」），而管理端列表仍按 `len(manual_questions)` 显示题数（虚高）。
+
+    用 SQLite JSON1 的 json_each 做元素级匹配，避免把考试表全量载入 Python。
+    """
+    if not qids:
+        return 0
+    json_values = func.json_each(ExamDefinition.manual_questions).table_valued("value")
+    return int(
+        db.execute(
+            select(func.count())
+            .select_from(ExamDefinition)
+            .where(
+                ExamDefinition.manual_questions.is_not(None),
+                exists(select(1).select_from(json_values).where(json_values.c.value.in_(qids))),
+            )
+        ).scalar_one()
+    )
 
 
 # ---------- 题库来源 ----------
@@ -150,9 +218,13 @@ def create_bank(db: Session, payload: QuestionBankCreate, scope: set[int] | None
 
 
 def update_bank(db: Session, bank_id: int, payload: QuestionBankUpdate, scope: set[int] | None = None) -> QuestionBank:
-    """更新题库（改名 / 练习开关）。练习开关只影响后续练习入口，历史记录保留。"""
-    b = _get_allowed_bank(db, bank_id, scope)
-    if b is None:
+    """更新题库（改名 / 练习开关）。练习开关只影响后续练习入口，历史记录保留。
+
+    `bank_id` 来自路径参数，不存在时按 404 语义返回（原先 helper 统一抛 400，
+    紧随其后的 `if b is None: raise 404` 因此永不可达 —— 意图与实现不一致）。
+    """
+    b = _get_allowed_bank(db, bank_id, scope, missing_status=NOT_FOUND)
+    if b is None:  # 仅为类型收敛：bank_id 非 None，helper 已对不存在的 id 抛 404
         raise DomainError(NOT_FOUND, "题库不存在")
     if payload.name is not None:
         b.name = payload.name
@@ -166,21 +238,22 @@ def update_bank(db: Session, bank_id: int, payload: QuestionBankUpdate, scope: s
 def delete_bank(db: Session, bank_id: int, scope: set[int] | None = None) -> None:
     """删除题库及其题目。
 
-    若其中任一题目已被考试引用（exam_questions），拒绝删除以保持历史考试可追溯；
-    此时管理员可改用「关闭练习」。
+    若其中任一题目已被考试引用（exam_questions 或手工选题），拒绝删除以保持历史考试可追溯；
+    此时管理员可改用「关闭练习」。`bank_id` 来自路径参数，不存在时 404。
     """
-    b = _get_allowed_bank(db, bank_id, scope)
-    if b is None:
+    b = _get_allowed_bank(db, bank_id, scope, missing_status=NOT_FOUND)
+    if b is None:  # 仅为类型收敛：bank_id 非 None，helper 已对不存在的 id 抛 404
         raise DomainError(NOT_FOUND, "题库不存在")
     qids = [r[0] for r in db.execute(select(Question.id).where(Question.bank_id == bank_id)).all()]
     if qids:
         used = db.execute(
             select(func.count()).select_from(ExamQuestion).where(ExamQuestion.question_id.in_(qids))
         ).scalar_one()
-        if used:
+        manual = _count_exams_referencing_questions(db, qids)
+        if used or manual:
             raise DomainError(
                 CONFLICT,
-                f"该题库有 {used} 道题被考试引用，无法删除；可改为关闭练习",
+                f"该题库有 {used} 道题被考试卷面引用、{manual} 场考试的手工选题引用，无法删除；可改为关闭练习",
             )
         # 先取回被删作答的时间戳，再清理引用这些题目的练习状态，避免留下孤儿数据。
         # stats_user_daily 是 practice_records 的物化聚合，删除源行后必须重算对应日期，
@@ -249,7 +322,7 @@ def _ensure_tags(db: Session, tags: list[str]) -> None:
 def create_question(db: Session, payload: QuestionCreate, scope: set[int] | None = None) -> Question:
     if payload.type not in QUESTION_TYPES:
         raise DomainError(BAD_REQUEST, f"题型必须是 {QUESTION_TYPES} 之一")
-    _validate_answer_shape(payload.type, payload.answer)
+    _validate_answer_shape(payload.type, payload.answer, payload.options)
     _validate_group(db, payload.group_id, scope)
     bank = _get_allowed_bank(db, payload.bank_id, scope)
     if bank and bank.group_id is not None and bank.group_id != payload.group_id:
@@ -284,10 +357,12 @@ def update_question(db: Session, qid: int, payload: QuestionUpdate, scope: set[i
     data = payload.model_dump(exclude_unset=True)
     if "type" in data and data["type"] not in QUESTION_TYPES:
         raise DomainError(BAD_REQUEST, f"题型必须是 {QUESTION_TYPES} 之一")
-    # 改题型或改答案时校验答案形状（杜绝空答案进入题库被判满分）
+    # 改题型或改答案时校验答案形状（杜绝空答案进入题库被判满分）；
+    # 选项可能在同一请求里被替换，故按「本次生效的选项集」校验答案字母范围。
     effective_type = data.get("type", q.type)
+    effective_options = data.get("options", q.options)
     if "type" in data and "answer" not in data:
-        _validate_answer_shape(effective_type, q.answer)
+        _validate_answer_shape(effective_type, q.answer, effective_options)
     if "group_id" in data:
         _validate_group(db, data["group_id"], scope)
     bank = _get_allowed_bank(db, data.get("bank_id", q.bank_id), scope)
@@ -295,7 +370,7 @@ def update_question(db: Session, qid: int, payload: QuestionUpdate, scope: set[i
     if bank and bank.group_id is not None and bank.group_id != effective_group:
         raise DomainError(BAD_REQUEST, "题目分组必须与题库分组一致")
     if "answer" in data:
-        _validate_answer_shape(effective_type, data["answer"])
+        _validate_answer_shape(effective_type, data["answer"], effective_options)
     if data.get("tags"):
         _ensure_tags(db, data["tags"])
     # 白名单写入：不依赖 Pydantic schema 的字段列表兜底。
@@ -325,10 +400,12 @@ def delete_question(db: Session, qid: int, scope: set[int] | None = None) -> Non
     used = db.execute(
         select(func.count()).select_from(ExamQuestion).where(ExamQuestion.question_id == qid)
     ).scalar_one()
-    if used:
+    manual = _count_exams_referencing_questions(db, [qid])
+    if used or manual:
         raise DomainError(
             CONFLICT,
-            f"该题目被 {used} 场考试引用，无法删除；可将题目移出考试或改用关闭题库练习",
+            f"该题目被 {used} 场考试的卷面、{manual} 场考试的手工选题引用，无法删除；"
+            "可将题目移出考试或改用关闭题库练习",
         )
     # 清理引用该题的练习记录与题目状态，避免留下孤儿数据（与 delete_bank 口径一致）
     stamps = [

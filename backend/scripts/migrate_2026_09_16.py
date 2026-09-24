@@ -204,20 +204,28 @@ _INDEXES: list[tuple[str, str, str]] = [
     ("ix_user_groups_group_id", "user_groups", "group_id"),
     ("ix_audit_logs_actor", "audit_logs", "actor"),
     ("ix_audit_logs_action", "audit_logs", "action"),
-    ("ix_stats_user_daily_user_id", "stats_user_daily", "user_id"),
-    ("ix_stats_user_daily_date", "stats_user_daily", "date"),
+    # 注：`stats_user_daily` 的单列索引 ix_stats_user_daily_user_id / _date 已从模型移除
+    # （前者被 uq_user_daily 的前缀覆盖、后者被 ix_stats_date_user 覆盖，纯写放大），
+    # 这里不再重建；重建该表时会由 _PARTIAL_INDEX_DDL 补回部分唯一索引。
     ("ix_stats_user_daily_group_id", "stats_user_daily", "group_id"),
     ("ix_stats_date_user", "stats_user_daily", "date, user_id"),
 ]
 
 # 含 WHERE 子句的部分索引（_INDEXES 只能表达普通列清单，无法覆盖）。
-# 重建 exam_sessions 会随 DROP TABLE 删除它，必须在重建后显式补回，否则
-# 「同一用户同一考试仅一个进行中会话」的数据库级约束会永久丢失。
+# 重建表会随 DROP TABLE 删除它们，必须在重建后显式补回，否则对应的不变式会永久丢失：
+# - exam_sessions：同一用户同一考试仅一个进行中会话；
+# - stats_user_daily：group_id 为 NULL 的「未分组」行不受 uq_user_daily 保护（NULL 在唯一
+#   约束中互不相等），缺了这条部分唯一索引，重复刷新就会插出多行、按用户聚合时重复计分。
 _PARTIAL_INDEX_DDL: dict[str, str] = {
     "exam_sessions": (
         "CREATE UNIQUE INDEX IF NOT EXISTS uq_active_exam_session "
         "ON exam_sessions (exam_definition_id, user_id) "
         "WHERE status IN ('in_progress', 'scoring')"
+    ),
+    "stats_user_daily": (
+        "CREATE UNIQUE INDEX IF NOT EXISTS uq_user_daily_ungrouped "
+        "ON stats_user_daily (user_id, date) "
+        "WHERE group_id IS NULL"
     ),
 }
 

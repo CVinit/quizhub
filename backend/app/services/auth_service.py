@@ -11,6 +11,7 @@ from typing import cast
 
 from sqlalchemy import case, select, update
 from sqlalchemy.engine import CursorResult
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.core.background import BackgroundTaskQueue
@@ -152,12 +153,14 @@ def register(
         valid = {r[0] for r in db.execute(select(Group.id).where(Group.id.in_(gids))).all()}
         if set(gids) != valid:
             raise DomainError(BAD_REQUEST, "所选分组无效，请重新选择")
-    # 表单校验通过后再消费验证码
-    if not _consume_code(db, email, code):
-        raise DomainError(BAD_REQUEST, "验证码错误或已过期")
+    # 邮箱重复检查放在消费验证码之前：否则「邮箱已注册」这种必然失败的请求会白烧掉
+    # 用户刚收到的验证码，用户必须重新获取才能重试。
     existing = db.execute(select(User).where(User.email == email)).scalar_one_or_none()
     if existing:
         raise DomainError(BAD_REQUEST, "该邮箱已注册")
+    # 表单校验通过后再消费验证码
+    if not _consume_code(db, email, code):
+        raise DomainError(BAD_REQUEST, "验证码错误或已过期")
     user = User(
         email=email,
         password_hash=hash_password(password),
@@ -167,13 +170,21 @@ def register(
         email_verified=True,
     )
     db.add(user)
-    db.flush()  # 拿到 user.id 再写关联
-    if gids:
-        from app.models.group import UserGroup
+    try:
+        db.flush()  # 拿到 user.id 再写关联；email 唯一约束冲突在此处抛出
+        if gids:
+            from app.models.group import UserGroup
 
-        for gid in gids:
-            db.add(UserGroup(user_id=user.id, group_id=gid))
-    db.commit()
+            for gid in gids:
+                db.add(UserGroup(user_id=user.id, group_id=gid))
+        db.commit()
+    except IntegrityError as exc:
+        # 并发同邮箱注册（两个请求都通过了上面的 SELECT）时后到者会撞唯一约束：不兜底
+        # 会变成 500。此时验证码已被消费，属「一次性验证码 + 唯一约束」叠加的极窄竞态，
+        # 文案直接引导用户去登录，避免其反复重试。
+        db.rollback()
+        logger.warning("[auth] 注册写入违反唯一约束，已回滚：%s", type(exc).__name__)
+        raise DomainError(BAD_REQUEST, "该邮箱已注册，请直接登录") from exc
     db.refresh(user)
     return user
 

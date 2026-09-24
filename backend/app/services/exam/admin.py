@@ -7,12 +7,13 @@ from typing import cast
 
 from sqlalchemy import delete, exists, func, or_, select
 from sqlalchemy.engine import CursorResult
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.core.background import BackgroundTaskQueue
 from app.core.errors import DomainError
 from app.core.status import BAD_REQUEST, CONFLICT, FORBIDDEN, NOT_FOUND
-from app.models.exam import ExamDefinition, ExamQuestion
+from app.models.exam import ExamDefinition, ExamQuestion, PaperTemplate
 from app.models.group import Group, UserGroup
 from app.models.question import Question, QuestionBank
 from app.models.record import ExamResult, ExamSession, ShortAnswerReview
@@ -104,6 +105,47 @@ def _validate_exam_group_ids(db: Session, group_ids: list[int] | None, scope: se
             raise DomainError(FORBIDDEN, "无权指派该分组")
 
 
+def _validate_manual_questions(db: Session, manual_questions: list[int] | None) -> None:
+    """校验手工选题的 id 全部存在（与 `_validate_exam_group_ids` 同口径，对超管同样生效）。
+
+    原实现只让部门管理员经 `_validate_exam_question_scope` 间接碰到这些 id；超管提交不
+    存在的 id 会直接落库：管理端列表按 `len(manual_questions)` 显示题数（虚高），首次
+    开考/发布时才由 `_persist_exam_questions` 抛「考试包含不存在的题目」，该考试从此
+    永久无法开考与发布。
+    """
+    if not manual_questions:
+        return
+    existing = {row[0] for row in db.execute(select(Question.id).where(Question.id.in_(manual_questions))).all()}
+    missing = sorted(set(manual_questions) - existing)
+    if missing:
+        raise DomainError(BAD_REQUEST, f"所选题目不存在: {missing}")
+
+
+def _validate_paper_template(db: Session, paper_template_id: int | None) -> None:
+    """校验试卷模板存在。
+
+    `exam_definitions.paper_template_id` 是外键且运行期 `PRAGMA foreign_keys=ON`
+    （app/database.py），写入不存在的 id 会在 commit 抛 IntegrityError → 500（已实跑复现）。
+    """
+    if paper_template_id is None:
+        return
+    if db.get(PaperTemplate, paper_template_id) is None:
+        raise DomainError(BAD_REQUEST, "试卷模板不存在")
+
+
+def _commit_exam(db: Session, action: str) -> None:
+    """提交考试写入并把外键等约束冲突映射为 400，而不是 500。
+
+    除显式校验外仍有并发窗口（例如校验通过后模板被删除），故此处兜底。
+    """
+    try:
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        logger.warning("[exam] %s 写入违反约束，已回滚：%s", action, type(exc).__name__)
+        raise DomainError(BAD_REQUEST, "考试数据校验失败：关联的分组/模板/题目不存在") from exc
+
+
 def _validate_exam_question_scope(
     db: Session,
     manual_questions: list[int] | None,
@@ -161,8 +203,15 @@ def list_results(
     保留返回 list 的契约：前端按全部成绩做客户端关键字过滤，未引入分页控件，
     故不改变响应结构；性能瓶颈（逐行 db.get）已由 JOIN 消除。
 
-    outcome 为状态筛选（None=全部）：passed/failed 按是否及格，
-    pending 为待复核（need_review=True 且未公布），published 为已公布。
+    outcome 为状态筛选（None=全部）：
+    - `passed`：`passed IS TRUE`（已公布且过线）；
+    - `failed`：`passed IS FALSE` —— **刻意包含未公布/待复核的成绩**。`passed` 只在公布时
+      被置 True，因此「尚未公布」在业务上等价于「当前不算通过」，与 `pending` 的重叠是有意
+      为之（产品决策 2026-09-24 确认）：管理员需要一屏看到「所有目前未通过的人」，包括还没
+      复核完的。若日后改为只统计**已公布**的不及格，在此加 `ExamResult.published.is_(True)`
+      并同步 tests/test_admin_status_filters.py 的计数断言。
+    - `pending`：待复核（`need_review=True` 且未公布）；
+    - `published`：已公布。
     """
     from app.core.deps import user_ids_subquery
 
@@ -245,6 +294,10 @@ def create_exam(db: Session, payload, user: User, scope: set[int] | None = None)
     if scope is not None and payload.type != "formal":
         raise DomainError(FORBIDDEN, "部门管理员只能创建正式考试")
     _validate_exam_group_ids(db, payload.group_ids, scope)
+    # 手工选题与模板都要校验存在性：否则会在 commit 抛外键 IntegrityError（500），
+    # 或落库一个「题数虚高、永远无法开考」的考试（详见两个 helper 的 docstring）。
+    _validate_manual_questions(db, payload.manual_questions)
+    _validate_paper_template(db, payload.paper_template_id)
     _validate_exam_question_scope(db, payload.manual_questions, payload.rules, payload.paper_template_id, scope)
     _validate_exam_window(payload.start_at, payload.end_at)
     e = ExamDefinition(
@@ -266,7 +319,7 @@ def create_exam(db: Session, payload, user: User, scope: set[int] | None = None)
         created_by=user.id,
     )
     db.add(e)
-    db.commit()
+    _commit_exam(db, "create_exam")
     db.refresh(e)
     return {"id": e.id, "name": e.name, "status": e.status}
 
@@ -355,16 +408,24 @@ def update_exam(db: Session, exam_id: int, payload: dict, scope: set[int] | None
     _check_exam_scope(db, e, scope)
     if "group_ids" in payload:
         _validate_exam_group_ids(db, payload.get("group_ids"), scope)
+    if "manual_questions" in payload:
+        _validate_manual_questions(db, payload.get("manual_questions"))
+    if "paper_template_id" in payload:
+        _validate_paper_template(db, payload.get("paper_template_id"))
     # 只在**组卷来源真的发生变化**时校验题目范围：否则 `payload.get(f, e.f)` 会把
     # 超管配置的存量值（如全局模板）当成本次提交一并复检，使部门管理员连改个考试名
     # 都被 403 永久锁死（存量配置在它被创建时已校验过，无需重复校验）。
     source_changed = _source_fields_changed(e, payload)
     if source_changed:
+        # 模板 id 只在 payload 真正提交了该字段时才参与校验：若回落到库中存量值，
+        # 部门管理员改 rules/manual_questions 时会被 `_validate_exam_question_scope`
+        # 以「部门管理员不能使用全局试卷模板」误拒（该考试本就是超管用模板建的）。
+        template_in_payload = payload.get("paper_template_id")
         _validate_exam_question_scope(
             db,
             payload.get("manual_questions", e.manual_questions),
             payload.get("rules", e.rules),
-            payload.get("paper_template_id", e.paper_template_id),
+            template_in_payload,
             scope,
         )
 
@@ -422,7 +483,7 @@ def update_exam(db: Session, exam_id: int, payload: dict, scope: set[int] | None
     if pass_score_changed:
         _recompute_published_pass(db, exam_id, float(e.pass_score))
 
-    db.commit()
+    _commit_exam(db, "update_exam")
 
     # 作废成绩后重算受影响的每日聚合，避免排行/概览残留已作废的分数。
     # 破坏性清理已在上方 commit 落库：派生统计失败不应把它变成 500（否则管理员会
@@ -511,10 +572,13 @@ def publish_exam(
 
     if not _ensure_exam_questions(db, e):
         raise DomainError(BAD_REQUEST, "该考试没有可用题目，无法发布；请先配置组卷来源")
+    # 通知只在 draft→published 的迁移上发一次：本接口无状态前置校验时，重复点击「发布」
+    # （前端按钮双击、网络重试）会对范围内全部活跃用户重复群发考试通知邮件。
+    first_publish = e.status != "published"
     e.status = "published"
     db.commit()
     db.refresh(e)
-    if bg is not None:
+    if bg is not None and first_publish:
         # 只取邮箱列（不实例化 ORM 对象），并收敛为**一个**后台任务：
         # 原实现把全部活跃用户物化后逐人挂任务，任务数与内存随人数线性增长。
         email_stmt = select(User.email).where(User.status == "active")

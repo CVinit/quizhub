@@ -138,6 +138,9 @@ class UploadPreviewRow(BaseModel):
     difficulty: int = 2
     tags: list[str] | None = Field(None, max_length=MAX_ID_LIST_LEN)
     score: FiniteFloat = Field(2, ge=0)
+    # 模板「所属分组ID」列：留空表示沿用上传时选择的分组，非空时按行覆盖。
+    # 存在性/数据范围/与所选题库分组的一致性由 import_service 校验（utils 层不碰 db）。
+    group_id: int | None = None
     row_index: int
     valid: bool = True
     error: str = ""
@@ -148,6 +151,9 @@ class UploadPreview(BaseModel):
     total: int
     type_dist: dict[str, int]
     errors: list[RowError]
+    # 解析阶段触及行数上限、后续数据行被丢弃：由解析器在 break 处**显式**置位。
+    # 原实现用 `total >= PARSE_ROW_MAX` 反推截断，前置空行时会静默丢数据且不报截断。
+    truncated: bool = False
     # 完整解析结果（内部使用）。`rows` 只是给前端的 20 行预览切片；导入必须用这份
     # 完整数据，避免消费方重新解析同一份字节流而产生"两次解析口径不一致"的缺陷。
     # exclude=True：即使被当作 response_model 也不会出现在响应里（防响应体膨胀）。

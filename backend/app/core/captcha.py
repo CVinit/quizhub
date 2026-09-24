@@ -5,11 +5,17 @@
 - 单进程内存存储，id→(answer, expire_at, consumed)，3 分钟有效、单次消费。
 - 返回 (captcha_id, data_uri)，data_uri 是可直接 <img :src> 的 SVG。
 - 与 app/core/rate_limit 同为单进程方案；多 worker 需切 Redis。
+
+**渲染必须是每次实例随机的**：SVG 会原样返回给客户端，若渲染结果只由答案决定
+（例如拿答案当伪随机种子），攻击者离线枚举 10⁴ 个答案建「图像 → 答案」反查表即可
+100% 破解，人机校验形同虚设。因此干扰线/抖动/噪点一律用 `random.SystemRandom()`
+取值：同一答案每次渲染都不同，反查表不可用。
 """
 
 from __future__ import annotations
 
 import base64
+import random
 import secrets
 import threading
 import time
@@ -103,7 +109,12 @@ store = CaptchaStore()
 
 
 def _render_svg(answer: str) -> str:
-    """把 4 位数字渲染成带噪点/干扰线的 SVG 像素图，转 data-uri。"""
+    """把 4 位数字渲染成带噪点/干扰线的 SVG 像素图，转 data-uri。
+
+    所有扰动都取 `random.SystemRandom()`（不可预测、与答案无关），因此同一答案
+    每次渲染结果都不同 —— 这是防止「离线枚举答案建反查表」的关键，不能改回
+    由答案派生种子的伪随机。
+    """
     cell = 12  # 每像素 12px
     gap = 4  # 字符间距 px
     cols = 5
@@ -115,7 +126,7 @@ def _render_svg(answer: str) -> str:
     width = pad_x * 2 + len(answer) * char_w + (len(answer) - 1) * gap
     height = pad_y * 2 + char_h
 
-    rng = _SeededRng(answer)
+    rng = random.SystemRandom()
     parts: list[str] = [
         f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}">'
     ]
@@ -124,16 +135,18 @@ def _render_svg(answer: str) -> str:
 
     # 干扰线
     for _ in range(4):
-        x1, y1, x2, y2 = rng.line(width, height)
-        parts.append(f'<line x1="{x1}" y1="{y1}" x2="{x2}" y2="{y2}" stroke="{_BRAND}33" stroke-width="1"/>')
+        parts.append(
+            f'<line x1="{rng.randint(0, width)}" y1="{rng.randint(0, height)}" '
+            f'x2="{rng.randint(0, width)}" y2="{rng.randint(0, height)}" '
+            f'stroke="{_BRAND}33" stroke-width="1"/>'
+        )
 
     # 像素点阵
     for idx, ch in enumerate(answer):
         glyph = _DIGITS[int(ch)]
         ox = pad_x + idx * (char_w + gap)
         # 轻微随机垂直抖动，增加机器识别难度
-        jitter = rng.randint(-3, 3)
-        oy = pad_y + jitter
+        oy = pad_y + rng.randint(-3, 3)
         for r, row_bits in enumerate(glyph):
             for c, bit in enumerate(row_bits):
                 if bit == "1":
@@ -151,25 +164,3 @@ def _render_svg(answer: str) -> str:
     svg = "".join(parts)
     b64 = base64.b64encode(svg.encode("utf-8")).decode("ascii")
     return f"data:image/svg+xml;base64,{b64}"
-
-
-class _SeededRng:
-    """确定性伪随机（基于答案派生），仅用于干扰线/抖动定位，安全性来自 secrets 生成答案本身。"""
-
-    def __init__(self, seed: str) -> None:
-        self._state = 0
-        for ch in seed:
-            self._state = (self._state * 31 + ord(ch)) & 0xFFFFFFFF
-
-    def _next(self) -> int:
-        # 线性同余，够用于扰动坐标
-        self._state = (self._state * 1103515245 + 12345) & 0x7FFFFFFF
-        return self._state
-
-    def randint(self, lo: int, hi: int) -> int:
-        if hi <= lo:
-            return lo
-        return lo + (self._next() % (hi - lo + 1))
-
-    def line(self, w: int, h: int) -> tuple[int, int, int, int]:
-        return self.randint(0, w), self.randint(0, h), self.randint(0, w), self.randint(0, h)

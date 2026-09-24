@@ -2,14 +2,13 @@
 
 from __future__ import annotations
 
-from sqlalchemy import func, select
+from sqlalchemy import exists, func, select
 from sqlalchemy.orm import Session
 
 from app.models.question import Question
 from app.models.record import ExamResult, PracticeRecord, QuestionState
 from app.models.stats import StatsUserDaily
 from app.models.user import User
-from app.services.exam_service import exam_in_scope
 from app.services.stats.common import _date_str, _utcnow
 
 
@@ -151,7 +150,7 @@ def admin_overview(db: Session, scope: set[int] | None = None) -> dict:
     correct_answers = db.execute(correct_stmt).scalar() or 0
     accuracy = round(correct_answers / total_answers * 100) if total_answers else 0
 
-    # 正式考试数：与考试列表 / _check_exam_scope 共用 exam_in_scope（**子集**口径）。
+    # 正式考试数：与考试列表 / _check_exam_scope 共用 **子集** 口径。
     # 原实现用「有交集」判定：共同指派给多个部门的考试会被算进某个部门的概览，
     # 但该部门管理员既看不到它（列表按子集过滤）也改不了（操作前校验 403），
     # 概览数字与其可操作范围自相矛盾。
@@ -160,8 +159,23 @@ def admin_overview(db: Session, scope: set[int] | None = None) -> dict:
             db.execute(select(func.count(ExamDefinition.id)).where(ExamDefinition.type == "formal")).scalar() or 0
         )
     else:
-        exam_rows = db.execute(select(ExamDefinition.group_ids).where(ExamDefinition.type == "formal")).all()
-        total_exams = sum(1 for (gids,) in exam_rows if exam_in_scope(gids, scope))
+        # 子集判定下推到 SQL：`NOT EXISTS(value NOT IN scope)` 等价于
+        # `set(group_ids).issubset(scope)`（与 exam_in_scope 同口径），并要求 group_ids
+        # 非空（空指派 = 全员可见，不属于任何部门管理员的可操作范围）。
+        # 原实现把全部 formal 考试行（含 draft/archived）无 limit 载入 Python 再过滤，
+        # 每次概览请求都随考试总量线性增长。
+        json_values = func.json_each(ExamDefinition.group_ids).table_valued("value")
+        total_exams = (
+            db.execute(
+                select(func.count(ExamDefinition.id)).where(
+                    ExamDefinition.type == "formal",
+                    ExamDefinition.group_ids.is_not(None),
+                    func.json_array_length(ExamDefinition.group_ids) > 0,
+                    ~exists(select(1).select_from(json_values).where(json_values.c.value.notin_(scope))),
+                )
+            ).scalar()
+            or 0
+        )
 
     # 待复核简答：按可见用户过滤
     review_stmt = select(func.count(ShortAnswerReview.id)).where(ShortAnswerReview.verdict.is_(None))

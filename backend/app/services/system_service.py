@@ -38,7 +38,10 @@ DEFAULT_SETTINGS: dict[str, tuple[str, str, bool]] = {
     "brand_color": ("#E60012", "general", False),
     "default_pass_score": ("60", "exam", False),
     "default_exam_duration_min": ("90", "exam", False),
-    "max_questions_per_exam": ("100", "exam", False),
+    # 注：曾存在 `max_questions_per_exam`（「单场最大题数」）设置项，但全仓没有任何读取方
+    # —— 真正生效的是试卷模板自身的 config.max_questions（paper_service）。它在管理端
+    # 表现为一个改了没有任何效果的开关（误导性配置），已随本轮审查移除；存量 settings 行
+    # 由 scripts/migrate_2026_09_24.py 清理。
     # 每个用户保留的「未提交」模拟考试定义数：超出后清理最早的未提交考试，
     # 已交卷的模拟成绩不受影响（见 exam/mock._cleanup_stale_mock_defs）。
     # 上限 100 与 exam/mock.MOCK_KEEP_MAX 保持一致（本模块是低层模块，不反向 import exam 包）。
@@ -192,7 +195,7 @@ def _validate_value(key: str, value: str) -> None:
             raise ValueError("default_pass_score 必须是数字") from None
         if not math.isfinite(number) or not 0 <= number <= 100:
             raise ValueError("default_pass_score 必须在 0~100 之间")
-    elif key in {"default_exam_duration_min", "max_questions_per_exam", "mock_keep_definitions"}:
+    elif key in {"default_exam_duration_min", "mock_keep_definitions"}:
         # 消费方按 int() 解析（exam/mock.py 用 int(settings.get("default_exam_duration_min"))）。
         # 原先用 float() 校验会放行 "90.5"：保存返回 200，但用户开考时 int("90.5") 抛
         # ValueError → 500。校验口径必须与消费口径一致，否则错误在另一条链路才爆发。

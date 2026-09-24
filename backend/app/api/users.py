@@ -13,7 +13,7 @@ from app.database import get_db
 from app.models.user import ROLE_SUPER_ADMIN, ROLE_USER, User
 from app.schemas.group import UserGroupAssign
 from app.schemas.user import ResetPasswordIn, UserCreateIn, UserUpdate
-from app.services import user_service
+from app.services import user_import_service, user_service
 from app.utils import user_excel
 
 router = APIRouter(prefix="/admin/users", tags=["users"])
@@ -212,7 +212,7 @@ def import_users(
                 raise HTTPException(status.HTTP_403_FORBIDDEN, "仅超级管理员可创建管理员账号")
     rows = user_excel.consume_preview(confirm_token, user.id)
     scope = dept_scope_ids(db, user)
-    res = user_service.import_users(
+    res = user_import_service.import_users(
         db,
         user.id,
         rows,

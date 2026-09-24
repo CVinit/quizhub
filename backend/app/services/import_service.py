@@ -12,6 +12,7 @@ import uuid
 from dataclasses import dataclass
 from io import BytesIO
 
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.core.errors import DomainError
@@ -19,7 +20,7 @@ from app.core.preview_cache import BoundedTTLCache
 from app.core.status import BAD_REQUEST, FORBIDDEN
 from app.models.question import Question, QuestionBank
 from app.schemas.question import UploadImportResult, UploadPreview, UploadPreviewRow
-from app.utils.excel import PARSE_ROW_MAX, parse_workbook
+from app.utils.excel import parse_workbook
 
 
 @dataclass(frozen=True, slots=True)
@@ -60,9 +61,23 @@ def preview(
     # 原实现另起一次 `_full_rows()` 重新解析同一份字节流，不仅重复 CPU，还因为
     # 那条路径不做表头校验，使「被 parse_workbook 判定为表头不一致而跳过的行」
     # 仍然进入 valid_rows 并在 do_import 落库（列按位置读取 → 静默错列）。
-    valid_rows = [r for r in preview_obj.all_rows if r.valid]
-    # 解析阶段触及行数上限时如实上报（可能被截断）
-    truncated = preview_obj.total >= PARSE_ROW_MAX
+    rows = preview_obj.all_rows
+    # 模板「所属分组ID」列按行覆盖上传时选择的分组：逐行校验存在性、数据范围与题库分组
+    # 一致性。非法行标为无效并在预览里可见，不因单行错误拒掉整份文件。
+    _validate_row_groups(db, rows, _effective_bank_group_id(db, bank_id, group_id), scope)
+    valid_rows = [r for r in rows if r.valid]
+    # 行级分组校验会新增无效行，type_dist 必须按最终有效行重算，否则与 valid_count 不一致
+    type_dist: dict[str, int] = {}
+    for r in valid_rows:
+        type_dist[r.type] = type_dist.get(r.type, 0) + 1
+    errors = list(preview_obj.errors)
+    known = {(e["sheet"], e["row"]) for e in errors}
+    for r in rows:
+        if not r.valid and (r.type, r.row_index) not in known:
+            errors.append({"sheet": r.type, "row": r.row_index, "error": r.error})
+    # 解析阶段丢弃了超限数据行时如实上报（由解析器在 break 处显式置位，
+    # 不再用 `total >= PARSE_ROW_MAX` 反推 —— 前置空行时那个推导会漏报）。
+    truncated = preview_obj.truncated
 
     token = uuid.uuid4().hex
     _preview_cache.put(
@@ -79,8 +94,8 @@ def preview(
         "rows": preview_obj.rows,
         "total": preview_obj.total,
         "valid_count": len(valid_rows),
-        "type_dist": preview_obj.type_dist,
-        "errors": preview_obj.errors,
+        "type_dist": type_dist,
+        "errors": errors,
         "confirm_token": token,
         "truncated": truncated,
     }
@@ -112,6 +127,13 @@ def do_import(db: Session, confirm_token: str, user_id: int, scope: set[int] | N
     bank_name = entry.bank_name
     # 确认阶段再校验一次：预览与确认之间题库/分组归属可能已被改动
     _validate_scope(db, group_id, bank_id, scope)
+    # 每行的「所属分组ID」同样要复核：预览与确认之间分组可能被删除、调用者的数据范围
+    # 可能被调整。任一行的分组失效即整批拒绝（而不是静默落到上传时选择的分组），
+    # 由管理员重新预览确认。
+    _validate_row_groups(db, rows, _effective_bank_group_id(db, bank_id, group_id), scope)
+    invalid_row = next((r for r in rows if not r.valid), None)
+    if invalid_row is not None:
+        raise DomainError(BAD_REQUEST, f"第 {invalid_row.row_index} 行：{invalid_row.error}，请重新预览后再导入")
 
     # 没有指定既有题库时，按名称自动新建一个题库（同次上传即一个题库）
     if not bank_id:
@@ -155,7 +177,8 @@ def do_import(db: Session, confirm_token: str, user_id: int, scope: set[int] | N
             difficulty=r.difficulty,
             tags=r.tags,
             score=r.score,
-            group_id=question_group_id,
+            # 行内指定了「所属分组ID」则按行归属，否则沿用题库分组
+            group_id=r.group_id if r.group_id is not None else question_group_id,
         )
         pending.append(q)
         success += 1
@@ -182,6 +205,64 @@ def _validate_scope(db: Session, group_id: int | None, bank_id: int | None, scop
             raise DomainError(FORBIDDEN, "无权导入到该题库")
         if group_id is not None and bank.group_id is not None and group_id != bank.group_id:
             raise DomainError(BAD_REQUEST, "导入分组必须与题库分组一致")
+
+
+def _effective_bank_group_id(db: Session, bank_id: int | None, group_id: int | None) -> int | None:
+    """本次导入最终使用的题库分组（题目分组必须与之一致）。
+
+    - 指定既有题库：用题库自身的分组；该分组为 None（全局题库）时允许按行指定分组；
+    - 未指定题库（导入时自动新建）：用上传时选择的分组。
+
+    Args:
+        db: 数据库会话。
+        bank_id: 预览时选择的既有题库 id（可为空）。
+        group_id: 预览时选择的分组（可为空）。
+
+    Returns:
+        题库分组 id；全局题库返回 None。
+    """
+    if bank_id:
+        bank = db.get(QuestionBank, bank_id)
+        return bank.group_id if bank else None
+    return group_id
+
+
+def _validate_row_groups(
+    db: Session,
+    rows: list[UploadPreviewRow],
+    bank_group_id: int | None,
+    scope: set[int] | None,
+) -> None:
+    """校验每行「所属分组ID」（留空表示沿用上传时选择的分组）。
+
+    与 `question_service` 维护的不变量一致：题目分组必须与题库分组一致（题库有分组时）。
+    非法行被标记为无效并给出可见错误，其余行照常导入 —— 不因单行错误拒掉整份文件。
+    可重复调用（幂等）：确认导入时会再跑一次以覆盖预览与确认之间的变更。
+
+    Args:
+        db: 数据库会话。
+        rows: 解析出的行（就地标记 valid/error）。
+        bank_group_id: 本次导入使用的题库分组（见 `_effective_bank_group_id`）。
+        scope: 调用者的数据范围（None = 超管全量）。
+    """
+    from app.models.group import Group
+
+    requested = {r.group_id for r in rows if r.valid and r.group_id is not None}
+    existing: set[int] = set()
+    if requested:
+        existing = {row[0] for row in db.execute(select(Group.id).where(Group.id.in_(requested))).all()}
+    for r in rows:
+        if not r.valid or r.group_id is None:
+            continue
+        if r.group_id not in existing:
+            r.valid = False
+            r.error = f"所属分组ID {r.group_id} 不存在"
+        elif scope is not None and r.group_id not in scope:
+            r.valid = False
+            r.error = "无权导入到该分组"
+        elif bank_group_id is not None and r.group_id != bank_group_id:
+            r.valid = False
+            r.error = f"所属分组ID {r.group_id} 与题库分组 {bank_group_id} 不一致"
 
 
 def _ensure_unique_tags(db: Session, tags: list[str]) -> None:

@@ -5,10 +5,11 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, cast
 
-from sqlalchemy import func, or_, select
+from sqlalchemy import exists, func, literal, or_, select
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+from sqlalchemy.engine import CursorResult
 from sqlalchemy.orm import Session
 
 from app.core.deps import user_ids_subquery
@@ -141,25 +142,38 @@ def save_draft(db: Session, user_id: int, form_key: str, payload: dict) -> dict:
     `drafts` 上有 UNIQUE(user_id, form_key)：原实现是「先 SELECT 判存在、再 INSERT/UPDATE」，
     并发自动保存（多标签页 / 请求重试）会双双读到不存在、双双 INSERT，一方撞唯一约束抛
     IntegrityError → 500。这里用 SQLite 原生 upsert 把读改写收敛成一条原子语句。
-    """
-    # 仅对「新增 key」计数：覆盖已有草稿不受上限影响
-    exists = db.execute(select(Draft.id).where(Draft.user_id == user_id, Draft.form_key == form_key)).first()
-    if exists is None:
-        count = db.execute(select(func.count()).select_from(Draft).where(Draft.user_id == user_id)).scalar_one()
-        if count >= MAX_DRAFTS_PER_USER:
-            raise DomainError(
-                BAD_REQUEST,
-                f"草稿数量已达上限（{MAX_DRAFTS_PER_USER}），请先清理不再需要的草稿",
-            )
 
+    **条数上限同样必须原子**：原先「SELECT COUNT → 判断 → INSERT」在并发下会双双读到
+    count = MAX-1 并各自插入，越过唯一的上界。这里把判定放进 INSERT 的 SELECT 里，
+    由同一条语句内的 COUNT 决定是否产生行；`rowcount == 0` 即「新增被上限拒绝」
+    （覆盖已有 form_key 不受上限影响）。
+    """
     now = _now()
-    stmt = sqlite_insert(Draft).values(user_id=user_id, form_key=form_key, payload=payload, updated_at=now)
-    stmt = stmt.on_conflict_do_update(
-        index_elements=["user_id", "form_key"],
-        set_={"payload": payload, "updated_at": now},
+    existing_key = exists(select(Draft.id).where(Draft.user_id == user_id, Draft.form_key == form_key))
+    user_draft_count = select(func.count()).select_from(Draft).where(Draft.user_id == user_id).scalar_subquery()
+    stmt = (
+        sqlite_insert(Draft)
+        .from_select(
+            ["user_id", "form_key", "payload", "updated_at"],
+            select(
+                literal(user_id),
+                literal(form_key),
+                literal(payload, type_=Draft.__table__.c.payload.type),
+                literal(now),
+            ).where(or_(existing_key, user_draft_count < MAX_DRAFTS_PER_USER)),
+        )
+        .on_conflict_do_update(
+            index_elements=["user_id", "form_key"],
+            set_={"payload": payload, "updated_at": now},
+        )
     )
-    db.execute(stmt)
+    result = cast(CursorResult, db.execute(stmt))
     db.commit()
+    if result.rowcount == 0:
+        raise DomainError(
+            BAD_REQUEST,
+            f"草稿数量已达上限（{MAX_DRAFTS_PER_USER}），请先清理不再需要的草稿",
+        )
     return {"success": True, "updated_at": now}
 
 
