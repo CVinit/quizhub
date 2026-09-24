@@ -275,7 +275,9 @@ def test_mock_exam_end_to_end(api):
     submitted = api.post(f"/api/exams/session/{session_id}/submit", headers=headers)
     assert submitted.status_code == 200
     assert submitted.json()["total_count"] == 3
-    assert new_version >= 2
+    # 作答一次 = version 恰好 +1（乐观锁契约）；`>= 2` 对「一次作答把 version 翻好几倍」
+    # 或「起始 version 不是 1」都成立，无法发现并发/计数回归
+    assert new_version == version + 1
 
     result = api.get(f"/api/exams/session/{session_id}/result", headers=headers)
     assert result.status_code == 200
@@ -440,7 +442,12 @@ def test_student_cannot_start_exam_out_of_assigned_group(api):
 
 
 def test_practice_and_exam_ownership_guards(api):
-    """会话/成绩必须按 user_id 收敛：他人 session_id 一律 404。"""
+    """会话/成绩必须按 user_id 收敛：他人 session_id 一律 404。
+
+    含 `POST /answer`：它的归属守卫在 `exam/scoring.py` 的 `sess.user_id != user.id`，
+    与 detail/result/submit 各写一处，漏掉任何一处都等于把他人考卷开放给任意登录用户
+    （session_id 是自增整数，可直接枚举）。
+    """
     init_db()
     with SessionLocal() as db:
         _mk_bank_with_questions(db, simple=2)
@@ -452,7 +459,21 @@ def test_practice_and_exam_ownership_guards(api):
 
     started = api.post("/api/exams/mock/start", headers=owner_headers, json={"size": 2})
     session_id = started.json()["session_id"]
+    version = started.json()["version"]
+    question_id = started.json()["questions"][0]["id"]
 
     assert api.get(f"/api/exams/session/{session_id}/detail", headers=other_headers).status_code == 404
     assert api.get(f"/api/exams/session/{session_id}/result", headers=other_headers).status_code == 404
     assert api.post(f"/api/exams/session/{session_id}/submit", headers=other_headers).status_code == 404
+
+    # 越权作答必须 404（而不是 400/409：会话对他人根本不存在），且不得改动他人会话
+    hijack = api.post(
+        f"/api/exams/session/{session_id}/answer",
+        headers=other_headers,
+        json={"question_id": question_id, "answer": "A", "version": version},
+    )
+    assert hijack.status_code == 404, hijack.text
+    owner_view = api.get(f"/api/exams/session/{session_id}/detail", headers=owner_headers)
+    assert owner_view.status_code == 200
+    assert owner_view.json()["answers"] == {}, "他人作答不得写入我的会话"
+    assert owner_view.json()["version"] == version

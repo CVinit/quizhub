@@ -95,7 +95,33 @@ def test_parse_judgement_row():
     buf.seek(0)
     result = parse_workbook(buf)
     assert result.total == 1
-    assert result.rows[0].type == "判断题"
+    row = result.rows[0]
+    assert row.type == "判断题"
+    assert row.valid is True
+    assert row.answer == "正确"
+
+
+def test_parse_judgement_accepts_boolean_and_uppercase_cells():
+    """Excel 布尔单元格与文本 "TRUE"/"False" 都必须能解析。
+
+    用户输入 TRUE/FALSE 时 Excel 会存成布尔值（openpyxl 读出 Python bool），而原实现
+    直接与含小写 "true"/"false" 的字面量集合比较，这两类写法都被判为非法 —— 与单选题
+    分支的 `.upper()` 归一化口径不一致。
+    """
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "判断题"
+    ws.append(["题干", "答案", "解析", "难度", "知识点标签", "分值", "所属分组ID"])
+    ws.append(["布尔 TRUE", True, "", 1, "网络", 1, ""])
+    ws.append(["布尔 FALSE", False, "", 1, "网络", 1, ""])
+    ws.append(["文本 TRUE", "TRUE", "", 1, "网络", 1, ""])
+    ws.append(["文本 False", "False", "", 1, "网络", 1, ""])
+    buf = BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    result = parse_workbook(buf)
+    assert [r.answer for r in result.rows] == ["正确", "错误", "正确", "错误"]
+    assert all(r.valid for r in result.rows), [r.error for r in result.rows]
 
 
 def test_parse_fill_row():
@@ -103,13 +129,75 @@ def test_parse_fill_row():
     ws = wb.active
     ws.title = "填空题"
     ws.append(["题干", "答案", "解析", "难度", "知识点标签", "分值", "所属分组ID"])
-    ws.append(["TCP三次握手用__包", "SYN/同步|ACK", "", 2, "网络", 2, ""])
+    ws.append(["TCP三次握手用__包", "SYN/同步", "", 2, "网络", 2, ""])
     buf = BytesIO()
     wb.save(buf)
     buf.seek(0)
     result = parse_workbook(buf)
     assert result.total == 1
-    assert result.rows[0].type == "填空题"
+    row = result.rows[0]
+    assert row.type == "填空题"
+    assert row.valid is True
+    assert row.answer == [["SYN", "同步"]]
+
+
+def test_parse_fill_blank_count_mismatch_is_row_error():
+    """答案空位数必须与题干空位数一致，否则会存下永远判错的题。
+
+    判分要求 `len(correct_answer) == len(user_answer)`（grading._grade_fill），而前端按
+    题干里连续下划线的数量渲染输入框：答案少写一个空位时该题永远判错，原实现不报错。
+    """
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "填空题"
+    ws.append(["题干", "答案", "解析", "难度", "知识点标签", "分值", "所属分组ID"])
+    ws.append(["甲____与乙____分别是什么？", "甲答案|", "", 2, "网络", 2, ""])
+    buf = BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    result = parse_workbook(buf)
+    row = result.rows[0]
+    assert row.valid is False
+    assert "空位数" in row.error
+
+
+def test_parse_drag_duplicate_left_item_is_row_error():
+    """拖拽题左项重复必须报行级错误。
+
+    重复左项会让映射覆盖前一对（`mapping[left] = right`），而 left_items/right_items 仍
+    逐行追加，于是「映射数 < 左项数」——判分要求两者长度相等，该题实际不可作答。
+    """
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "拖拽题"
+    ws.append(["题干", "题项与正确容器", "解析", "难度", "知识点标签", "分值", "所属分组ID"])
+    ws.append(["HTTP 与 HTTPS 的默认端口", "HTTP:80\nHTTP:443", "", 2, "网络", 2, ""])
+    buf = BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    result = parse_workbook(buf)
+    row = result.rows[0]
+    assert row.valid is False
+    assert "重复" in row.error
+
+
+def test_parse_row_group_id_column():
+    """「所属分组ID」列必须被解析（原实现读都不读，模板承诺的按行指定分组不生效）。"""
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "单选题"
+    ws.append(["题干", "选项", "答案", "解析", "难度", "知识点标签", "分值", "所属分组ID"])
+    ws.append(["q1", "A.甲\nB.乙", "A", "", 2, "网络", 2, "7"])
+    ws.append(["q2", "A.甲\nB.乙", "A", "", 2, "网络", 2, "abc"])
+    ws.append(["q3", "A.甲\nB.乙", "A", "", 2, "网络", 2, ""])
+    buf = BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    result = parse_workbook(buf)
+    first, second, third = result.rows
+    assert first.group_id == 7
+    assert second.valid is False and "所属分组ID" in second.error
+    assert third.group_id is None  # 留空 = 沿用上传时选择的分组
 
 
 def test_parse_options_supports_pipe_separator():

@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+import ast
 import logging
 from pathlib import Path
 
@@ -27,7 +28,7 @@ from app.models.group import Group, UserGroup
 from app.models.question import Question, QuestionBank
 from app.models.system import AuditLog
 from app.models.user import User
-from app.services import exam_service, question_service, user_service
+from app.services import exam_service, question_service, user_import_service, user_service
 from app.utils.excel import HEADERS
 
 
@@ -72,13 +73,38 @@ def _headers(user: User) -> dict[str, str]:
 
 
 # ---------- 1. 分层：服务层不依赖 FastAPI ----------
+def _imports_fastapi(source: str) -> bool:
+    """AST 判定一段源码是否导入 fastapi（含子模块）。
+
+    原守卫只做子串匹配 `"import fastapi" in text`：最典型的写法
+    `from fastapi import Depends` 根本匹配不到，等于该守卫恒真、删掉真依赖也不报错。
+    """
+    tree = ast.parse(source)
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            if any(a.name == "fastapi" or a.name.startswith("fastapi.") for a in node.names):
+                return True
+        elif isinstance(node, ast.ImportFrom):
+            module = node.module or ""
+            if module == "fastapi" or module.startswith("fastapi."):
+                return True
+    return False
+
+
 def test_service_and_utils_layers_do_not_import_fastapi():
     """服务层/工具层不得 import fastapi：领域逻辑要能脱离传输框架复用与测试。"""
+    # 自证：检测器必须能识别各种真实写法，否则守卫会再次退化为恒真
+    assert _imports_fastapi("from fastapi import Depends\n") is True
+    assert _imports_fastapi("import fastapi\n") is True
+    assert _imports_fastapi("from fastapi.staticfiles import StaticFiles\n") is True
+    assert _imports_fastapi("import fastapi.testclient\n") is True
+    assert _imports_fastapi("from app.core.errors import DomainError\n") is False
+
     root = Path(__file__).resolve().parent.parent / "app"
     offenders = [
         str(path.relative_to(root.parent))
         for path in [*root.joinpath("services").rglob("*.py"), *root.joinpath("utils").rglob("*.py")]
-        if "import fastapi" in path.read_text(encoding="utf-8")
+        if _imports_fastapi(path.read_text(encoding="utf-8"))
     ]
     assert offenders == [], f"服务层/工具层不应依赖 FastAPI：{offenders}"
 
@@ -253,8 +279,14 @@ def test_upload_preview_rejects_overlong_bank_name(api):
 
 
 # ---------- 8. 未配置 ENC_KEY 时保存加密设置 ----------
-def test_settings_save_without_enc_key_returns_503(api):
-    """未配置 TRAINING_ENC_KEY 时保存敏感设置给 503 + 可操作提示，而不是 500。"""
+def test_settings_save_without_enc_key_returns_503(api, monkeypatch):
+    """未配置 TRAINING_ENC_KEY 时保存敏感设置给 503 + 可操作提示，而不是 500。
+
+    不能依赖「环境里恰好没设 TRAINING_ENC_KEY」：`conftest` 用的是
+    `os.environ.setdefault`，外部已 export 该变量时本用例会变成「保存成功」而失败。
+    直接 monkeypatch `app.core.security` 模块全局 —— 生产代码（`_fernet()`）读的就是它。
+    """
+    monkeypatch.setattr("app.core.security.SETTINGS_ENC_KEY", "")
     init_db()
     with db_session() as db:
         admin = _mk_user(db, "enc@quizhub.com")
@@ -277,7 +309,7 @@ def test_import_users_prefetches_group_ids_in_chunks(monkeypatch):
     单元格上限 1 万字符（约 2500 个 id/行）× 单次 5000 行，理论上能构造出数十万个候选 id，
     一条 `IN (...)` 会撞上 SQLite 的绑定参数上限（too many SQL variables → 整批 500）。
     """
-    monkeypatch.setattr(user_service, "_GID_PREFETCH_CHUNK", 1)
+    monkeypatch.setattr(user_import_service, "_GID_PREFETCH_CHUNK", 1)
     init_db()
     with db_session() as db:
         groups = [Group(name=f"g{i}", type="部门") for i in range(3)]
@@ -297,7 +329,7 @@ def test_import_users_prefetches_group_ids_in_chunks(monkeypatch):
                 "group_ids": group_ids,
             }
         ]
-        res = user_service.import_users(db, admin.id, rows, scope=None, actor_role="super_admin")
+        res = user_import_service.import_users(db, admin.id, rows, scope=None, actor_role="super_admin")
         assert res["success"] == 1
 
         user = db.execute(select(User).where(User.email == "chunked@quizhub.com")).scalar_one()

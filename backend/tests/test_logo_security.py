@@ -64,6 +64,38 @@ def client(tmp_path, monkeypatch):
         yield test_client, files_dir
 
 
+@pytest.fixture
+def spa_client(tmp_path, monkeypatch):
+    """客户端 + 临时前端 dist，用于覆盖 SPA fallback 与其中的路径遍历守卫。
+
+    仓库里的 `frontend/dist` 是构建产物且被 gitignore，CI 只装后端 —— 不 monkeypatch
+    时 `create_app()` 压根不会注册 `/{full_path:path}` 路由，任何 `/api/...` 未匹配路径
+    都由 Starlette 默认处理器返回 404：原用例于是恒真，删掉生产守卫也照样通过。
+    """
+    dist = tmp_path / "dist"
+    (dist / "assets").mkdir(parents=True)  # create_app 会无条件 mount /assets
+    (dist / "index.html").write_text("<!doctype html><title>SPA-FALLBACK</title>", encoding="utf-8")
+    monkeypatch.setattr("app.main.FRONTEND_DIST", dist)
+
+    files_dir = tmp_path / "files"
+    files_dir.mkdir()
+    monkeypatch.setattr("app.config.FILES_DIR", files_dir)
+    monkeypatch.setattr("app.api.system.FILES_DIR", files_dir)
+
+    app = create_app()
+
+    def override_db():
+        db = SessionLocal()
+        try:
+            yield db
+        finally:
+            db.close()
+
+    app.dependency_overrides[get_db] = override_db
+    with TestClient(app) as test_client:
+        yield test_client, dist
+
+
 def _upload(client: TestClient, token: str, filename: str, content: bytes, content_type: str):
     return client.post(
         "/api/system/logo",
@@ -143,11 +175,70 @@ def test_security_headers_present_on_normal_responses(client):
     assert response.headers["referrer-policy"] == "same-origin"
 
 
-def test_unknown_api_path_returns_404_not_200(client):
-    """未匹配的 /api 路径必须 404（原实现返回 200 + {"detail": "Not Found"}）。"""
-    test_client, _files_dir = client
+def test_unknown_api_path_returns_404_not_200(spa_client):
+    """未匹配的 /api 路径必须 404（原实现返回 200 + {"detail": "Not Found"}）。
+
+    必须挂上 SPA fallback 才有意义：`/{full_path:path}` 会把未匹配的 `/api/*` 吞掉，
+    生产守卫就在该路由里；没有 dist 时它不注册，本用例无法覆盖到被测代码。
+    """
+    test_client, _dist = spa_client
     init_db()
 
     response = test_client.get("/api/definitely-not-a-route")
 
     assert response.status_code == 404
+
+
+def test_spa_fallback_serves_index_and_blocks_traversal(spa_client):
+    """非 /api 的未知前端路由回退 index.html；任何路径遍历一律 404。
+
+    SPA 客户端路由依赖回退（否则刷新 /exam/1 会 404），但回退实现里
+    `target.relative_to(dist_resolved)` 的越界守卫与 `..` 显式拒绝都不能被绕过。
+    """
+    test_client, dist = spa_client
+    init_db()
+
+    # 未知前端路由 → 200 且返回 index.html
+    spa = test_client.get("/some/spa/route")
+    assert spa.status_code == 200, spa.text
+    assert "SPA-FALLBACK" in spa.text
+
+    # dist 内的真实文件仍按文件返回（回退不能把静态资源也换成 index.html）
+    asset = dist / "assets" / "app.js"
+    asset.write_text("console.log(1)", encoding="utf-8")
+    assert "SPA-FALLBACK" not in test_client.get("/assets/app.js").text
+
+    # 目录遍历：URL 编码的 ../ 与 %2e%2e 均须 404，不得读出 dist 之外的文件
+    for traversal in (
+        "/..%2f..%2fetc%2fpasswd",
+        "/%2e%2e%2f%2e%2e%2fetc%2fpasswd",
+        "/..%2fsecret.txt",
+        "/a/..%2f..%2fetc%2fpasswd",
+    ):
+        resp = test_client.get(traversal)
+        assert resp.status_code == 404, f"{traversal} → {resp.status_code}"
+
+
+def test_spa_fallback_dotdot_guard_rejects_parent_segments(spa_client):
+    """解码后含 `..` 片段的路径必须 404，不能只靠 relative_to 兜底。
+
+    必须用 `%2e%2e`（编码后的点）而不是字面 `..`：httpx/URL 标准会先做点段归一化，
+    字面 `..` 到不了服务端（`/assets/../index.html` 会被客户端改写成 `/index.html`），
+    那样测的就不是生产守卫而是客户端行为。编码形式到服务端才解码成 `..`：
+    - `/assets/%2e%2e/index.html` → 显式守卫命中 → 404；
+      若删掉 `".." in full_path.split("/")`，它会解析回 dist 内的 index.html 而返回 200。
+    - `/%2e%2e/secret.txt` → 解析后越出 dist → relative_to 兜底 → 404。
+    """
+    test_client, dist = spa_client
+    init_db()
+    # 在 dist 外放一个可读文件：越界请求即使被解析也不得读出内容
+    (dist.parent / "secret.txt").write_text("TOP-SECRET", encoding="utf-8")
+
+    for traversal in (
+        "/assets/%2e%2e/index.html",
+        "/a/%2e%2e/%2e%2e/index.html",
+        "/%2e%2e/secret.txt",
+    ):
+        resp = test_client.get(traversal)
+        assert resp.status_code == 404, f"{traversal} → {resp.status_code}"
+        assert "TOP-SECRET" not in resp.text

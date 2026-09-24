@@ -21,12 +21,13 @@ from sqlalchemy import func, select
 from app.core.errors import DomainError
 from app.core.security import hash_password
 from app.database import db_session, init_db
-from app.models.exam import ExamDefinition
+from app.models.exam import ExamDefinition, ExamQuestion
 from app.models.question import Question, QuestionBank
 from app.models.record import ExamSession
 from app.models.user import User
 from app.schemas.question import QuestionBankUpdate
 from app.services import exam_service, question_service
+from app.services.exam.mock import MOCK_KEEP_DEFAULT
 from app.services.paper_service import allocate_quota
 
 
@@ -399,25 +400,56 @@ def test_mock_isolation_across_users():
 
 
 def test_mock_stale_definitions_cleaned():
-    """无作答记录的旧设置定义应被清理，避免 exam_definitions 无界堆积。"""
+    """超出保留上限的旧设置定义，必须连同其未提交会话与固化题目一起被清理。
+
+    原用例只开考 4 次（未超过默认保留数 5），`defs <= 4` 对「完全不清理」同样成立，
+    等于没测。这里刻意开到 8 种不同设置，断言保留数正好等于配置的 keep，并逐条确认
+    被清理的定义、其 in_progress 会话与固化题目都已消失（否则数据仍会无界增长）。
+    """
     init_db()
     with db_session() as db:
         b = _mk_bank(db)
+        # 题库题量必须先满足最大档位，否则 build_mock_spec 会下调题量、多个档位塌缩成同一
+        # 复用键（请求数少于档位数），清理逻辑就测不到了
         _fill(db, b.id, "单选题", 50)
         db.commit()
+        assert db.execute(select(func.count(Question.id)).where(Question.bank_id == b.id)).scalar() == 50
         user = _mk_user()
         db.add(user)
         db.commit()
+
         # 连续用不同设置开考，均不交卷（模拟用户反复调整设置后开考）
-        for size in (10, 20, 30, 40):
-            exam_service.start_mock_exam(db, user, bank_ids=[b.id], size=size)
-        defs = db.execute(
-            select(func.count(ExamDefinition.id)).where(
-                ExamDefinition.type == "mock", ExamDefinition.created_by == user.id
-            )
-        ).scalar()
-        # 有会话的定义会保留（用户可能回去继续答），但不应无限增长且必须远小于累计开考次数
-        assert defs <= 4
+        def_ids: list[int] = []
+        for size in (5, 10, 15, 20, 25, 30, 35, 40):
+            res = exam_service.start_mock_exam(db, user, bank_ids=[b.id], size=size)
+            def_ids.append(db.get(ExamSession, res["session_id"]).exam_definition_id)
+        assert len(set(def_ids)) == 8, "每种设置组合都必须新建定义（复用则本用例无效）"
+
+        kept = set(def_ids[-MOCK_KEEP_DEFAULT:])
+        removed = def_ids[:-MOCK_KEEP_DEFAULT]
+        assert len(removed) == 3
+
+        remaining = {
+            e.id
+            for e in db.execute(
+                select(ExamDefinition).where(ExamDefinition.type == "mock", ExamDefinition.created_by == user.id)
+            ).scalars()
+        }
+        assert remaining == kept, "保留数必须正好等于配置的 mock_keep_definitions"
+        for def_id in removed:
+            assert db.get(ExamDefinition, def_id) is None
+            assert (
+                db.execute(
+                    select(func.count()).select_from(ExamSession).where(ExamSession.exam_definition_id == def_id)
+                ).scalar_one()
+                == 0
+            ), "被清理定义的未提交会话必须一并删除"
+            assert (
+                db.execute(
+                    select(func.count()).select_from(ExamQuestion).where(ExamQuestion.exam_definition_id == def_id)
+                ).scalar_one()
+                == 0
+            ), "被清理定义的固化题目必须一并删除"
 
 
 # ---------- 6. 后台配置下线 & 面板指标 ----------

@@ -258,17 +258,32 @@ def test_delete_user_denied_for_dept_admin():
 
 
 def test_delete_user_cannot_delete_self_or_last_super():
+    """自删与「删掉最后一个超管」都必须 400。
+
+    两条守卫的触发条件不同：自删在 `actor == user_id`，最后一个超管在 `remaining == 0`。
+    原用例两次调用参数完全相同，都停在第一条守卫上 —— `remaining == 0` 分支从未被
+    执行过，删掉它也无人发现。第二条必须用**非目标**操作者驱动：目标之外已无其他
+    超管，删除必须被拒而不是真的删掉。
+    """
     init_db()
     with db_session() as db:
         super_admin = _mk_user("super_admin")
-        db.add(super_admin)
+        actor = _mk_user()  # 非目标操作者：actor == user_id 守卫不会先命中
+        db.add_all([super_admin, actor])
         db.commit()
+
+        # ① 自删
         with pytest.raises((DomainError, HTTPException)) as exc:
             user_service.delete_user(db, super_admin.id, "super_admin", super_admin.id, None)
         assert exc.value.status_code == 400
+        assert "不能删除当前登录账号" in exc.value.detail
+
+        # ② 目标之外没有其他超管 → remaining == 0 → 400
         with pytest.raises((DomainError, HTTPException)) as exc:
-            user_service.delete_user(db, super_admin.id, "super_admin", super_admin.id, None)
-        assert exc.value.status_code == 400  # 唯一超管不可删
+            user_service.delete_user(db, actor.id, "super_admin", super_admin.id, None)
+        assert exc.value.status_code == 400
+        assert "最后一个超级管理员" in exc.value.detail
+        assert db.get(User, super_admin.id) is not None, "最后一个超管必须仍然存在"
 
 
 def test_delete_user_cascades_but_keeps_exam_and_audit():

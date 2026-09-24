@@ -40,7 +40,7 @@ from app.core.security import create_access_token, hash_password
 from app.database import SessionLocal, db_session, get_db, init_db
 from app.main import create_app
 from app.models.exam import ExamDefinition, PaperTemplate
-from app.models.group import Group
+from app.models.group import Group, UserGroup
 from app.models.question import Question, QuestionBank
 from app.models.record import ExamSession
 from app.models.system import AuditLog
@@ -53,6 +53,7 @@ from app.services import (
     group_service,
     paper_service,
     question_service,
+    user_import_service,
     user_service,
 )
 
@@ -209,6 +210,11 @@ def test_authorization_denial_is_logged(caplog):
 
 # ---------- A4 删除分组清理悬空指派 ----------
 def test_delete_group_strips_dangling_assignments():
+    """剔除被删分组；**剔除后会删空时保留悬空 id**（fail-closed）。
+
+    空指派在 `_user_can_access_exam` 里表示「不限（全员可见）」，因此「只指派给被删分组」
+    的考试若被清空 group_ids，会从「仅该分组可见」静默升级为「所有人可见」（已实跑复现）。
+    """
     init_db()
     with db_session() as db:
         root = Group(name="集团", type="部门", parent_id=None)
@@ -239,7 +245,44 @@ def test_delete_group_strips_dangling_assignments():
     with db_session() as db:
         assert db.get(Group, leaf_id) is None
         assert db.get(ExamDefinition, exam_id).group_ids == [root_id], "只应剔除被删分组，其他指派保留"
-        assert db.get(PaperTemplate, tpl_id).group_ids == []
+        assert db.get(PaperTemplate, tpl_id).group_ids == [leaf_id], (
+            "剔除会删空时保留悬空 id：清空即「全员可见」，属 fail-open"
+        )
+
+
+def test_delete_group_does_not_publish_exam_to_everyone():
+    """回归：删除分组不得让「仅指派给该分组」的考试变成全员可见（fail-open 信息泄露）。"""
+    init_db()
+    with db_session() as db:
+        g = Group(name="研发部", type="部门", parent_id=None)
+        db.add(g)
+        db.flush()
+        inside = _mk_user(db, role="user")
+        outside = _mk_user(db, role="user")
+        db.add(UserGroup(user_id=inside.id, group_id=g.id))
+        exam = ExamDefinition(
+            name="仅研发部考试",
+            type="formal",
+            rules={},
+            group_ids=[g.id],
+            status="published",
+            created_by=inside.id,
+        )
+        db.add(exam)
+        db.commit()
+        gid, inside_id, outside_id, exam_id = g.id, inside.id, outside.id, exam.id
+
+    with db_session() as db:
+        assert [e["id"] for e in exam_service.list_available(db, db.get(User, inside_id))] == [exam_id]
+        assert [e["id"] for e in exam_service.list_available(db, db.get(User, outside_id))] == []
+
+    with db_session() as db:
+        group_service.delete_group(db, gid)
+
+    with db_session() as db:
+        assert [e["id"] for e in exam_service.list_available(db, db.get(User, outside_id))] == [], (
+            "删除分组后该考试仍不应对范围外用户可见（原实现会把 group_ids 清空 → 全员可见）"
+        )
 
 
 # ---------- A5 练习作答体积上限 ----------
@@ -458,7 +501,7 @@ def test_import_error_text_is_controlled():
     with db_session() as db:
         admin = _mk_user(db)
         db.commit()
-        res = user_service.import_users(
+        res = user_import_service.import_users(
             db,
             admin.id,
             [{"email": "bad-role@example.com", "role": "root", "password": "pw123456"}],

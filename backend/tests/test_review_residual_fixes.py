@@ -269,19 +269,35 @@ def test_rejected_question_import_does_not_consume_preview():
         assert res.success > 0
 
 
-def test_user_preview_peek_then_consume_survives_role_rejection():
+def test_user_preview_peek_is_non_destructive_before_consume():
+    """peek 不消费预览，consume 才取出；两者返回同一批行。
+
+    原用例名为「survives_role_rejection」却从未触发任何 403 分支（路由的角色校验在
+    api/users.py，不在本层），属名不副实；真正的越权拒绝覆盖见
+    tests/test_admin_import_http_and_audit_scope.py。这里如实验证 peek/consume 语义，
+    并用「含部门管理员行」的数据证明 peek 返回的行足以让路由完成角色判断。
+    """
     init_db()
     with db_session() as db:
         admin = _mk_user(db, "super_admin")
         db.commit()
-        content = user_excel.build_template().getvalue()
+        content = _user_workbook(
+            [
+                ["plain@example.com", "普通", "普通用户", "Abc12345", "正常", ""],
+                ["boss@example.com", "管理员", "部门管理员", "Abc12345", "正常", ""],
+            ]
+        )
         preview = user_excel.preview(content, user_id=admin.id)
         token = preview["confirm_token"]
 
-        # 路由先 peek 做角色校验（此模板含部门管理员行）——peek 不消费
         rows = user_excel.peek_preview(token, admin.id)
-        assert any(str(r.get("role")) == "dept_admin" for r in rows)
+        assert {str(r.get("role")) for r in rows} == {"user", "dept_admin"}
+        # peek 不消费：同一 token 可再次 peek，最终由 consume 取出同一批行
+        assert user_excel.peek_preview(token, admin.id) == rows
         assert user_excel.consume_preview(token, admin.id) == rows
+        with pytest.raises((DomainError, HTTPException)) as exc:
+            user_excel.peek_preview(token, admin.id)
+        assert exc.value.status_code == 400
 
 
 # ---------- ⑤ Excel 健壮性 ----------
@@ -337,11 +353,10 @@ def test_question_import_reports_truncation(monkeypatch):
     with db_session() as db:
         admin = _mk_user(db, "super_admin")
         db.commit()
-        # 截断现在只有一条路径：parse_workbook 的 PARSE_ROW_MAX（原先 import_service
-        # 另有一份 _IMPORT_ROW_MAX 与二次解析，已删除以避免两处口径漂移）。
-        # 需同时 patch 解析侧与 import_service 侧的引用。
+        # 截断只有一条路径：parse_workbook 的 PARSE_ROW_MAX（原先 import_service
+        # 另有一份 _IMPORT_ROW_MAX 与二次解析，已删除以避免两处口径漂移），
+        # 且截断标记由解析器在丢弃数据行处显式置位，不再由 total 反推。
         monkeypatch.setattr("app.utils.excel.PARSE_ROW_MAX", 2)
-        monkeypatch.setattr(import_service, "PARSE_ROW_MAX", 2)
         rows = [[f"题干{i}", "A.甲\nB.乙", "A", "解析", 1, "标签", 2, ""] for i in range(5)]
         preview = import_service.preview(
             db,
@@ -354,6 +369,34 @@ def test_question_import_reports_truncation(monkeypatch):
         )
         assert preview["truncated"] is True
         assert preview["valid_count"] == 2
+
+
+def test_question_import_blank_rows_do_not_consume_row_budget(monkeypatch):
+    """空行不占行数额度，也不得造成「静默丢数据且不报截断」。
+
+    原实现按**物理行** break、却用 `total >= PARSE_ROW_MAX` 反推截断：前置空行时
+    数据行会被静默丢弃且 truncated=False（已实跑复现）。
+    """
+    init_db()
+    with db_session() as db:
+        admin = _mk_user(db, "super_admin")
+        db.commit()
+        monkeypatch.setattr("app.utils.excel.PARSE_ROW_MAX", 2)
+        # 用「仅空白」单元格而非全 None：确保 openpyxl 真的写出这些物理行
+        blank = [["   "] + [None] * 7 for _ in range(5)]
+        data = [[f"题干{i}", "A.甲\nB.乙", "A", "解析", 1, "标签", 2, ""] for i in range(2)]
+        preview = import_service.preview(
+            db,
+            _question_workbook(blank + data),
+            group_id=None,
+            bank_id=None,
+            bank_name="导入库",
+            user_id=admin.id,
+            scope=None,
+        )
+        # 5 个空行 + 恰好 2 条数据行（= 上限）：一条都不该丢，也不该报截断
+        assert preview["valid_count"] == 2
+        assert preview["truncated"] is False
 
 
 # ---------- ⑥ 跨用户 mock 开考 ----------

@@ -236,9 +236,12 @@ def test_audit_logs_are_scoped_for_dept_admin(api):
 
 # ---------- 草稿：每用户条数上限与 actor 标签 ----------
 def test_drafts_are_capped_per_user(api):
-    """草稿条数上限：form_key 由客户端指定，不设上限时认证用户可无界增长 drafts 表。"""
-    from app.services.audit_service import MAX_DRAFTS_PER_USER
+    """草稿条数上限：form_key 由客户端指定，不设上限时认证用户可无界增长 drafts 表。
 
+    边界值刻意写死 50，而不是 `range(MAX_DRAFTS_PER_USER)`：从常量推导边界时，
+    常量被改大（例如 5000）用例会跟着变松、改小会一起变，等于没有对「上限是多少」
+    做出任何断言。这里锁住对外承诺的数值。
+    """
     user = User(
         email="draft-cap@quizhub.com",
         password_hash="x",
@@ -252,7 +255,7 @@ def test_drafts_are_capped_per_user(api):
         db.commit()
         headers = {"Authorization": f"Bearer {create_access_token(user.id, {'ver': user.token_version})}"}
 
-    for i in range(MAX_DRAFTS_PER_USER):
+    for i in range(50):
         assert api.put(f"/api/drafts/form{i}", headers=headers, json={"i": i}).status_code == 200
 
     blocked = api.put("/api/drafts/one-more", headers=headers, json={"i": 1})

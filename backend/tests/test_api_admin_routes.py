@@ -64,6 +64,27 @@ def _seed_admin() -> tuple[int, dict[str, str]]:
         return admin.id, _headers(admin)
 
 
+def _seed_two_depts() -> tuple[dict[str, str], int, int, int]:
+    """集团→{研发部, 市场部}，dept_admin 归属研发部（研发部下还有一个子分组）。
+
+    返回 (dept_admin 请求头, 研发部 id, 市场部 id, 研发一组 id)。
+    """
+    with SessionLocal() as db:
+        root = Group(name="集团", type="部门")
+        db.add(root)
+        db.flush()
+        rd = Group(name="研发部", type="部门", parent_id=root.id)
+        mk = Group(name="市场部", type="部门", parent_id=root.id)
+        db.add_all([rd, mk])
+        db.flush()
+        team = Group(name="研发一组", type="部门", parent_id=rd.id)
+        db.add(team)
+        db.flush()
+        admin = _mk_user(db, "dept-scope@example.com", "dept_admin", dept_group_id=rd.id)
+        db.commit()
+        return _headers(admin), rd.id, mk.id, team.id
+
+
 # ---------- 用户管理 ----------
 def test_admin_user_crud_flow(api):
     init_db()
@@ -142,6 +163,45 @@ def test_dept_admin_scope_limits_user_list(api):
     emails = {item["email"] for item in listed.json()["items"]}
     assert "mine@example.com" in emails
     assert "theirs@example.com" not in emails
+
+
+def test_dept_admin_cannot_create_user_with_out_of_scope_group(api):
+    """dept_admin 新增用户时把 group_ids 指到范围外分组必须 403。
+
+    守卫（`api/users.py::create_user` 的逐项 `gid not in scope`）此前没有任何用例驱动：
+    只在服务层测过导入路径，HTTP 直连新增这条完全没覆盖。
+    """
+    init_db()
+    headers, rd_id, mk_id, _team_id = _seed_two_depts()
+
+    forbidden = api.post(
+        "/api/admin/users",
+        headers=headers,
+        json={
+            "email": "outside@example.com",
+            "name": "越权用户",
+            "role": "user",
+            "password": "pw123456",
+            "group_ids": [mk_id],
+        },
+    )
+    assert forbidden.status_code == 403, forbidden.text
+    # 拒绝必须无副作用：不得留下半个用户
+    assert api.get("/api/admin/users", headers=headers, params={"keyword": "outside"}).json()["total"] == 0
+
+    # 对照：分配到本部门子树内的分组必须放行（否则守卫被写成「一律拒绝」也测不出）
+    ok = api.post(
+        "/api/admin/users",
+        headers=headers,
+        json={
+            "email": "inside@example.com",
+            "name": "本部门用户",
+            "role": "user",
+            "password": "pw123456",
+            "group_ids": [rd_id],
+        },
+    )
+    assert ok.status_code == 201, ok.text
 
 
 # ---------- 题库 / 题目 ----------
@@ -245,6 +305,47 @@ def test_group_create_rejects_invalid_parent_and_type(api):
 
     assert api.post("/api/admin/groups", headers=headers, json={"name": "x", "type": "外星类型"}).status_code == 400
     assert api.post("/api/admin/groups", headers=headers, json={"name": "x", "parent_id": 99999}).status_code == 400
+
+
+def test_dept_admin_cannot_create_group_outside_scope(api):
+    """dept_admin 只能在自己子树内建子分组：范围外父分组与建到根都必须 403。
+
+    `api/groups.py::create` 的 `parent_id is None or parent_id not in scope` 守卫此前
+    零覆盖 —— 删掉它，部门管理员就能在别的部门下挂分组、或直接在根上开一个新部门。
+    """
+    init_db()
+    headers, rd_id, mk_id, _team_id = _seed_two_depts()
+
+    out_of_scope = api.post(
+        "/api/admin/groups", headers=headers, json={"name": "越权子组", "type": "部门", "parent_id": mk_id}
+    )
+    assert out_of_scope.status_code == 403, out_of_scope.text
+
+    at_root = api.post(
+        "/api/admin/groups", headers=headers, json={"name": "越权根组", "type": "部门", "parent_id": None}
+    )
+    assert at_root.status_code == 403, at_root.text
+
+    # 对照：子树内建子分组必须放行（否则守卫被写成「一律拒绝」也测不出）
+    inside = api.post(
+        "/api/admin/groups", headers=headers, json={"name": "本部门子组", "type": "部门", "parent_id": rd_id}
+    )
+    assert inside.status_code == 201, inside.text
+
+
+def test_dept_admin_cannot_delete_out_of_scope_group(api):
+    """dept_admin 删除范围外分组必须 403，范围内分组 204。"""
+    init_db()
+    headers, _rd_id, mk_id, team_id = _seed_two_depts()
+
+    forbidden = api.delete(f"/api/admin/groups/{mk_id}", headers=headers)
+    assert forbidden.status_code == 403, forbidden.text
+    # 拒绝必须无副作用：市场部必须还在
+    with SessionLocal() as db:
+        assert db.get(Group, mk_id) is not None
+
+    # 对照：范围内分组可删（否则守卫被写成「一律拒绝」也测不出）
+    assert api.delete(f"/api/admin/groups/{team_id}", headers=headers).status_code == 204
 
 
 # ---------- 系统设置 ----------

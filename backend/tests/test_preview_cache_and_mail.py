@@ -77,6 +77,10 @@ def test_cache_put_evicts_expired_first(fake_time):
     fake_time.now += 6
     cache.put("new", 2)
 
+    # 容量远未到上限（maxsize=4），此刻唯一可能被清掉的就是过期项 —— 必须在这里
+    # 就观察到淘汰结果；否则「写入时清理过期项」整段删掉也照样通过（后面的
+    # take("old") 返回 None 只是 take 自身的惰性过期行为，与被测分支无关）。
+    assert len(cache) == 1
     assert cache.take("old") is None
     assert cache.take("new") == (2, 0.0)
 

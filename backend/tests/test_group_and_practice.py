@@ -188,14 +188,14 @@ def test_list_modes_counts_only_enabled_banks():
         assert closed.value.status_code == 403
 
 
-def test_start_practice_modes_and_guards():
+def test_start_practice_modes_and_guards(monkeypatch):
     init_db()
     with db_session() as db:
         open_bank = _mk_bank(db, "开放库")
         closed_bank = _mk_bank(db, "仅考试库", enabled=False)
         user = _mk_user(db)
         q1 = _mk_question(db, open_bank, text="题1")
-        _mk_question(db, open_bank, qtype="判断题", answer="正确", text="题2")
+        q_judge = _mk_question(db, open_bank, qtype="判断题", answer="正确", text="题2")
         q_closed = _mk_question(db, closed_bank, text="关闭题")
         db.add(QuestionState(user_id=user.id, question_id=q1.id, status="wrong", marked=True, marked_note="重点复习"))
         db.commit()
@@ -214,9 +214,7 @@ def test_start_practice_modes_and_guards():
         sequence_rows = practice_service.start_practice(db, user.id, "sequence", None, 10)
         unmarked = next(r for r in sequence_rows if r["id"] != q1.id)
         assert unmarked["marked"] is False and unmarked["marked_note"] == ""
-        # limit 超过上限时被钳制，而不是无界返回
-        assert len(practice_service.start_practice(db, user.id, "sequence", None, 10**9)) == 2
-        # 指定题库范围
+        # 指定题库范围（此时 open_bank 恰好 2 题，仅作为「不越界」的冒烟）
         assert len(practice_service.start_practice(db, user.id, "sequence", None, 10, open_bank.id)) == 2
 
         with pytest.raises((DomainError, HTTPException)) as bad_mode:
@@ -230,7 +228,28 @@ def test_start_practice_modes_and_guards():
         with pytest.raises((DomainError, HTTPException)) as closed:
             practice_service.start_practice(db, user.id, "sequence", None, 10, closed_bank.id)
         assert closed.value.status_code == 403
-        assert q_closed.id  # 关闭题库的题不可达
+
+        # ---------- 范围隔离与 limit 钳制 ----------
+        # 必须再开一个题库：此前「全库只有 1 个开放题库」，`按 bank_id 收敛` 与
+        # `忽略 bank_id 返回全部开放题库` 两种实现都能让旧断言通过；limit 钳制同理，
+        # 题库恰好 2 题时「钳到 500」和「返回全部」无法区分。
+        bank2 = _mk_bank(db, "第二开放库")
+        q2a = _mk_question(db, bank2, text="库2题1")
+        q2b = _mk_question(db, bank2, qtype="判断题", answer="正确", text="库2题2")
+        db.commit()
+
+        drawn = {q["id"] for q in practice_service.start_practice(db, user.id, "sequence", None, 10)}
+        assert drawn == {q1.id, q_judge.id, q2a.id, q2b.id}
+        assert q_closed.id not in drawn, "关闭题库的题在任何模式下都不可达"
+
+        only_bank2 = {q["id"] for q in practice_service.start_practice(db, user.id, "sequence", None, 10, bank2.id)}
+        assert only_bank2 == {q2a.id, q2b.id}, "指定 bank_id 必须真的收敛到该题库"
+        only_open = {q["id"] for q in practice_service.start_practice(db, user.id, "sequence", None, 10, open_bank.id)}
+        assert only_open == {q1.id, q_judge.id}, "其它开放题库的题不得混入"
+
+        # limit 超过上限时钳制到 PRACTICE_LIMIT_MAX（刻意调小，才能与题库实际题量区分开）
+        monkeypatch.setattr(practice_service, "PRACTICE_LIMIT_MAX", 2)
+        assert len(practice_service.start_practice(db, user.id, "sequence", None, 10**9)) == 2
 
 
 def test_answer_question_grading_and_state_transitions():

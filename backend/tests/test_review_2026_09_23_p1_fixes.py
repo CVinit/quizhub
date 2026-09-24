@@ -30,7 +30,15 @@ from app.models.exam import ExamDefinition
 from app.models.group import Group
 from app.models.question import Question, QuestionBank
 from app.models.user import User
-from app.services import auth_service, exam_service, import_service, question_service, stats_service, user_service
+from app.services import (
+    auth_service,
+    exam_service,
+    import_service,
+    question_service,
+    stats_service,
+    user_import_service,
+    user_service,
+)
 from app.utils.excel import HEADERS
 
 
@@ -169,7 +177,9 @@ def test_import_users_assigns_actor_department():
                 "group_ids": [],
             }
         ]
-        res = user_service.import_users(db, admin.id, rows, scope={rd.id}, actor_role="dept_admin", dept_group_id=rd.id)
+        res = user_import_service.import_users(
+            db, admin.id, rows, scope={rd.id}, actor_role="dept_admin", dept_group_id=rd.id
+        )
         assert res["success"] == 1
 
         created = db.execute(select(User).where(User.email == "imported@quizhub.com")).scalar_one()

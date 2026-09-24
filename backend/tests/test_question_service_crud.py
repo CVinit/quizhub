@@ -176,6 +176,20 @@ def test_delete_bank_cleans_questions_and_practice_data():
 
         assert db.get(Question, qid) is None
         assert db.get(QuestionBank, bank_id) is None
+        # 删库必须连带清掉引用这些题目的练习记录与掌握度：原用例种了这两类数据却从不断言，
+        # 清理逻辑被删掉也发现不了（与单题删除的 test_delete_question_cleans_practice_data 同口径）
+        assert (
+            db.execute(
+                select(func.count()).select_from(PracticeRecord).where(PracticeRecord.question_id == qid)
+            ).scalar_one()
+            == 0
+        )
+        assert (
+            db.execute(
+                select(func.count()).select_from(QuestionState).where(QuestionState.question_id == qid)
+            ).scalar_one()
+            == 0
+        )
 
 
 # ---------- 题目创建校验 ----------

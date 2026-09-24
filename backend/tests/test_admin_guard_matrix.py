@@ -37,10 +37,17 @@ ADMIN_ONLY: list[tuple[str, str, dict | None]] = [
 ]
 
 # require_super：部门管理员必须被拒
+#
+# 说明：带文件/请求体的路由在「放行」用例里会因为没带 body 而得到 422/404，
+# 这是预期的 —— 本矩阵只关心鉴权层是否拦住了（401/403）与是否触发 5xx。
 SUPER_ONLY: list[tuple[str, str, dict | None]] = [
     ("GET", "/api/admin/exam-templates", None),
+    ("POST", "/api/admin/exam-templates", None),
+    ("POST", "/api/admin/exam-templates/preview-paper", None),
+    ("DELETE", "/api/admin/exam-templates/999999", None),
     ("GET", "/api/system/settings", None),
     ("GET", "/api/system/categories", None),
+    ("POST", "/api/system/logo", None),
     ("POST", "/api/admin/panel/refresh", None),
     ("PUT", "/api/system/settings", {"category": "general", "updates": {"site_name": "站点"}}),
     ("POST", "/api/system/smtp/test", {"to_email": "someone@example.com"}),
@@ -115,6 +122,8 @@ def test_admin_routes_reject_normal_user(api, headers, method, path, body):
 def test_dept_admin_allowed_on_admin_routes(api, headers, method, path, body):
     resp = api.request(method, path, json=body, headers=headers["dept_admin"])
     assert resp.status_code != 403, f"dept_admin 不应被 require_admin 拦住：{method} {path}"
+    # 「放行」不能只是「不是 403」：服务端 500 同样满足上一个断言
+    assert resp.status_code < 500, f"dept_admin 不应触发服务端错误：{method} {path} → {resp.status_code}"
 
 
 @pytest.mark.parametrize(("method", "path", "body"), SUPER_ONLY)
@@ -127,3 +136,4 @@ def test_dept_admin_blocked_on_super_routes(api, headers, method, path, body):
 def test_super_admin_not_blocked(api, headers, method, path, body):
     resp = api.request(method, path, json=body, headers=headers["super_admin"])
     assert resp.status_code not in (401, 403), f"super_admin 被误拦：{method} {path} → {resp.status_code}"
+    assert resp.status_code < 500, f"super_admin 不应触发服务端错误：{method} {path} → {resp.status_code}"

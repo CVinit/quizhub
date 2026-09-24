@@ -241,8 +241,10 @@ def test_verify_email_legacy_flow():
         )
         db.commit()
 
-        with pytest.raises((DomainError, HTTPException)):
+        with pytest.raises((DomainError, HTTPException)) as wrong_code:
             auth_service.verify_email(db, "old@example.com", "000000")
+        # 必须断言状态码：只断言「抛了某个异常」时，把 400 改成 500 或换成别的校验分支都测不出来
+        assert wrong_code.value.status_code == 400
 
         auth_service.verify_email(db, "old@example.com", "654321")
         user = db.execute(select(User).where(User.email == "old@example.com")).scalar_one()

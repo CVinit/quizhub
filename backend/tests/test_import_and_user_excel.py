@@ -18,7 +18,7 @@ from app.database import db_session, init_db
 from app.models.group import Group
 from app.models.question import Question
 from app.models.user import User
-from app.services import import_service, user_service
+from app.services import import_service, user_import_service
 from app.utils import user_excel
 from app.utils.excel import HEADERS, SHEET_ORDER
 
@@ -181,16 +181,26 @@ def test_question_import_rejects_non_xlsx_magic_bytes():
 
 
 # ---------- 用户 Excel ----------
-def test_user_template_preview_and_consume_strips_plaintext_password():
+def test_user_template_samples_are_not_importable_and_password_is_hashed_before_caching():
+    """模板示例行不得可导入；真实行的明文口令在暂存前就换成 bcrypt 哈希。
+
+    原用例断言「模板第 2 行（示例）可导入」，而那正是漏洞：示例行是
+    `lisi@example.com / 部门管理员 / Abc@12345`，管理员不删示例就会建出一个口令写在
+    模板文件里的管理员账号。现在示例行带 EXAMPLE_PREFIX 被跳过，且示例口令留空作为第二道防线。
+    """
     init_db()
     with db_session() as db:
         admin = _admin(db)
         db.commit()
 
-        content = user_excel.build_template().getvalue()
-        preview = user_excel.preview(content, user_id=admin.id)
+        # 模板本身没有任何可导入的行（两行示例都被跳过）
+        template_preview = user_excel.preview(user_excel.build_template().getvalue(), user_id=admin.id)
+        assert template_preview["valid_count"] == 0
+        assert template_preview["errors"] == []
 
-        # 模板首行示例口令为空 → invalid；次行为部门管理员
+        # 真实数据行：明文口令不进入缓存，只留 bcrypt 哈希
+        content = _user_workbook([["zhangsan@example.com", "张三", "普通用户", "Abc12345", "正常", ""]])
+        preview = user_excel.preview(content, user_id=admin.id)
         assert preview["valid_count"] == 1
         assert all("password" not in row for row in preview["rows"])
 
@@ -199,7 +209,7 @@ def test_user_template_preview_and_consume_strips_plaintext_password():
         assert rows[0]["password"] == ""  # 明文不留在缓存里
         assert rows[0]["password_hash"]
 
-        created = user_service.import_users(db, admin.id, rows, scope=None, actor_role="super_admin")
+        created = user_import_service.import_users(db, admin.id, rows, scope=None, actor_role="super_admin")
         assert created["success"] == 1
         assert created["failed"] == 0
 
@@ -245,7 +255,7 @@ def test_user_excel_normalizes_role_status_and_group_ids():
         assert rows[0]["email"] == "a@example.com"
 
         # 非超管不得导入管理员账号（垂直越权防护）
-        created = user_service.import_users(db, admin.id, rows, scope=None, actor_role="user")
+        created = user_import_service.import_users(db, admin.id, rows, scope=None, actor_role="user")
         assert created["success"] == 0
         assert created["failed"] == 1
 

@@ -36,7 +36,7 @@ from app.models.record import (
 from app.models.stats import StatsUserDaily
 from app.models.user import User
 from app.schemas.auth import LoginIn, RegisterIn, SendCodeIn
-from app.services import auth_service, practice_service, review_service, stats_service
+from app.services import auth_service, exam_service, practice_service, review_service, stats_service
 
 # ---------- 1. 邮箱大小写归一 ----------
 
@@ -141,7 +141,17 @@ def test_list_modes_rejects_disabled_bank():
 
 
 def test_mock_exam_lookup_scoped_by_owner():
-    """模拟考试定义查询必须按 created_by 收敛，否则所有用户共用同一套题。"""
+    """模拟考试定义不得出现在任何用户的「可用考试」列表里。
+
+    原用例自己拼了一条 `select(...).where(created_by == owner.id)` 再断言自己的种子：
+    全程没有调用任何生产代码，删掉生产守卫它照样通过（典型的 vacuous test）。
+
+    `start_exam` 上的 created_by 收敛（他人开考 → 404）已由
+    test_review_residual_fixes.py::test_cannot_start_another_users_mock_exam 覆盖，
+    这里改走**另一个生产入口** `list_available`：它是用户获取可参加考试的唯一来源，
+    若 mock 定义漏进该列表，用户 A 的自助模拟考就会出现在用户 B 的列表里，
+    B 可直接按 id 开考并复用 A 的固化卷面（定义本身没有 group_ids 约束）。
+    """
     with SessionLocal() as db:
         owner = User(email="o@x.com", password_hash="h", name="O", role="user", status="active", email_verified=True)
         other = User(email="t@x.com", password_hash="h", name="T", role="user", status="active", email_verified=True)
@@ -149,23 +159,24 @@ def test_mock_exam_lookup_scoped_by_owner():
         db.flush()
         mine = ExamDefinition(name="mock-owner", type="mock", rules={}, status="ongoing", created_by=owner.id)
         theirs = ExamDefinition(name="mock-other", type="mock", rules={}, status="ongoing", created_by=other.id)
-        db.add_all([mine, theirs])
+        # 对照：同状态、同样未指派分组的正式考试必须正常出现，否则「列表恒空」也会让断言通过
+        formal = ExamDefinition(
+            name="正式考试",
+            type="formal",
+            rules={},
+            group_ids=None,
+            duration_min=60,
+            pass_score=60,
+            status="published",
+            created_by=owner.id,
+        )
+        db.add_all([mine, theirs, formal])
         db.commit()
 
-        found = (
-            db.execute(
-                select(ExamDefinition).where(
-                    ExamDefinition.type == "mock",
-                    ExamDefinition.status == "ongoing",
-                    ExamDefinition.created_by == owner.id,
-                )
-            )
-            .scalars()
-            .first()
-        )
-        assert found is not None
-        assert found.id == mine.id
-        assert found.id != theirs.id
+        for user in (owner, other):
+            listed = {e["id"] for e in exam_service.list_available(db, user)}
+            assert listed == {formal.id}, f"{user.email} 的可用考试列表只应含正式考试"
+            assert mine.id not in listed and theirs.id not in listed
 
 
 # ---------- 4. 简答复核成绩封顶 ----------

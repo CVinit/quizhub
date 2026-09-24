@@ -67,9 +67,10 @@ def test_generate_paper_seed_reproducible():
 def test_generate_paper_quota_exceeds_pool():
     _seed_questions()
     with db_session() as db:
-        # 默认 max_questions=100，不足时取实际池容量（10道单选）
+        # 默认 max_questions=100，配额超出题库时取实际池容量。
+        # 断言必须精确到 10：`<= 10` 对「组卷少出题/返回空卷」同样成立，发现不了回归。
         paper = generate_paper(db, {"type_quota": {"单选题": 100}})
-        assert paper["count"] <= 10
+        assert paper["count"] == 10
 
 
 def test_generate_paper_max_questions_limit():

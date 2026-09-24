@@ -17,7 +17,7 @@ from sqlalchemy import select
 from app.core.errors import DomainError
 from app.core.security import hash_password
 from app.database import db_session, init_db
-from app.models.exam import ExamDefinition
+from app.models.exam import ExamDefinition, ExamQuestion
 from app.models.question import Question, QuestionBank
 from app.models.record import ExamResult, ShortAnswerReview
 from app.models.user import User
@@ -167,6 +167,10 @@ def test_exam_results_outcome_filter():
 
         assert len(exam_service.list_results(db, exam.id, None, 500, None)) == 3
         assert len(exam_service.list_results(db, exam.id, None, 500, "passed")) == 1
+        # 「不及格」**刻意包含**未公布/待复核的成绩（产品决策 2026-09-24 确认）：`passed`
+        # 只在公布时被置 True，「尚未公布」在业务上等价于「当前不算通过」，与 pending 的
+        # 重叠是有意为之（管理员要一屏看到所有目前未通过的人）。
+        # 若日后改为只统计已公布的不及格，这里应变成 1，并同步 list_results 的 docstring。
         assert len(exam_service.list_results(db, exam.id, None, 500, "failed")) == 2
         assert len(exam_service.list_results(db, exam.id, None, 500, "pending")) == 1
         assert len(exam_service.list_results(db, exam.id, None, 500, "published")) == 2
@@ -226,6 +230,9 @@ def test_review_list_verdict_filter():
         )
         db.add(result)
         db.flush()
+        # 卷面分值刻意与 Question.score(2) 不同：列表的 score 必须取「该题在本场考试中的
+        # 固化分值」，没有 ExamQuestion 行时才会回落到题目自身分值 —— 不给行等于只测了兜底分支。
+        db.add(ExamQuestion(exam_definition_id=exam.id, question_id=q.id, seq=0, score=7))
         _mk_review(db, result.id, student.id, q.id, None)
         _mk_review(db, result.id, student.id, q.id, "pass")
         _mk_review(db, result.id, student.id, q.id, "fail")
@@ -241,9 +248,9 @@ def test_review_list_verdict_filter():
         # 已复核项需带上结论字段，供前端只读展示
         done = review_service.list_pending(db, None, 500, "done")
         assert all(r["verdict"] in ("pass", "fail") for r in done)
-        # 「部分得分」上限必须用该题分值校验（前端硬编码会超分/给不满）
-        assert all(r["score"] == 2 for r in done)
-        assert review_service.list_pending(db, None, 500, "pending")[0]["score"] == 2
+        # 「部分得分」上限必须用该题在本场考试中的固化分值校验（前端硬编码会超分/给不满）
+        assert all(r["score"] == 7 for r in done)
+        assert review_service.list_pending(db, None, 500, "pending")[0]["score"] == 7
 
 
 def test_review_still_rejects_double_review():
@@ -284,6 +291,10 @@ def test_review_still_rejects_double_review():
         )
         db.add(result)
         db.flush()
+        # 必须补上该题在本场考试中的卷面行：`review()` 先查 `_get_exam_question_score`，
+        # 查不到时会先抛 400「复核题目不属于该考试」，根本走不到「该题已复核」守卫
+        # （原用例因此是在断言另一个分支，删掉重复复核守卫也照样通过）。
+        db.add(ExamQuestion(exam_definition_id=exam.id, question_id=q.id, seq=0, score=2))
         r = _mk_review(db, result.id, student.id, q.id, "pass")
         db.commit()
 
@@ -292,6 +303,7 @@ def test_review_still_rejects_double_review():
             raise AssertionError("已复核项被重复复核")
         except (DomainError, HTTPException) as exc:
             assert exc.status_code == 400
+            assert "该题已复核" in exc.detail
 
 
 def test_review_list_verdict_unknown_value_returns_empty():

@@ -29,7 +29,7 @@ from app.models.question import Question, QuestionBank
 from app.models.record import PracticeRecord, QuestionState
 from app.models.stats import StatsUserDaily
 from app.models.user import User
-from app.services import practice_service, stats_service, user_service
+from app.services import practice_service, stats_service, user_import_service, user_service
 from app.utils import user_excel
 
 
@@ -280,7 +280,7 @@ def test_import_users_isolates_existing_email_and_ignores_unknown_group():
                 "group_ids": [group.id, 999999],
             },
         ]
-        res = user_service.import_users(db, actor.id, rows, scope=None, actor_role="super_admin")
+        res = user_import_service.import_users(db, actor.id, rows, scope=None, actor_role="super_admin")
 
         assert res["success"] == 1
         assert res["failed"] == 1

@@ -8,7 +8,7 @@
 from __future__ import annotations
 
 import secrets
-from datetime import datetime, timezone
+from datetime import datetime
 
 import pytest
 from fastapi import HTTPException
@@ -144,8 +144,13 @@ def test_source_change_with_confirmation_resets_and_refreezes():
     init_db()
     with db_session() as db:
         _admin, student, exam, _session = _seed_exam_with_attempt(db, quota=2, pool=4)
-        # 先让当日统计包含这场成绩，验证作废后会重算
-        today = stats_service._date_str(datetime.now(timezone.utc))
+        # 先让当日统计包含这场成绩，验证作废后会重算。
+        # 日期必须由「成绩落库时刻」推导，而不是取跑断言时的墙上时间：交卷写库与断言之间
+        # 若跨过业务日边界（UTC 16:00 = 北京次日 0 点），两者会落在不同日期，用例随机失败。
+        created_at = db.execute(
+            select(ExamResult.created_at).where(ExamResult.exam_definition_id == exam.id)
+        ).scalar_one()
+        today = stats_service._date_str(datetime.fromisoformat(created_at))
         stats_service.refresh_daily(db, today)
         assert _count(db, StatsUserDaily, date=today) == 1
 

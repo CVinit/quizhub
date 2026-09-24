@@ -245,3 +245,158 @@ def test_email_collation_is_idempotent(tmp_path: Path):
     assert conn.execute("SELECT COUNT(*) FROM users").fetchone()[0] == 3
     assert conn.execute("PRAGMA integrity_check").fetchall() == [("ok",)]
     conn.close()
+
+
+# ---------- stats_user_daily 迁移：schema 演进后的可重跑性 ----------
+_STATS_SCRIPT_0918 = Path(__file__).resolve().parent.parent / "scripts" / "migrate_2026_09_18.py"
+_STATS_SCRIPT_0923 = Path(__file__).resolve().parent.parent / "scripts" / "migrate_2026_09_23_stats_exam_columns.py"
+# 09_23 迁移会移除的三列；历史库有、重建后的库没有
+_LEGACY_STATS_COLUMNS = (
+    "exam_count INTEGER NOT NULL DEFAULT 0, exam_score_sum FLOAT NOT NULL DEFAULT 0,"
+    " exam_pass_count INTEGER NOT NULL DEFAULT 0"
+)
+
+
+def _load_script(path: Path, name: str):
+    spec = importlib.util.spec_from_file_location(name, path)
+    assert spec and spec.loader
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[name] = mod
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def _run_migration(mod, db_path: Path) -> None:
+    """执行迁移 main()；脚本失败路径是 sys.exit(1)，此处直接让用例失败。"""
+    mod.DB_PATH = db_path
+    sys.argv = ["migrate"]
+    try:
+        mod.main()
+    except SystemExit as exc:
+        pytest.fail(f"迁移不应失败，但退出码为 {exc.code}")
+
+
+def _make_stats_db(path: Path, *, legacy_columns: bool, named_indexes: bool = False, rows: int = 3) -> None:
+    """构造 stats_user_daily：可选带考试类聚合列与既有命名索引。"""
+    conn = sqlite3.connect(str(path))
+    extra = (", " + _LEGACY_STATS_COLUMNS) if legacy_columns else ""
+    conn.execute(
+        "CREATE TABLE stats_user_daily ("
+        "id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, date VARCHAR NOT NULL,"
+        "group_id INTEGER, answer_count INTEGER NOT NULL DEFAULT 0,"
+        "correct_count INTEGER NOT NULL DEFAULT 0, wrong_count INTEGER NOT NULL DEFAULT 0"
+        + extra
+        + ", CONSTRAINT uq_user_daily UNIQUE (user_id, date, group_id))"
+    )
+    if named_indexes:
+        conn.execute("CREATE INDEX ix_stats_date_user ON stats_user_daily (date, user_id)")
+    for i in range(1, rows + 1):
+        conn.execute(
+            "INSERT INTO stats_user_daily (user_id, date, group_id, answer_count, correct_count, wrong_count)"
+            " VALUES (?, '2026-09-01', NULL, ?, 1, 0)",
+            (i, i),
+        )
+    conn.commit()
+    conn.close()
+
+
+def test_09_18_runs_after_exam_columns_were_removed(tmp_path: Path):
+    """09_18 必须容忍「考试类聚合列已被 09_23 移除」的 schema。
+
+    原实现把 exam_count / exam_score_sum / exam_pass_count 硬编码进合并 UPDATE：首次启动
+    （列还在）正常，09_23 删列后**第二次启动**即抛 `no such column: exam_count` → 迁移失败；
+    entrypoint 用 `set -e`，容器直接起不来（实跑复现）。
+    """
+    m = _load_script(_STATS_SCRIPT_0918, "migrate_2026_09_18")
+    db = tmp_path / "stats_no_exam_cols.db"
+    _make_stats_db(db, legacy_columns=False, rows=2)
+    conn = sqlite3.connect(str(db))
+    conn.execute(
+        "INSERT INTO stats_user_daily (user_id, date, group_id, answer_count, correct_count, wrong_count)"
+        " VALUES (1, '2026-09-01', NULL, 5, 2, 1)"
+    )
+    conn.commit()
+    conn.close()
+
+    _run_migration(m, db)
+
+    conn = sqlite3.connect(str(db))
+    rows = conn.execute(
+        "SELECT id, answer_count FROM stats_user_daily WHERE user_id = 1 AND date = '2026-09-01'"
+    ).fetchall()
+    assert len(rows) == 1, "重复行应被合并为一行"
+    assert rows[0][1] == 6, "计数应累加而不是丢弃"
+    names = {
+        r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='stats_user_daily'")
+    }
+    assert "uq_user_daily_ungrouped" in names
+    conn.close()
+
+
+def test_09_18_merges_and_sums_on_legacy_schema(tmp_path: Path):
+    """历史 schema（带考试类聚合列）下仍按列累加，且可重复执行。"""
+    m = _load_script(_STATS_SCRIPT_0918, "migrate_2026_09_18")
+    db = tmp_path / "stats_legacy.db"
+    _make_stats_db(db, legacy_columns=True, rows=0)
+    conn = sqlite3.connect(str(db))
+    conn.execute(
+        "INSERT INTO stats_user_daily (user_id, date, group_id, answer_count, exam_count)"
+        " VALUES (1, '2026-09-01', NULL, 1, 2)"
+    )
+    conn.execute(
+        "INSERT INTO stats_user_daily (user_id, date, group_id, answer_count, exam_count)"
+        " VALUES (1, '2026-09-01', NULL, 3, 4)"
+    )
+    conn.commit()
+    conn.close()
+
+    _run_migration(m, db)
+    _run_migration(m, db)  # 幂等
+
+    conn = sqlite3.connect(str(db))
+    row = conn.execute("SELECT COUNT(*), SUM(answer_count), SUM(exam_count) FROM stats_user_daily").fetchone()
+    assert row == (1, 4, 6), row
+    conn.close()
+
+
+def test_09_23_stats_rebuild_preserves_rows_and_indexes(tmp_path: Path):
+    """重建 stats_user_daily：保留数据、删除考试列、按模型重建索引。
+
+    回归点：`ALTER TABLE … RENAME` 会把原索引名带到 old 表上，若在 DROP old 之前建同名
+    索引会抛 `index ix_stats_date_user already exists`（实跑复现）。
+    """
+    m = _load_script(_STATS_SCRIPT_0923, "migrate_2026_09_23_stats_exam_columns")
+    db = tmp_path / "stats_rebuild.db"
+    _make_stats_db(db, legacy_columns=True, named_indexes=True, rows=3)
+
+    _run_migration(m, db)
+
+    conn = sqlite3.connect(str(db))
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(stats_user_daily)")}
+    assert not (cols & {"exam_count", "exam_score_sum", "exam_pass_count"}), cols
+    assert conn.execute("SELECT COUNT(*) FROM stats_user_daily").fetchone()[0] == 3, "数据必须保留"
+    names = {
+        r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='stats_user_daily'")
+    }
+    assert {"ix_stats_date_user", "uq_user_daily_ungrouped"} <= names, names
+    assert conn.execute("PRAGMA integrity_check").fetchall() == [("ok",)]
+    conn.close()
+
+
+def test_09_23_stats_recovers_interrupted_rebuild(tmp_path: Path):
+    """中断在「已 RENAME、未回填」之间时，重跑必须恢复数据而不是报「无需处理」。"""
+    m = _load_script(_STATS_SCRIPT_0923, "migrate_2026_09_23_stats_exam_columns")
+    db = tmp_path / "stats_interrupted.db"
+    _make_stats_db(db, legacy_columns=True, rows=3)
+    conn = sqlite3.connect(str(db))
+    conn.execute("ALTER TABLE stats_user_daily RENAME TO stats_user_daily_old")
+    conn.commit()
+    conn.close()
+
+    _run_migration(m, db)
+
+    conn = sqlite3.connect(str(db))
+    assert conn.execute("SELECT COUNT(*) FROM stats_user_daily").fetchone()[0] == 3, "数据必须被恢复"
+    leftover = conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='stats_user_daily_old'").fetchone()
+    assert leftover is None, "恢复后不应残留 old 表"
+    conn.close()
